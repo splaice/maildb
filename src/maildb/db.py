@@ -19,9 +19,18 @@ def create_pool(config: Settings) -> ConnectionPool:
 
 
 def init_db(pool: ConnectionPool) -> None:
-    """Apply idempotent DDL from schema.sql."""
-    schema_sql = importlib.resources.files("maildb").joinpath("schema.sql").read_text()
+    """Apply idempotent table DDL from schema_tables.sql."""
+    schema_sql = importlib.resources.files("maildb").joinpath("schema_tables.sql").read_text()
     with pool.connection() as conn:
         conn.execute(schema_sql)
         conn.commit()
     logger.info("database_initialized")
+
+
+def create_indexes(pool: ConnectionPool) -> None:
+    """Apply all non-unique indexes from schema_indexes.sql."""
+    index_sql = importlib.resources.files("maildb").joinpath("schema_indexes.sql").read_text()
+    with pool.connection() as conn:
+        conn.execute(index_sql)
+        conn.commit()
+    logger.info("indexes_created")

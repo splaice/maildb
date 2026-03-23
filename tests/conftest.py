@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from maildb.config import Settings
-from maildb.db import create_pool, init_db
+from maildb.db import create_indexes, create_pool, init_db
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -28,6 +28,7 @@ def test_settings() -> Settings:
 def test_pool(test_settings: Settings):  # type: ignore[no-untyped-def]
     pool = create_pool(test_settings)
     init_db(pool)
+    create_indexes(pool)  # Tests need indexes
     yield pool
     pool.close()
 
@@ -40,5 +41,8 @@ def _clean_emails(test_pool, request) -> Iterator[None]:  # type: ignore[no-unty
         return
     yield
     with test_pool.connection() as conn:
+        conn.execute("DELETE FROM email_attachments")
+        conn.execute("DELETE FROM attachments")
+        conn.execute("DELETE FROM ingest_tasks")
         conn.execute("DELETE FROM emails")
         conn.commit()

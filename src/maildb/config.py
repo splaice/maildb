@@ -12,3 +12,9 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
     user_email: str | None = None
+    attachment_dir: str = "./attachments"
+    ingest_chunk_size_mb: int = 50
+    ingest_tmp_dir: str = "./ingest_tmp"
+    ingest_workers: int = -1
+    embed_workers: int = 4
+    embed_batch_size: int = 50
