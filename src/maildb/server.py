@@ -181,10 +181,13 @@ def unreplied(
     before: str | None = None,
     sender: str | None = None,
     sender_domain: str | None = None,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Find inbound emails that have no outbound reply in the same thread."""
     db = _get_db(ctx)
-    results = db.unreplied(after=after, before=before, sender=sender, sender_domain=sender_domain)
+    results = db.unreplied(
+        after=after, before=before, sender=sender, sender_domain=sender_domain, limit=limit
+    )
     return [_serialize_email(e) for e in results]
 
 

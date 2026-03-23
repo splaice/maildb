@@ -387,7 +387,7 @@ class MailDB:
             raise ValueError(msg)
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC"
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT 500"
 
         rows = _query_dicts(self._pool, sql, params)
         if not rows:
@@ -443,6 +443,7 @@ class MailDB:
         before: str | None = None,
         sender: str | None = None,
         sender_domain: str | None = None,
+        limit: int = 100,
     ) -> list[Email]:
         """Inbound messages with no outbound reply in the same thread."""
         user_email = self._require_user_email()
@@ -473,6 +474,7 @@ class MailDB:
             e.attachments, e.labels, e.in_reply_to, e."references", e.embedding, e.created_at
         """
 
+        params["limit"] = limit
         sql = f"""
             SELECT {select_cols_aliased}
             FROM emails e
@@ -484,6 +486,7 @@ class MailDB:
                     AND reply.date > e.date
               )
             ORDER BY e.date DESC
+            LIMIT %(limit)s
         """
 
         rows = _query_dicts(self._pool, sql, params)

@@ -433,6 +433,13 @@ def test_top_contacts_with_period(test_pool, seed_advanced) -> None:  # type: ig
     assert carol["count"] == 1
 
 
+def test_unreplied_respects_limit(test_pool, seed_advanced) -> None:
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results = db.unreplied(limit=1)
+    assert len(results) <= 1
+
+
 def test_search_results_ordered_by_similarity(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     """Search results should be ordered by descending similarity."""
     mock_ec = MagicMock()
