@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.5",
     "beautifulsoup4>=4.12",
     "structlog>=24.4",
+    "mcp>=1.26.0",
 ]
 
 [dependency-groups]
@@ -82,6 +83,7 @@ max-complexity = 12
     "ARG001",  # unused fixture args are side-effect fixtures
     "SLF001",  # accessing private test helpers is fine
     "PLR2004", # magic values in assertions are fine
+    "S108",    # /tmp paths in test data are not real temp file operations
 ]
 "src/maildb/maildb.py" = ["S608"]  # SQL construction is safe (parameterized)
 "tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
