@@ -1,6 +1,7 @@
 # src/maildb/maildb.py
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -112,10 +113,7 @@ class MailDB:
     ) -> list[Email]:
         """Structured query with dynamic WHERE clauses."""
         if order not in VALID_ORDERS:
-            msg = (
-                f"Invalid order '{order}'. "
-                f"Must be one of: {', '.join(sorted(VALID_ORDERS))}"
-            )
+            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
             raise ValueError(msg)
 
         conditions: list[str] = []
@@ -133,7 +131,7 @@ class MailDB:
                 "OR recipients->'cc' @> %(recipient_json)s "
                 "OR recipients->'bcc' @> %(recipient_json)s)"
             )
-            params["recipient_json"] = f'["{recipient}"]'
+            params["recipient_json"] = json.dumps([recipient])
         if after is not None:
             conditions.append("date >= %(after)s")
             params["after"] = after
@@ -144,17 +142,17 @@ class MailDB:
             conditions.append("has_attachment = %(has_attachment)s")
             params["has_attachment"] = has_attachment
         if subject_contains is not None:
-            conditions.append("subject ILIKE %(subject_pattern)s")
-            params["subject_pattern"] = f"%{subject_contains}%"
+            conditions.append("subject ILIKE %(subject_pattern)s ESCAPE '\\'")
+            escaped = (
+                subject_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            params["subject_pattern"] = f"%{escaped}%"
         if labels is not None:
             conditions.append("labels @> %(labels)s")
             params["labels"] = labels
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        query = (
-            f"SELECT {SELECT_COLS} FROM emails "
-            f"WHERE {where} ORDER BY {order} LIMIT %(limit)s"
-        )
+        query = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s"
         params["limit"] = limit
 
         rows = _query_dicts(self._pool, query, params)
@@ -192,7 +190,7 @@ class MailDB:
                 "OR recipients->'cc' @> %(recipient_json)s "
                 "OR recipients->'bcc' @> %(recipient_json)s)"
             )
-            params["recipient_json"] = f'["{recipient}"]'
+            params["recipient_json"] = json.dumps([recipient])
         if after is not None:
             conditions.append("date >= %(after)s")
             params["after"] = after
@@ -203,8 +201,11 @@ class MailDB:
             conditions.append("has_attachment = %(has_attachment)s")
             params["has_attachment"] = has_attachment
         if subject_contains is not None:
-            conditions.append("subject ILIKE %(subject_pattern)s")
-            params["subject_pattern"] = f"%{subject_contains}%"
+            conditions.append("subject ILIKE %(subject_pattern)s ESCAPE '\\'")
+            escaped = (
+                subject_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            params["subject_pattern"] = f"%{escaped}%"
         if labels is not None:
             conditions.append("labels @> %(labels)s")
             params["labels"] = labels
