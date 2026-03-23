@@ -42,6 +42,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+"src/maildb/maildb.py" = ["S608"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["maildb"]
