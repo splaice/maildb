@@ -4,13 +4,15 @@ from __future__ import annotations
 import email.utils
 import mailbox
 import re
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from bs4 import BeautifulSoup
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def remove_quoted_replies(text: str) -> str:
@@ -49,8 +51,7 @@ def clean_body(text: str | None) -> str:
         return ""
     text = remove_quoted_replies(text)
     text = remove_signature(text)
-    text = normalize_whitespace(text)
-    return text
+    return normalize_whitespace(text)
 
 
 logger = structlog.get_logger()
@@ -178,7 +179,7 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
         "sender_domain": sender_domain,
         "recipients": recipients,
         "date": date,
-        "body_text": body_text if body_text else None,
+        "body_text": body_text or None,
         "body_html": raw_html,
         "has_attachment": len(attachments) > 0,
         "attachments": attachments,

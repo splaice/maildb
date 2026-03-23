@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import itertools
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from psycopg_pool import ConnectionPool
 
 from maildb.embeddings import EmbeddingClient, build_embedding_text
 from maildb.parsing import parse_mbox
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from psycopg_pool import ConnectionPool
 
 logger = structlog.get_logger()
 
@@ -43,9 +46,9 @@ def _prepare_row(msg: dict[str, Any], embedding: list[float] | None) -> dict[str
         "body_html": msg["body_html"],
         "has_attachment": msg["has_attachment"],
         "attachments": json.dumps(msg["attachments"]) if msg["attachments"] else None,
-        "labels": msg["labels"] if msg["labels"] else None,
+        "labels": msg["labels"] or None,
         "in_reply_to": msg["in_reply_to"],
-        "references": msg["references"] if msg["references"] else None,
+        "references": msg["references"] or None,
         "embedding": embedding,
     }
 

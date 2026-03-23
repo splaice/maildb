@@ -2,19 +2,20 @@
 from __future__ import annotations
 
 import importlib.resources
+from typing import TYPE_CHECKING
 
 import structlog
 from psycopg_pool import ConnectionPool
 
-from maildb.config import Settings
+if TYPE_CHECKING:
+    from maildb.config import Settings
 
 logger = structlog.get_logger()
 
 
 def create_pool(config: Settings) -> ConnectionPool:
     """Create a psycopg3 connection pool."""
-    pool = ConnectionPool(conninfo=config.database_url, min_size=1, max_size=5)
-    return pool
+    return ConnectionPool(conninfo=config.database_url, min_size=1, max_size=5)
 
 
 def init_db(pool: ConnectionPool) -> None:

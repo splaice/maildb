@@ -29,9 +29,9 @@ class EmbeddingClient:
     def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text string."""
         response = self._client.embed(model=self._model, input=text)
-        return cast(list[float], response["embeddings"][0])
+        return cast("list[float]", response["embeddings"][0])
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts."""
         response = self._client.embed(model=self._model, input=texts)
-        return cast(list[list[float]], response["embeddings"])
+        return cast("list[list[float]]", response["embeddings"])

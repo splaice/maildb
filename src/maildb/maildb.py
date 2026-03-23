@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
 from maildb.embeddings import EmbeddingClient
 from maildb.models import Email, SearchResult
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
 
 logger = structlog.get_logger()
 

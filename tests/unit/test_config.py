@@ -1,9 +1,12 @@
 # tests/unit/test_config.py
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
 
 from maildb.config import Settings
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

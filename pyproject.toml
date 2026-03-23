@@ -35,14 +35,56 @@ line-length = 99
 
 [tool.ruff.lint]
 select = [
-    "E", "W", "F", "I", "N", "UP", "B", "SIM", "RUF",
-    "S", "T20", "PTH", "ERA",
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+    "S",     # flake8-bandit (security)
+    "T20",   # flake8-print (no print statements)
+    "PTH",   # flake8-use-pathlib
+    "ERA",   # eradicate (commented-out code)
+    "C901",  # mccabe complexity
+    "COM",   # flake8-commas
+    "FURB",  # refurb (modernization)
+    "RET",   # flake8-return
+    "TC",    # flake8-type-checking
+    "PERF",  # perflint (performance)
+    "LOG",   # flake8-logging
+    "FLY",   # flynt (f-string conversion)
+    "C4",    # flake8-comprehensions
+    "PIE",   # flake8-pie
+    "RSE",   # flake8-raise
+    "TRY",   # tryceratops (exception handling)
+    "ICN",   # flake8-import-conventions
+    "INP",   # flake8-no-pep420 (implicit namespace packages)
+    "PGH",   # pygrep-hooks
+    "PLC",   # pylint convention
+    "PLE",   # pylint error
+    "PLW",   # pylint warning
 ]
-ignore = ["E501"]
+ignore = [
+    "E501",    # line length handled by formatter
+    "COM812",  # trailing comma — conflicts with formatter
+    "TRY003",  # long exception messages are fine
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
-"src/maildb/maildb.py" = ["S608"]
+"tests/**/*.py" = [
+    "S101",    # assert is fine in tests
+    "ARG001",  # unused fixture args are side-effect fixtures
+    "SLF001",  # accessing private test helpers is fine
+    "PLR2004", # magic values in assertions are fine
+]
+"src/maildb/maildb.py" = ["S608"]  # SQL construction is safe (parameterized)
+"tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
 
 [tool.ruff.lint.isort]
 known-first-party = ["maildb"]
