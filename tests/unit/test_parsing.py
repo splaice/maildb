@@ -1,9 +1,11 @@
 # tests/unit/test_parsing.py
 from __future__ import annotations
 
+import mailbox as mb
+from email.mime.text import MIMEText
 from pathlib import Path
 
-from maildb.parsing import parse_mbox
+from maildb.parsing import parse_mbox, parse_message
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -122,3 +124,46 @@ def test_references_parsed_as_list() -> None:
     assert isinstance(msg["references"], list)
     assert len(msg["references"]) == 2
     assert msg["references"][0] == "msg001@example.com"
+
+
+def test_attachment_metadata_includes_bytes() -> None:
+    """_extract_attachments should return raw bytes in a 'data' key."""
+    messages = list(parse_mbox(FIXTURES / "sample.mbox"))
+    msg = messages[4]  # msg005 — has PDF attachment
+    # The _attachments_with_data should have bytes
+    assert "_attachments_with_data" in msg
+    for att in msg["_attachments_with_data"]:
+        assert "data" in att
+        assert isinstance(att["data"], bytes)
+        assert len(att["data"]) == att["size"]
+
+
+def test_attachments_metadata_no_bytes() -> None:
+    """The 'attachments' key should NOT contain raw data bytes."""
+    messages = list(parse_mbox(FIXTURES / "sample.mbox"))
+    msg = messages[4]  # msg005 — has PDF attachment
+    for att in msg["attachments"]:
+        assert "data" not in att
+
+
+def test_gmail_labels_extraction() -> None:
+    """Messages with X-Gmail-Labels header should have labels extracted."""
+    msg = MIMEText("Test body")
+    msg["Message-ID"] = "<gmail-labels-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "recipient@example.com"
+    msg["Subject"] = "Gmail Labels Test"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    msg["X-Gmail-Labels"] = "Inbox,Important,Starred"
+
+    mbox_msg = mb.mboxMessage(msg)
+    result = parse_message(mbox_msg)
+    assert result is not None
+    assert result["labels"] == ["Inbox", "Important", "Starred"]
+
+
+def test_no_gmail_labels_returns_empty() -> None:
+    """Messages without X-Gmail-Labels should have empty labels list."""
+    messages = list(parse_mbox(FIXTURES / "sample.mbox"))
+    msg = messages[0]  # msg001 — no Gmail labels
+    assert msg["labels"] == []

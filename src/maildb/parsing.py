@@ -122,12 +122,13 @@ def _extract_attachments(msg: mailbox.mboxMessage) -> list[dict[str, Any]]:
         filename = part.get_filename() or "unknown"
         content_type = part.get_content_type()
         payload = part.get_payload(decode=True)
-        size = len(payload) if payload else 0
+        data = payload or b""
         attachments.append(
             {
                 "filename": filename,
                 "content_type": content_type,
-                "size": size,
+                "size": len(data),
+                "data": data,
             }
         )
     return attachments
@@ -168,7 +169,18 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     raw_text, raw_html = _extract_body(msg)
     body_text = clean_body(raw_text) if raw_text else None
 
-    attachments = _extract_attachments(msg)
+    gmail_labels_raw = msg.get("X-Gmail-Labels")
+    labels = (
+        [label.strip() for label in gmail_labels_raw.split(",") if label.strip()]
+        if gmail_labels_raw
+        else []
+    )
+
+    attachments_raw = _extract_attachments(msg)
+    attachments_metadata = [
+        {"filename": a["filename"], "content_type": a["content_type"], "size": a["size"]}
+        for a in attachments_raw
+    ]
 
     return {
         "message_id": message_id,
@@ -181,11 +193,12 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
         "date": date,
         "body_text": body_text or None,
         "body_html": raw_html,
-        "has_attachment": len(attachments) > 0,
-        "attachments": attachments,
-        "labels": [],
+        "has_attachment": len(attachments_raw) > 0,
+        "attachments": attachments_metadata,
+        "labels": labels,
         "in_reply_to": in_reply_to,
         "references": references,
+        "_attachments_with_data": attachments_raw,
     }
 
 
