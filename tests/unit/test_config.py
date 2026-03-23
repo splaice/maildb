@@ -6,7 +6,10 @@ import pytest
 from maildb.config import Settings
 
 
-def test_settings_defaults() -> None:
+def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAILDB_DATABASE_URL", raising=False)
+    monkeypatch.delenv("MAILDB_OLLAMA_URL", raising=False)
+    monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]
     )
