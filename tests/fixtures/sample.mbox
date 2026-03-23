@@ -1,0 +1,166 @@
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg001@example.com>
+From: Alice Smith <alice@example.com>
+To: bob@example.com, carol@example.com
+Cc: dave@example.com
+Subject: Q1 Budget Discussion
+Date: Wed, 15 Jan 2025 10:00:00 +0000
+
+Hey team, let's discuss the Q1 budget.
+
+Thanks,
+Alice
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg002@example.com>
+From: Bob Jones <bob@example.com>
+To: alice@example.com
+Subject: Re: Q1 Budget Discussion
+Date: Wed, 15 Jan 2025 14:30:00 +0000
+In-Reply-To: <msg001@example.com>
+References: <msg001@example.com>
+
+Sounds good, I'll prepare the spreadsheet.
+
+> Hey team, let's discuss the Q1 budget.
+> Thanks,
+> Alice
+-- 
+Bob Jones
+Finance
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg003@example.com>
+From: Carol White <carol@example.com>
+To: alice@example.com, bob@example.com
+Subject: Re: Q1 Budget Discussion
+Date: Thu, 16 Jan 2025 09:00:00 +0000
+In-Reply-To: <msg002@example.com>
+References: <msg001@example.com> <msg002@example.com>
+
+Can we schedule a meeting for Thursday?
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/html; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg004@notifications.example.com>
+From: noreply@notifications.example.com
+To: alice@example.com
+Subject: Account Ready
+Date: Sat, 01 Feb 2025 08:00:00 +0000
+
+<html><body><h1>Welcome!</h1><p>Your account is ready.</p></body></html>
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: multipart/mixed; boundary="===============0317438090139198990=="
+MIME-Version: 1.0
+Message-ID: <msg005@example.com>
+From: Dave Miller <dave@example.com>
+To: alice@example.com
+Subject: Q1 Report Attached
+Date: Mon, 10 Feb 2025 15:00:00 +0000
+
+--===============0317438090139198990==
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+
+Please find the Q1 report attached.
+--===============0317438090139198990==
+Content-Type: application/pdf
+MIME-Version: 1.0
+Content-Disposition: attachment; filename="q1-report.pdf"
+
+fake pdf content
+--===============0317438090139198990==--
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg006@example.com>
+From: ops@example.com
+To: alice@example.com
+Date: Sat, 15 Feb 2025 03:00:00 +0000
+
+Quick note - the server is down again.
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg007@example.com>
+From: CEO <ceo@bigcorp.com>
+To: alice@example.com
+Cc: legal@bigcorp.com
+Bcc: board@bigcorp.com
+Subject: Confidential - Restructuring
+Date: Sat, 01 Mar 2025 12:00:00 +0000
+
+Confidential: restructuring plan enclosed.
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg008@example.com>
+From: Frank <frank@example.com>
+To: alice@example.com
+Subject: RE: Proposal
+Date: Wed, 05 Mar 2025 16:00:00 +0000
+In-Reply-To: <msg-proposal@example.com>
+
+I agree with the proposal.
+
+-----Original Message-----
+From: someone@example.com
+Sent: Monday
+Subject: Proposal
+
+Here is my proposal.
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Message-ID: <msg009@example.com>
+From: Grace <grace@example.com>
+To: alice@example.com
+Subject: Timezone Test
+Date: Mon, 10 Mar 2025 10:00:00
+
+Testing timezone handling.
+
+From MAILER-DAEMON Mon Mar 23 04:10:19 2026
+Content-Type: multipart/alternative; boundary="===============5604125963856012220=="
+MIME-Version: 1.0
+Message-ID: <msg010@example.com>
+From: Newsletter <news@updates.example.com>
+To: alice@example.com
+Subject: Weekly Update
+Date: Sat, 15 Mar 2025 07:00:00 +0000
+
+--===============5604125963856012220==
+Content-Type: text/plain; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+
+This week in tech: AI advances continue.
+--===============5604125963856012220==
+Content-Type: text/html; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+
+<html><body><b>This week in tech:</b> AI advances continue.</body></html>
+--===============5604125963856012220==--
+
