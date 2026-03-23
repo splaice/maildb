@@ -33,6 +33,7 @@ def test_pool(test_settings: Settings):  # type: ignore[no-untyped-def]
 def _clean_emails(test_pool, request) -> Iterator[None]:  # type: ignore[no-untyped-def]
     """Delete all rows after each integration test to prevent test pollution."""
     if "integration" not in [m.name for m in request.node.iter_markers()]:
+        yield
         return
     yield
     with test_pool.connection() as conn:
