@@ -59,9 +59,9 @@ def test_email_from_row() -> None:
 def test_email_from_row_with_attachments() -> None:
     row = _make_row()
     row["has_attachment"] = True
-    row["attachments"] = json.dumps([
-        {"filename": "file.pdf", "content_type": "application/pdf", "size": 500}
-    ])
+    row["attachments"] = json.dumps(
+        [{"filename": "file.pdf", "content_type": "application/pdf", "size": 500}]
+    )
     email = Email.from_row(row)
     assert len(email.attachments) == 1
     assert email.attachments[0].filename == "file.pdf"

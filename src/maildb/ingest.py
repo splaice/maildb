@@ -127,7 +127,12 @@ def backfill_embeddings(
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
         texts = [build_embedding_text(row[1], row[2], row[3]) for row in batch]
-        embeddings = embedding_client.embed_batch(texts)
+
+        try:
+            embeddings = embedding_client.embed_batch(texts)
+        except Exception:
+            logger.warning("backfill_batch_failed", batch_offset=i, batch_size=len(batch))
+            continue
 
         with pool.connection() as conn:
             for row, emb in zip(batch, embeddings, strict=False):

@@ -347,3 +347,102 @@ def test_topics_with_sender(test_pool, seed_advanced) -> None:  # type: ignore[n
     topics = db.topics_with(sender="bob@corp.com", limit=5)
     assert len(topics) >= 1
     assert all(e.sender_address == "bob@corp.com" for e in topics)
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_thread_for_nonexistent(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    """get_thread_for with a message_id that doesn't exist should return []."""
+    db = MailDB._from_pool(test_pool)
+    result = db.get_thread_for("nonexistent@x.com")
+    assert result == []
+
+
+def test_topics_with_sender_domain(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """topics_with(sender_domain=...) should return emails from that domain."""
+    db = MailDB._from_pool(test_pool)
+    topics = db.topics_with(sender_domain="corp.com", limit=5)
+    assert len(topics) >= 1
+    assert all(e.sender_domain == "corp.com" for e in topics)
+    # Bob is the only sender at corp.com
+    assert all(e.sender_address == "bob@corp.com" for e in topics)
+
+
+def test_topics_with_no_args_raises(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """topics_with() with neither sender nor sender_domain should raise ValueError."""
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match="sender or sender_domain"):
+        db.topics_with()
+
+
+def test_long_threads_with_after(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """long_threads filters individual rows before grouping."""
+    db = MailDB._from_pool(test_pool)
+
+    # after="2025-01-12" excludes both adv-1 (Jan 10) and adv-2 (Jan 11)
+    threads = db.long_threads(min_messages=2, after="2025-01-12")
+    assert len(threads) == 0
+
+    # after="2025-01-09" includes both messages in adv-1 thread
+    threads = db.long_threads(min_messages=2, after="2025-01-09")
+    assert len(threads) >= 1
+    assert threads[0]["thread_id"] == "adv-1@example.com"
+    assert threads[0]["message_count"] >= 2
+
+
+def test_unreplied_with_sender_filter(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """unreplied(sender=...) should only return unreplied from that sender."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    unreplied = db.unreplied(sender="bob@corp.com")
+    message_ids = [e.message_id for e in unreplied]
+    assert "adv-3@corp.com" in message_ids
+    assert "adv-4@other.com" not in message_ids
+
+
+def test_top_contacts_both(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """top_contacts(direction='both') should combine inbound + outbound."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="both")
+    # Bob: 2 inbound (adv-2, adv-3) + 1 outbound (adv-1 sent to bob) = 3
+    bob = next(c for c in contacts if c["address"] == "bob@corp.com")
+    assert bob["count"] == 3
+    # Carol: 1 inbound (adv-4) = 1
+    carol = next(c for c in contacts if c["address"] == "carol@other.com")
+    assert carol["count"] == 1
+    # Bob should be first (highest count)
+    assert contacts[0]["address"] == "bob@corp.com"
+
+
+def test_top_contacts_with_period(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """top_contacts with period should only count messages after that date."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(period="2025-01-14", direction="inbound")
+    # After Jan 14: Bob sent adv-3 (Jan 15), Carol sent adv-4 (Jan 20)
+    addresses = {c["address"] for c in contacts}
+    assert "bob@corp.com" in addresses
+    assert "carol@other.com" in addresses
+    bob = next(c for c in contacts if c["address"] == "bob@corp.com")
+    carol = next(c for c in contacts if c["address"] == "carol@other.com")
+    assert bob["count"] == 1
+    assert carol["count"] == 1
+
+
+def test_search_results_ordered_by_similarity(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    """Search results should be ordered by descending similarity."""
+    mock_ec = MagicMock()
+    mock_ec.embed.return_value = [0.1] * 768
+    db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
+    results = db.search("budget discussion")
+    assert len(results) >= 2
+    # The email with embedding [0.1]*768 should be most similar (cosine similarity = 1.0)
+    assert results[0].email.message_id == "find-test-1@example.com"
+    assert results[0].similarity == pytest.approx(1.0, abs=0.01)
+    # Results should be in descending similarity order
+    for i in range(len(results) - 1):
+        assert results[i].similarity >= results[i + 1].similarity

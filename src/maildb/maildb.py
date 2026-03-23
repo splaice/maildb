@@ -97,8 +97,8 @@ class MailDB:
     def __exit__(self, *args: Any) -> None:
         self.close()
 
-    def find(
-        self,
+    @staticmethod
+    def _build_filters(
         *,
         sender: str | None = None,
         sender_domain: str | None = None,
@@ -108,14 +108,8 @@ class MailDB:
         has_attachment: bool | None = None,
         subject_contains: str | None = None,
         labels: list[str] | None = None,
-        limit: int = 50,
-        order: str = "date DESC",
-    ) -> list[Email]:
-        """Structured query with dynamic WHERE clauses."""
-        if order not in VALID_ORDERS:
-            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
-            raise ValueError(msg)
-
+    ) -> tuple[list[str], dict[str, Any]]:
+        """Build WHERE-clause conditions and params from common filter kwargs."""
         conditions: list[str] = []
         params: dict[str, Any] = {}
 
@@ -151,6 +145,38 @@ class MailDB:
             conditions.append("labels @> %(labels)s")
             params["labels"] = labels
 
+        return conditions, params
+
+    def find(
+        self,
+        *,
+        sender: str | None = None,
+        sender_domain: str | None = None,
+        recipient: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        has_attachment: bool | None = None,
+        subject_contains: str | None = None,
+        labels: list[str] | None = None,
+        limit: int = 50,
+        order: str = "date DESC",
+    ) -> list[Email]:
+        """Structured query with dynamic WHERE clauses."""
+        if order not in VALID_ORDERS:
+            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
+            raise ValueError(msg)
+
+        conditions, params = self._build_filters(
+            sender=sender,
+            sender_domain=sender_domain,
+            recipient=recipient,
+            after=after,
+            before=before,
+            has_attachment=has_attachment,
+            subject_contains=subject_contains,
+            labels=labels,
+        )
+
         where = " AND ".join(conditions) if conditions else "TRUE"
         query = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s"
         params["limit"] = limit
@@ -175,40 +201,18 @@ class MailDB:
         """Semantic search with optional structured filters."""
         query_embedding = self._embedding_client.embed(query)
 
-        conditions: list[str] = ["embedding IS NOT NULL"]
-        params: dict[str, Any] = {"query_embedding": str(query_embedding)}
-
-        if sender is not None:
-            conditions.append("sender_address = %(sender)s")
-            params["sender"] = sender
-        if sender_domain is not None:
-            conditions.append("sender_domain = %(sender_domain)s")
-            params["sender_domain"] = sender_domain
-        if recipient is not None:
-            conditions.append(
-                "(recipients->'to' @> %(recipient_json)s "
-                "OR recipients->'cc' @> %(recipient_json)s "
-                "OR recipients->'bcc' @> %(recipient_json)s)"
-            )
-            params["recipient_json"] = json.dumps([recipient])
-        if after is not None:
-            conditions.append("date >= %(after)s")
-            params["after"] = after
-        if before is not None:
-            conditions.append("date < %(before)s")
-            params["before"] = before
-        if has_attachment is not None:
-            conditions.append("has_attachment = %(has_attachment)s")
-            params["has_attachment"] = has_attachment
-        if subject_contains is not None:
-            conditions.append("subject ILIKE %(subject_pattern)s ESCAPE '\\'")
-            escaped = (
-                subject_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
-            params["subject_pattern"] = f"%{escaped}%"
-        if labels is not None:
-            conditions.append("labels @> %(labels)s")
-            params["labels"] = labels
+        conditions, params = self._build_filters(
+            sender=sender,
+            sender_domain=sender_domain,
+            recipient=recipient,
+            after=after,
+            before=before,
+            has_attachment=has_attachment,
+            subject_contains=subject_contains,
+            labels=labels,
+        )
+        conditions.insert(0, "embedding IS NOT NULL")
+        params["query_embedding"] = str(query_embedding)
 
         where = " AND ".join(conditions)
         sql = f"""
@@ -301,8 +305,44 @@ class MailDB:
             """
             return _query_dicts(self._pool, sql, params)
         else:  # both
-            conditions.append("sender_address != %(user_email)s")
-            group_col = "sender_address"
+            if period:
+                period_cond_inbound = "AND date >= %(period_start)s"
+                period_cond_outbound = "AND date >= %(period_start)s"
+                params["period_start"] = period
+            else:
+                period_cond_inbound = ""
+                period_cond_outbound = ""
+
+            sql = f"""
+                SELECT address, sum(count) AS count
+                FROM (
+                    SELECT sender_address AS address, count(*) AS count
+                    FROM emails
+                    WHERE sender_address != %(user_email)s
+                      {period_cond_inbound}
+                    GROUP BY sender_address
+
+                    UNION ALL
+
+                    SELECT r.addr AS address, count(*) AS count
+                    FROM emails,
+                         LATERAL (
+                             SELECT jsonb_array_elements_text(recipients->'to') AS addr
+                             UNION ALL
+                             SELECT jsonb_array_elements_text(recipients->'cc')
+                             UNION ALL
+                             SELECT jsonb_array_elements_text(recipients->'bcc')
+                         ) AS r(addr)
+                    WHERE sender_address = %(user_email)s
+                      AND r.addr != %(user_email)s
+                      {period_cond_outbound}
+                    GROUP BY r.addr
+                ) AS combined
+                GROUP BY address
+                ORDER BY count DESC
+                LIMIT %(limit)s
+            """
+            return _query_dicts(self._pool, sql, params)
 
         if period:
             conditions.append("date >= %(period_start)s")
