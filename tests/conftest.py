@@ -18,7 +18,7 @@ def test_settings() -> Settings:
     return Settings(
         database_url=os.environ.get(
             "MAILDB_TEST_DATABASE_URL",
-            "postgresql://postgres:postgres@localhost:5432/maildb_test",
+            "postgresql://maildb_test@localhost:5432/maildb_test",
         ),
         _env_file=None,  # type: ignore[call-arg]
     )

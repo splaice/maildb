@@ -16,7 +16,7 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]
     )
-    assert settings.database_url == "postgresql://localhost:5432/maildb"
+    assert settings.database_url == "postgresql://maildb@localhost:5432/maildb"
     assert settings.ollama_url == "http://localhost:11434"
     assert settings.embedding_model == "nomic-embed-text"
     assert settings.embedding_dimensions == 768

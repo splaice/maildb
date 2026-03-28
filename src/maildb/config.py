@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     model_config = {"env_prefix": "MAILDB_", "env_file": ".env", "env_file_encoding": "utf-8"}
 
-    database_url: str = "postgresql://localhost:5432/maildb"
+    database_url: str = "postgresql://maildb@localhost:5432/maildb"
     ollama_url: str = "http://localhost:11434"
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
