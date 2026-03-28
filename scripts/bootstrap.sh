@@ -140,6 +140,8 @@ install_deps() {
     status_installed
     echo ""
     brew install postgresql@18
+    # postgresql@18 is keg-only — ensure it's on PATH
+    export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"
     ((INSTALLED++)) || true
   fi
 
@@ -275,9 +277,16 @@ setup_database() {
 
   # Extension: vector on maildb
   check_line "Extension: vector (maildb)"
-  psql -d maildb -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null
-  status_found
-  echo ""
+  if psql -d maildb -tAc "SELECT 1 FROM pg_extension WHERE extname='vector'" | grep -q 1; then
+    status_found
+    echo ""
+    ((SKIPPED++)) || true
+  else
+    psql -d maildb -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null
+    status_created
+    echo ""
+    ((INSTALLED++)) || true
+  fi
 
   # Database: maildb_test
   check_line "Database: maildb_test"
@@ -294,9 +303,16 @@ setup_database() {
 
   # Extension: vector on maildb_test
   check_line "Extension: vector (maildb_test)"
-  psql -d maildb_test -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null
-  status_found
-  echo ""
+  if psql -d maildb_test -tAc "SELECT 1 FROM pg_extension WHERE extname='vector'" | grep -q 1; then
+    status_found
+    echo ""
+    ((SKIPPED++)) || true
+  else
+    psql -d maildb_test -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null
+    status_created
+    echo ""
+    ((INSTALLED++)) || true
+  fi
 
   echo "  ${BLUE}${BOLD}│${R}"
   echo "  ${BLUE}${BOLD}└──────────────────────────────────────────────────────${R}"
@@ -351,20 +367,19 @@ validate() {
 
   # uv sync
   check_line "Python dependencies (uv sync)"
-  cd "$PROJECT_DIR"
-  if uv sync --quiet 2>/dev/null; then
+  if (cd "$PROJECT_DIR" && uv sync --quiet); then
     status_found
     printf "${DIM}${GREY}synced${R}\n"
   else
     status_failed
     echo ""
-    echo "  ${BLUE}${BOLD}│${R}    ${PINK}uv sync failed. Check output above.${R}"
+    echo "  ${BLUE}${BOLD}│${R}    ${PINK}uv sync failed. Run manually: ${WHITE}cd $PROJECT_DIR && uv sync${R}"
     ((FAILED++)) || true
   fi
 
   # Unit test smoke test
   check_line "Unit tests (smoke test)"
-  if uv run pytest tests/unit/ -q --no-header --tb=line 2>/dev/null; then
+  if (cd "$PROJECT_DIR" && uv run pytest tests/unit/ -q --no-header --tb=line 2>/dev/null); then
     status_found
     printf "${DIM}${GREY}passed${R}\n"
   else
@@ -381,8 +396,6 @@ validate() {
 
 # ── Summary ────────────────────────────────────────────────
 summary() {
-  local total=$((INSTALLED + SKIPPED + FAILED))
-
   if [[ $FAILED -eq 0 ]]; then
     echo "  ${GREEN}${BOLD}┌─ ALL SYSTEMS NOMINAL ───────────────────────────────${R}"
     echo "  ${GREEN}${BOLD}│${R}"
