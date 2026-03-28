@@ -92,6 +92,21 @@ A summary is printed at the end showing what was installed, created, or skipped.
 
 ---
 
+## Output Style
+
+The script follows the visual style established by `link.sh` (DOTLINK):
+
+- **True-color neon palette** — same RGB escape codes (cyan, magenta, pink, yellow, green, grey, white)
+- **ASCII art banner** at the top with the project name
+- **Box-drawing section headers** — `┌─ SECTION NAME ──────┐` with `│` gutter and `└──────┘` closers
+- **Spinner animation** (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) for install/setup steps, replaced with `✓` on completion
+- **Status badges** with background colors — e.g., `INSTALLED`, `FOUND`, `CREATED`, `SKIPPED`
+- **Dimmed secondary text** for paths and details, bold for emphasis
+- **Summary panel** at the end with `◆` glyph counters for installed/skipped/failed
+- **Two-space indent** throughout
+
+---
+
 ## Error Handling
 
 - **`set -euo pipefail`** — fail fast on any error
