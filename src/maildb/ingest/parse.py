@@ -46,7 +46,7 @@ def process_chunk(
 ) -> int:
     """Claim and process chunks in a loop until no work remains. Returns chunks processed."""
     attachment_dir = Path(attachment_dir)
-    pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1)
+    pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1, open=True)
     worker_id = str(os.getpid())
     chunks_processed = 0
 

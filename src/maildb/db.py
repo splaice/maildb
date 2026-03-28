@@ -15,7 +15,7 @@ logger = structlog.get_logger()
 
 def create_pool(config: Settings) -> ConnectionPool:
     """Create a psycopg3 connection pool."""
-    return ConnectionPool(conninfo=config.database_url, min_size=1, max_size=5)
+    return ConnectionPool(conninfo=config.database_url, min_size=1, max_size=5, open=True)
 
 
 def init_db(pool: ConnectionPool) -> None:

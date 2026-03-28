@@ -20,7 +20,7 @@ logger = structlog.get_logger()
 
 
 def _get_pool(database_url: str) -> ConnectionPool:
-    return ConnectionPool(conninfo=database_url, min_size=1, max_size=5)
+    return ConnectionPool(conninfo=database_url, min_size=1, max_size=5, open=True)
 
 
 def run_pipeline(

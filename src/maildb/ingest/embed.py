@@ -29,7 +29,7 @@ def embed_worker(
     _embedding_client: EmbeddingClient | None = None,
 ) -> int:
     """Process embedding batches until no work remains. Returns total rows updated."""
-    pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1)
+    pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1, open=True)
     client = _embedding_client or EmbeddingClient(
         ollama_url=ollama_url,
         model_name=embedding_model,
