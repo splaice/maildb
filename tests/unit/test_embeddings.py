@@ -5,7 +5,43 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from maildb.embeddings import EmbeddingClient, build_embedding_text
+from maildb.embeddings import (
+    MAX_EMBEDDING_TOKENS,
+    EmbeddingClient,
+    build_embedding_text,
+    estimate_tokens,
+)
+
+
+def test_estimate_tokens_english_prose() -> None:
+    text = "Hello world this is a test. " * 200  # ~5600 chars
+    tokens = estimate_tokens(text)
+    assert 1000 < tokens < 2000
+
+
+def test_estimate_tokens_url_heavy() -> None:
+    text = "https://example.com/path/to/resource?query=value&other=123 " * 100
+    tokens = estimate_tokens(text)
+    char_ratio = len(text) / tokens
+    assert char_ratio < 3.0
+
+
+def test_build_embedding_text_allows_longer_prose() -> None:
+    prose = "The quick brown fox jumps over the lazy dog. " * 200  # ~9000 chars
+    result = build_embedding_text("Test Subject", "Alice", prose)
+    assert len(result) > 6000
+
+
+def test_build_embedding_text_truncates_url_heavy() -> None:
+    urls = "https://example.com/very/long/path/resource?q=abc123&r=def456 " * 200
+    result = build_embedding_text("Test Subject", "Alice", urls)
+    tokens = estimate_tokens(result)
+    assert tokens <= MAX_EMBEDDING_TOKENS
+
+
+def test_build_embedding_text_short_text_unchanged() -> None:
+    result = build_embedding_text("Subject", "Alice", "Short body")
+    assert result == "Subject: Subject\nFrom: Alice\n\nShort body"
 
 
 def test_build_embedding_text_all_fields() -> None:

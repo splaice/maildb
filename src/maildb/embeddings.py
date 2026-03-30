@@ -1,6 +1,7 @@
 # src/maildb/embeddings.py
 from __future__ import annotations
 
+import re
 from typing import cast
 
 import ollama
@@ -8,11 +9,19 @@ import structlog
 
 logger = structlog.get_logger()
 
-
 # nomic-embed-text has an 8192 token context window.
-# Token-dense content (URLs, code, non-ASCII) can yield ~1.2 chars/token,
-# so 6000 chars safely stays within the limit for all content types.
-MAX_EMBEDDING_CHARS = 6_000
+# We target 7500 tokens to leave headroom.
+MAX_EMBEDDING_TOKENS = 7_500
+
+_URL_PATTERN = re.compile(r"https?://\S+")
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count using byte-length heuristic with URL adjustment."""
+    base_tokens = len(text.encode("utf-8")) // 4
+    url_bytes = sum(len(m.group().encode("utf-8")) for m in _URL_PATTERN.finditer(text))
+    url_extra = url_bytes // 2
+    return base_tokens + url_extra
 
 
 def build_embedding_text(
@@ -22,9 +31,17 @@ def build_embedding_text(
 ) -> str:
     """Build the text string used for embedding, truncated to fit model context."""
     text = f"Subject: {subject or ''}\nFrom: {sender_name or ''}\n\n{body_text or ''}"
-    if len(text) > MAX_EMBEDDING_CHARS:
-        text = text[:MAX_EMBEDDING_CHARS]
-    return text
+    if estimate_tokens(text) <= MAX_EMBEDDING_TOKENS:
+        return text
+    # Binary search for the right truncation point
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if estimate_tokens(text[:mid]) <= MAX_EMBEDDING_TOKENS:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
 
 
 class EmbeddingClient:
