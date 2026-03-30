@@ -57,6 +57,19 @@ def clean_body(text: str | None) -> str:
 logger = structlog.get_logger()
 
 
+def _safe_header(msg: mailbox.mboxMessage, name: str) -> str | None:
+    """Safely extract a header value as a clean string."""
+    value = msg.get(name)
+    if value is None:
+        return None
+    try:
+        result = str(value)
+    except Exception:
+        logger.warning("header_decode_failed", header=name)
+        return None
+    return result.replace("\x00", "")
+
+
 def _strip_angles(value: str) -> str:
     return value.strip().strip("<>")
 
@@ -136,14 +149,14 @@ def _extract_attachments(msg: mailbox.mboxMessage) -> list[dict[str, Any]]:
 
 def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     """Parse a single mbox message into a structured dictionary."""
-    raw_message_id = msg.get("Message-ID")
+    raw_message_id = _safe_header(msg, "Message-ID")
     if not raw_message_id:
-        logger.warning("skipping_message_no_id", subject=msg.get("Subject"))
+        logger.warning("skipping_message_no_id", subject=_safe_header(msg, "Subject"))
         return None
 
     message_id = _strip_angles(raw_message_id)
 
-    sender_name, sender_address = email.utils.parseaddr(msg.get("From", ""))
+    sender_name, sender_address = email.utils.parseaddr(_safe_header(msg, "From") or "")
     sender_domain = sender_address.split("@")[1] if "@" in sender_address else None
 
     to_addrs = [addr for _, addr in email.utils.getaddresses(msg.get_all("To", []))]
@@ -152,7 +165,7 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     recipients = {"to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs}
 
     date: datetime | None = None
-    raw_date = msg.get("Date")
+    raw_date = _safe_header(msg, "Date")
     if raw_date:
         try:
             date = email.utils.parsedate_to_datetime(raw_date)
@@ -161,15 +174,15 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
         except (ValueError, TypeError):
             logger.warning("unparseable_date", message_id=message_id, raw_date=raw_date)
 
-    in_reply_to_raw = msg.get("In-Reply-To")
+    in_reply_to_raw = _safe_header(msg, "In-Reply-To")
     in_reply_to = _strip_angles(in_reply_to_raw) if in_reply_to_raw else None
-    references = _parse_references(msg.get("References"))
+    references = _parse_references(_safe_header(msg, "References"))
     thread_id = _derive_thread_id(message_id, references, in_reply_to)
 
     raw_text, raw_html = _extract_body(msg)
     body_text = clean_body(raw_text) if raw_text else None
 
-    gmail_labels_raw = msg.get("X-Gmail-Labels")
+    gmail_labels_raw = _safe_header(msg, "X-Gmail-Labels")
     labels = (
         [label.strip() for label in gmail_labels_raw.split(",") if label.strip()]
         if gmail_labels_raw
@@ -185,7 +198,7 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     return {
         "message_id": message_id,
         "thread_id": thread_id,
-        "subject": str(msg.get("Subject")) if msg.get("Subject") is not None else None,
+        "subject": _safe_header(msg, "Subject"),
         "sender_name": sender_name or None,
         "sender_address": sender_address or None,
         "sender_domain": sender_domain,

@@ -39,11 +39,6 @@ ON CONFLICT DO NOTHING
 """
 
 
-def _sanitize_row(row: dict[str, object]) -> dict[str, object]:
-    """Strip NUL bytes from string values — PostgreSQL text fields reject them."""
-    return {k: v.replace("\x00", "") if isinstance(v, str) else v for k, v in row.items()}
-
-
 def process_chunk(
     *,
     database_url: str,
@@ -142,7 +137,7 @@ def _process_single_chunk(
     inserted_email_ids: set[object] = set()
     with pool.connection() as conn:
         for row in email_rows:
-            cur = conn.execute(INSERT_EMAIL_SQL, _sanitize_row(row))
+            cur = conn.execute(INSERT_EMAIL_SQL, row)
             if cur.rowcount > 0:
                 inserted += 1
                 inserted_email_ids.add(row["id"])

@@ -1,11 +1,12 @@
 # tests/unit/test_parsing.py
 from __future__ import annotations
 
+import email.header
 import mailbox as mb
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from maildb.parsing import parse_mbox, parse_message
+from maildb.parsing import _safe_header, parse_mbox, parse_message
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -167,3 +168,42 @@ def test_no_gmail_labels_returns_empty() -> None:
     messages = list(parse_mbox(FIXTURES / "sample.mbox"))
     msg = messages[0]  # msg001 — no Gmail labels
     assert msg["labels"] == []
+
+
+def _make_msg_with_header(name: str, value: object) -> mb.mboxMessage:
+    """Helper to create an mbox message with a specific header value."""
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<safe-header-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "to@example.com"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    msg[name] = value
+    return mb.mboxMessage(msg)
+
+
+def test_safe_header_normal_string() -> None:
+    msg = _make_msg_with_header("Subject", "Hello World")
+    assert _safe_header(msg, "Subject") == "Hello World"
+
+
+def test_safe_header_strips_nul_bytes() -> None:
+    msg = _make_msg_with_header("Subject", "Hello\x00World")
+    assert _safe_header(msg, "Subject") == "HelloWorld"
+
+
+def test_safe_header_missing_returns_none() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<safe-header-test@example.com>"
+    mbox_msg = mb.mboxMessage(msg)
+    assert _safe_header(mbox_msg, "X-Nonexistent") is None
+
+
+def test_safe_header_header_object() -> None:
+    """email.header.Header objects should be coerced to str."""
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<header-obj-test@example.com>"
+    msg["Subject"] = email.header.Header("Héllo", "utf-8")
+    mbox_msg = mb.mboxMessage(msg)
+    result = _safe_header(mbox_msg, "Subject")
+    assert isinstance(result, str)
+    assert "llo" in result
