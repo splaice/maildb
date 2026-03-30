@@ -147,6 +147,7 @@ def run_pipeline(
                             embedding_model=embedding_model,
                             embedding_dimensions=embedding_dimensions,
                             batch_size=embed_batch_size,
+                            _progress_total=unembedded,
                         )
                         for _ in range(embed_workers)
                     ]
