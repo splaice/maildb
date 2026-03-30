@@ -122,7 +122,11 @@ def run_pipeline(
         if not skip_embed:
             embed_status = get_phase_status(pool, "embed")
             if embed_status["completed"] == 0:
-                logger.info("phase_start", phase="embed")
+                with pool.connection() as conn:
+                    cur = conn.execute("SELECT count(*) FROM emails WHERE embedding IS NULL")
+                    unembedded: int = cur.fetchone()[0]  # type: ignore[index]
+
+                logger.info("phase_start", phase="embed", unembedded=unembedded)
                 embed_task = create_task(pool, phase="embed")
 
                 with ProcessPoolExecutor(max_workers=embed_workers) as executor:
@@ -134,6 +138,7 @@ def run_pipeline(
                             embedding_model=embedding_model,
                             embedding_dimensions=embedding_dimensions,
                             batch_size=embed_batch_size,
+                            _progress_total=unembedded,
                         )
                         for _ in range(embed_workers)
                     ]

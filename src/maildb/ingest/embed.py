@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -7,6 +8,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from maildb.embeddings import EmbeddingClient, build_embedding_text
+from maildb.ingest.progress import ProgressTracker
 
 logger = structlog.get_logger()
 
@@ -92,6 +94,7 @@ def embed_worker(
     embedding_dimensions: int,
     batch_size: int = 50,
     _embedding_client: EmbeddingClient | None = None,
+    _progress_total: int = 0,
 ) -> int:
     """Process embedding batches until no work remains. Returns total rows updated."""
     pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1, open=True)
@@ -102,6 +105,9 @@ def embed_worker(
     )
 
     total_updated = 0
+    tracker = ProgressTracker(total=_progress_total) if _progress_total > 0 else None
+    start_time = time.monotonic()
+    last_report = start_time
 
     try:
         while True:
@@ -124,6 +130,12 @@ def embed_worker(
                     pool, client, rows, texts, embedding_dimensions
                 )
                 total_updated += batch_updated
+
+            now = time.monotonic()
+            if tracker is not None and now - last_report >= 60:
+                tracker.update(total_updated, now - start_time)
+                logger.info("embed_progress", summary=tracker.summary_line())
+                last_report = now
 
     finally:
         pool.close()
