@@ -146,9 +146,21 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     sender_name, sender_address = email.utils.parseaddr(msg.get("From", ""))
     sender_domain = sender_address.split("@")[1] if "@" in sender_address else None
 
-    to_addrs = [addr for _, addr in email.utils.getaddresses(msg.get_all("To", []))]
-    cc_addrs = [addr for _, addr in email.utils.getaddresses(msg.get_all("Cc", []))]
-    bcc_addrs = [addr for _, addr in email.utils.getaddresses(msg.get_all("Bcc", []))]
+    to_addrs = [
+        addr
+        for _, addr in email.utils.getaddresses(msg.get_all("To", []))
+        if addr and addr.strip()
+    ]
+    cc_addrs = [
+        addr
+        for _, addr in email.utils.getaddresses(msg.get_all("Cc", []))
+        if addr and addr.strip()
+    ]
+    bcc_addrs = [
+        addr
+        for _, addr in email.utils.getaddresses(msg.get_all("Bcc", []))
+        if addr and addr.strip()
+    ]
     recipients = {"to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs}
 
     date: datetime | None = None
