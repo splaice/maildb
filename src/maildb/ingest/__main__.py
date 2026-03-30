@@ -63,6 +63,8 @@ def main() -> None:
         sys.stderr.write(f"Error: {mbox_path} not found\n")
         sys.exit(1)
 
+    skip_embed = "--skip-embed" in args
+
     pool = create_pool(settings)
     init_db(pool)
     pool.close()
@@ -79,6 +81,7 @@ def main() -> None:
         ollama_url=settings.ollama_url,
         embedding_model=settings.embedding_model,
         embedding_dimensions=settings.embedding_dimensions,
+        skip_embed=skip_embed,
     )
     _print_status(result)
 
