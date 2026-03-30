@@ -19,6 +19,13 @@ from maildb.ingest.tasks import complete_task, create_task, get_phase_status, re
 logger = structlog.get_logger()
 
 
+def count_unembedded(pool: ConnectionPool) -> int:
+    """Count emails that still need embedding."""
+    with pool.connection() as conn:
+        cur = conn.execute("SELECT count(*) FROM emails WHERE embedding IS NULL")
+        return cur.fetchone()[0]  # type: ignore[index,no-any-return]
+
+
 def _get_pool(database_url: str) -> ConnectionPool:
     return ConnectionPool(conninfo=database_url, min_size=1, max_size=5, open=True)
 
@@ -120,10 +127,16 @@ def run_pipeline(
 
         # Phase 4: Embed
         if not skip_embed:
-            embed_status = get_phase_status(pool, "embed")
-            if embed_status["completed"] == 0:
-                logger.info("phase_start", phase="embed")
-                embed_task = create_task(pool, phase="embed")
+            unembedded = count_unembedded(pool)
+            if unembedded > 0:
+                logger.info("phase_start", phase="embed", unembedded=unembedded)
+
+                embed_status = get_phase_status(pool, "embed")
+                if embed_status["in_progress"] == 0:
+                    embed_task = create_task(pool, phase="embed")
+                    task_id = embed_task["id"]
+                else:
+                    task_id = None
 
                 with ProcessPoolExecutor(max_workers=embed_workers) as executor:
                     futures = [
@@ -139,7 +152,8 @@ def run_pipeline(
                     ]
                     total_embedded = sum(f.result() for f in futures)
 
-                complete_task(pool, embed_task["id"], messages_total=total_embedded)
+                if task_id is not None:
+                    complete_task(pool, task_id, messages_total=total_embedded)
                 create_hnsw_index(pool)
                 logger.info("phase_complete", phase="embed", total=total_embedded)
 
