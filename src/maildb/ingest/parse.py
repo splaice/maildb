@@ -39,6 +39,11 @@ ON CONFLICT DO NOTHING
 """
 
 
+def _sanitize_row(row: dict[str, object]) -> dict[str, object]:
+    """Strip NUL bytes from string values — PostgreSQL text fields reject them."""
+    return {k: v.replace("\x00", "") if isinstance(v, str) else v for k, v in row.items()}
+
+
 def process_chunk(
     *,
     database_url: str,
@@ -134,26 +139,30 @@ def _process_single_chunk(
     # Single atomic transaction for all inserts
     inserted = 0
     skipped = 0
+    inserted_email_ids: set[object] = set()
     with pool.connection() as conn:
         for row in email_rows:
-            cur = conn.execute(INSERT_EMAIL_SQL, row)
+            cur = conn.execute(INSERT_EMAIL_SQL, _sanitize_row(row))
             if cur.rowcount > 0:
                 inserted += 1
+                inserted_email_ids.add(row["id"])
             else:
                 skipped += 1
 
         for att_row in unique_hashes.values():
             conn.execute(INSERT_ATTACHMENT_SQL, att_row)
 
-        if attachment_meta:
-            all_hashes = list({m["sha256"] for m in attachment_meta})
+        # Only link attachments for emails that were actually inserted
+        valid_meta = [m for m in attachment_meta if m["email_id"] in inserted_email_ids]
+        if valid_meta:
+            all_hashes = list({m["sha256"] for m in valid_meta})
             cur = conn.execute(
                 "SELECT id, sha256 FROM attachments WHERE sha256 = ANY(%(hashes)s)",
                 {"hashes": all_hashes},
             )
             hash_to_id = {row[1]: row[0] for row in cur.fetchall()}
 
-            for meta in attachment_meta:
+            for meta in valid_meta:
                 att_id = hash_to_id.get(meta["sha256"])
                 if att_id:
                     conn.execute(

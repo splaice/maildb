@@ -10,4 +10,8 @@ wheels/
 .venv
 .env
 
+# Ingest artifacts
+attachments/
+ingest_tmp/
+
 .claude/settings.local.json

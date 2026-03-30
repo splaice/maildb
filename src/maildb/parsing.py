@@ -185,7 +185,7 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
     return {
         "message_id": message_id,
         "thread_id": thread_id,
-        "subject": msg.get("Subject"),
+        "subject": str(msg.get("Subject")) if msg.get("Subject") is not None else None,
         "sender_name": sender_name or None,
         "sender_address": sender_address or None,
         "sender_domain": sender_domain,

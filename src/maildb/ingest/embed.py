@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+from typing import Any
 
 import structlog
 from psycopg.rows import dict_row
@@ -17,6 +17,71 @@ WHERE embedding IS NULL
 LIMIT %(batch_size)s
 FOR UPDATE SKIP LOCKED
 """
+
+# Zero vector used to mark emails that cannot be embedded (e.g. too long).
+# This prevents them from being retried on every batch.
+SKIP_SENTINEL = "[0]"
+
+
+def _fetch_batch(pool: ConnectionPool, batch_size: int) -> list[dict[str, Any]]:
+    """Fetch a batch of un-embedded rows. Returns empty list when no work remains."""
+    with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(SELECT_BATCH_SQL, {"batch_size": batch_size})
+        rows = cur.fetchall()
+        # Rollback to release FOR UPDATE locks — we'll update by id later
+        conn.rollback()
+    return [dict(r) for r in rows]
+
+
+def _embed_and_update_batch(
+    pool: ConnectionPool,
+    client: EmbeddingClient,
+    rows: list[dict[str, Any]],
+    texts: list[str],
+) -> int:
+    """Embed a full batch and update all rows. Returns count updated."""
+    embeddings = client.embed_batch(texts)
+    with pool.connection() as conn:
+        for row, emb in zip(rows, embeddings, strict=True):
+            conn.execute(
+                "UPDATE emails SET embedding = %s WHERE id = %s",
+                (emb, row["id"]),
+            )
+        conn.commit()
+    return len(rows)
+
+
+def _embed_and_update_single(
+    pool: ConnectionPool,
+    client: EmbeddingClient,
+    rows: list[dict[str, Any]],
+    texts: list[str],
+    dimensions: int,
+) -> int:
+    """Embed rows one at a time. Mark failures with a zero vector so they aren't retried."""
+    updated = 0
+    zero_vector = [0.0] * dimensions
+    for row, text in zip(rows, texts, strict=True):
+        try:
+            emb = client.embed(text)
+        except Exception:
+            logger.warning("embed_single_skipped", email_id=str(row["id"]))
+            # Mark with zero vector so this row is not picked up again
+            with pool.connection() as conn:
+                conn.execute(
+                    "UPDATE emails SET embedding = %s WHERE id = %s",
+                    (zero_vector, row["id"]),
+                )
+                conn.commit()
+            continue
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE emails SET embedding = %s WHERE id = %s",
+                (emb, row["id"]),
+            )
+            conn.commit()
+        updated += 1
+    return updated
 
 
 def embed_worker(
@@ -37,48 +102,28 @@ def embed_worker(
     )
 
     total_updated = 0
-    consecutive_failures = 0
-    max_failures = 3
 
     try:
         while True:
-            with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(SELECT_BATCH_SQL, {"batch_size": batch_size})
-                rows = cur.fetchall()
+            rows = _fetch_batch(pool, batch_size)
+            if not rows:
+                break
 
-                if not rows:
-                    break
+            texts = [
+                build_embedding_text(r["subject"], r["sender_name"], r["body_text"]) for r in rows
+            ]
 
-                texts = [
-                    build_embedding_text(r["subject"], r["sender_name"], r["body_text"])
-                    for r in rows
-                ]
-
-                try:
-                    embeddings = client.embed_batch(texts)
-                    consecutive_failures = 0
-                except Exception:
-                    consecutive_failures += 1
-                    logger.warning(
-                        "embed_batch_failed",
-                        attempt=consecutive_failures,
-                        max=max_failures,
-                    )
-                    conn.rollback()
-                    if consecutive_failures >= max_failures:
-                        logger.exception("embed_worker_giving_up")
-                        break
-                    time.sleep(2**consecutive_failures)
-                    continue
-
-                for row, emb in zip(rows, embeddings, strict=True):
-                    conn.execute(
-                        "UPDATE emails SET embedding = %s WHERE id = %s",
-                        (emb, row["id"]),
-                    )
-                conn.commit()
-                total_updated += len(rows)
-                logger.info("embed_batch_done", batch_size=len(rows), total=total_updated)
+            try:
+                batch_updated = _embed_and_update_batch(pool, client, rows, texts)
+                total_updated += batch_updated
+                logger.info("embed_batch_done", batch_size=batch_updated, total=total_updated)
+            except Exception:
+                # Batch failed — fall back to one-at-a-time
+                logger.warning("embed_batch_failed_falling_back", batch_size=len(rows))
+                batch_updated = _embed_and_update_single(
+                    pool, client, rows, texts, embedding_dimensions
+                )
+                total_updated += batch_updated
 
     finally:
         pool.close()

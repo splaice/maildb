@@ -9,13 +9,22 @@ import structlog
 logger = structlog.get_logger()
 
 
+# nomic-embed-text has an 8192 token context window.
+# Token-dense content (URLs, code, non-ASCII) can yield ~1.2 chars/token,
+# so 6000 chars safely stays within the limit for all content types.
+MAX_EMBEDDING_CHARS = 6_000
+
+
 def build_embedding_text(
     subject: str | None,
     sender_name: str | None,
     body_text: str | None,
 ) -> str:
-    """Build the text string used for embedding."""
-    return f"Subject: {subject or ''}\nFrom: {sender_name or ''}\n\n{body_text or ''}"
+    """Build the text string used for embedding, truncated to fit model context."""
+    text = f"Subject: {subject or ''}\nFrom: {sender_name or ''}\n\n{body_text or ''}"
+    if len(text) > MAX_EMBEDDING_CHARS:
+        text = text[:MAX_EMBEDDING_CHARS]
+    return text
 
 
 class EmbeddingClient:
