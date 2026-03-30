@@ -162,6 +162,14 @@ def get_status(pool: ConnectionPool) -> dict[str, Any]:
     with pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
         result["total_emails"] = cur.fetchone()[0]  # type: ignore[index]
+        cur = conn.execute(
+            "SELECT count(*) FROM emails WHERE embedding IS NOT NULL AND vector_norm(embedding) > 0"
+        )
+        result["total_embedded_real"] = cur.fetchone()[0]  # type: ignore[index]
+        cur = conn.execute(
+            "SELECT count(*) FROM emails WHERE embedding IS NOT NULL AND vector_norm(embedding) = 0"
+        )
+        result["total_embedded_skipped"] = cur.fetchone()[0]  # type: ignore[index]
         cur = conn.execute("SELECT count(*) FROM emails WHERE embedding IS NOT NULL")
         result["total_embedded"] = cur.fetchone()[0]  # type: ignore[index]
         cur = conn.execute("SELECT count(*) FROM attachments")

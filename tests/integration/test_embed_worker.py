@@ -5,6 +5,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from maildb.ingest.embed import embed_worker
+from maildb.ingest.orchestrator import get_status
 
 pytestmark = pytest.mark.integration
 
@@ -39,6 +40,43 @@ def test_embed_worker_processes_null_embeddings(test_pool, test_settings):
     with test_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT count(*) AS c FROM emails WHERE embedding IS NOT NULL")
         assert cur.fetchone()["c"] == 2
+
+
+def _insert_email_with_zero_vector(pool, message_id, dimensions=768):
+    zero_vector = [0.0] * dimensions
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
+                   body_text, embedding, created_at)
+               VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
+                   'Body', %(embedding)s, now())""",
+            {"id": uuid4(), "message_id": message_id, "embedding": zero_vector},
+        )
+        conn.commit()
+
+
+def _insert_email_with_real_embedding(pool, message_id, dimensions=768):
+    embedding = [0.1] * dimensions
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
+                   body_text, embedding, created_at)
+               VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
+                   'Body', %(embedding)s, now())""",
+            {"id": uuid4(), "message_id": message_id, "embedding": embedding},
+        )
+        conn.commit()
+
+
+def test_get_status_separates_real_and_sentinel_embeddings(test_pool):
+    _insert_email_with_real_embedding(test_pool, "real-1@example.com")
+    _insert_email_with_real_embedding(test_pool, "real-2@example.com")
+    _insert_email_with_zero_vector(test_pool, "sentinel-1@example.com")
+    _insert_test_email(test_pool, "no-embed@example.com")
+    status = get_status(test_pool)
+    assert status["total_embedded_real"] == 2
+    assert status["total_embedded_skipped"] == 1
+    assert status["total_emails"] == 4
 
 
 def test_embed_worker_exits_when_no_work(test_pool, test_settings):

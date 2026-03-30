@@ -213,7 +213,7 @@ class MailDB:
             subject_contains=subject_contains,
             labels=labels,
         )
-        conditions.insert(0, "embedding IS NOT NULL")
+        conditions.insert(0, "embedding IS NOT NULL AND vector_norm(embedding) > 0")
         params["query_embedding"] = str(query_embedding)
 
         where = " AND ".join(conditions)
