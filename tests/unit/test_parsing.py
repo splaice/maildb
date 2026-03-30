@@ -207,3 +207,42 @@ def test_safe_header_header_object() -> None:
     result = _safe_header(mbox_msg, "Subject")
     assert isinstance(result, str)
     assert "llo" in result
+
+
+def test_recipients_filters_empty_addresses() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<filter-empty@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "valid@example.com, , "
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    result = parse_message(mb.mboxMessage(msg))
+    assert result is not None
+    assert "" not in result["recipients"]["to"]
+    assert all(isinstance(addr, str) for addr in result["recipients"]["to"])
+
+
+def test_recipients_structure_always_has_keys() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<struct-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    result = parse_message(mb.mboxMessage(msg))
+    assert result is not None
+    r = result["recipients"]
+    assert isinstance(r, dict)
+    assert set(r.keys()) == {"to", "cc", "bcc"}
+    assert isinstance(r["to"], list)
+    assert isinstance(r["cc"], list)
+    assert isinstance(r["bcc"], list)
+
+
+def test_recipients_filters_none_like_addresses() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<none-addr@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "valid@example.com"
+    msg["Cc"] = "   ,  "
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    result = parse_message(mb.mboxMessage(msg))
+    assert result is not None
+    assert all(addr.strip() for addr in result["recipients"]["cc"])
