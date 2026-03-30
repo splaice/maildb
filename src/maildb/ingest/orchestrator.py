@@ -167,6 +167,40 @@ def run_pipeline(
         pool.close()
 
 
+_PHASE_CASCADE = {
+    "parse": ["parse", "index", "embed"],
+    "index": ["index", "embed"],
+    "embed": ["embed"],
+}
+
+
+def reset_pipeline(pool: ConnectionPool, *, phase: str | None) -> None:
+    """Reset pipeline state. If phase is None, full reset."""
+    with pool.connection() as conn:
+        if phase is None:
+            conn.execute("DELETE FROM email_attachments")
+            conn.execute("DELETE FROM attachments")
+            conn.execute("DELETE FROM emails")
+            conn.execute("DELETE FROM ingest_tasks")
+        else:
+            phases_to_clear = _PHASE_CASCADE.get(phase)
+            if phases_to_clear is None:
+                msg = f"Unknown phase: {phase}. Must be one of: parse, index, embed"
+                raise ValueError(msg)
+            conn.execute(
+                "DELETE FROM ingest_tasks WHERE phase = ANY(%(phases)s)",
+                {"phases": phases_to_clear},
+            )
+            if "parse" in phases_to_clear:
+                conn.execute("DELETE FROM email_attachments")
+                conn.execute("DELETE FROM attachments")
+                conn.execute("DELETE FROM emails")
+            elif "embed" in phases_to_clear:
+                conn.execute("UPDATE emails SET embedding = NULL")
+        conn.commit()
+    logger.info("pipeline_reset", phase=phase or "all")
+
+
 def get_status(pool: ConnectionPool) -> dict[str, Any]:
     """Get status for all phases."""
     result: dict[str, Any] = {}

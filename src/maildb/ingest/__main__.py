@@ -5,7 +5,7 @@ from pathlib import Path
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
-from maildb.ingest.orchestrator import get_status, run_pipeline
+from maildb.ingest.orchestrator import get_status, reset_pipeline, run_pipeline
 
 
 def main() -> None:
@@ -13,7 +13,7 @@ def main() -> None:
     args = sys.argv[1:]
 
     if not args:
-        sys.stdout.write("Usage: python -m maildb.ingest <mbox_path> | status\n")
+        sys.stdout.write("Usage: python -m maildb.ingest <mbox_path> | status | reset\n")
         sys.exit(1)
 
     command = args[0]
@@ -23,6 +23,37 @@ def main() -> None:
         init_db(pool)
         status = get_status(pool)
         _print_status(status)
+        pool.close()
+        return
+
+    if command == "reset":
+        phase = None
+        confirm = False
+        i = 1
+        while i < len(args):
+            if args[i] == "--phase" and i + 1 < len(args):
+                phase = args[i + 1]
+                i += 2
+            elif args[i] == "--yes":
+                confirm = True
+                i += 1
+            else:
+                sys.stderr.write(f"Unknown argument: {args[i]}\n")
+                sys.exit(1)
+
+        if not confirm:
+            target = phase or "all phases"
+            sys.stdout.write(f"This will reset {target}. Continue? [y/N] ")
+            sys.stdout.flush()
+            response = input()
+            if response.lower() not in ("y", "yes"):
+                sys.stdout.write("Aborted.\n")
+                return
+
+        pool = create_pool(settings)
+        init_db(pool)
+        reset_pipeline(pool, phase=phase)
+        sys.stdout.write(f"Reset complete ({phase or 'full'}).\n")
         pool.close()
         return
 
