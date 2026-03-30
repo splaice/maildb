@@ -39,11 +39,6 @@ ON CONFLICT DO NOTHING
 """
 
 
-def _sanitize_row(row: dict[str, object]) -> dict[str, object]:
-    """Strip NUL bytes from string values — PostgreSQL text fields reject them."""
-    return {k: v.replace("\x00", "") if isinstance(v, str) else v for k, v in row.items()}
-
-
 def process_chunk(
     *,
     database_url: str,
@@ -136,23 +131,33 @@ def _process_single_chunk(
                 }
             )
 
-    # Single atomic transaction for all inserts
+    # Insert rows individually so one bad row doesn't kill the chunk
     inserted = 0
     skipped = 0
+    errored = 0
     inserted_email_ids: set[object] = set()
     with pool.connection() as conn:
         for row in email_rows:
-            cur = conn.execute(INSERT_EMAIL_SQL, _sanitize_row(row))
-            if cur.rowcount > 0:
-                inserted += 1
-                inserted_email_ids.add(row["id"])
-            else:
-                skipped += 1
+            try:
+                cur = conn.execute(INSERT_EMAIL_SQL, row)
+                if cur.rowcount > 0:
+                    inserted += 1
+                    inserted_email_ids.add(row["id"])
+                else:
+                    skipped += 1
+            except Exception:
+                conn.rollback()
+                logger.warning(
+                    "row_insert_failed",
+                    message_id=row.get("message_id"),
+                    task_id=task_id,
+                )
+                errored += 1
+                continue
 
         for att_row in unique_hashes.values():
             conn.execute(INSERT_ATTACHMENT_SQL, att_row)
 
-        # Only link attachments for emails that were actually inserted
         valid_meta = [m for m in attachment_meta if m["email_id"] in inserted_email_ids]
         if valid_meta:
             all_hashes = list({m["sha256"] for m in valid_meta})
@@ -181,7 +186,13 @@ def _process_single_chunk(
         task_id,
         messages_total=len(messages),
         messages_inserted=inserted,
-        messages_skipped=skipped,
+        messages_skipped=skipped + errored,
         attachments_extracted=len(unique_hashes),
     )
-    logger.info("chunk_processed", task_id=task_id, inserted=inserted, skipped=skipped)
+    logger.info(
+        "chunk_processed",
+        task_id=task_id,
+        inserted=inserted,
+        skipped=skipped,
+        errored=errored,
+    )
