@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from maildb.ingest.__main__ import main
 
 if TYPE_CHECKING:
-    from pytest import TempPathFactory
+    from pathlib import Path
 
 
 def test_skip_embed_flag_parsed(tmp_path: Path) -> None:
