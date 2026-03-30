@@ -34,21 +34,16 @@ def test_pool(test_settings: Settings):  # type: ignore[no-untyped-def]
 
 
 @pytest.fixture(autouse=True)
-def _clean_emails(request, test_settings: Settings) -> Iterator[None]:  # type: ignore[no-untyped-def]
+def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
     """Delete all rows after each integration test to prevent test pollution."""
-    # Skip for unit tests that don't need database fixtures
-    if "unit" in request.node.nodeid or "integration" not in [
-        m.name for m in request.node.iter_markers()
-    ]:
+    if "integration" not in [m.name for m in request.node.iter_markers()]:
         yield
         return
-    # This is an integration test - need the pool
-    test_pool = create_pool(test_settings)
     yield
-    with test_pool.connection() as conn:
+    pool = request.getfixturevalue("test_pool")
+    with pool.connection() as conn:
         conn.execute("DELETE FROM email_attachments")
         conn.execute("DELETE FROM attachments")
         conn.execute("DELETE FROM ingest_tasks")
         conn.execute("DELETE FROM emails")
         conn.commit()
-    test_pool.close()
