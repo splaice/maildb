@@ -131,7 +131,9 @@ def _process_single_chunk(
                 }
             )
 
-    # Insert rows individually so one bad row doesn't kill the chunk
+    # Insert rows individually so one bad row doesn't kill the chunk.
+    # Use savepoints to isolate failures — rollback to the savepoint keeps
+    # all previously inserted rows intact in the outer transaction.
     inserted = 0
     skipped = 0
     errored = 0
@@ -139,14 +141,16 @@ def _process_single_chunk(
     with pool.connection() as conn:
         for row in email_rows:
             try:
+                conn.execute("SAVEPOINT row_insert")
                 cur = conn.execute(INSERT_EMAIL_SQL, row)
+                conn.execute("RELEASE SAVEPOINT row_insert")
                 if cur.rowcount > 0:
                     inserted += 1
                     inserted_email_ids.add(row["id"])
                 else:
                     skipped += 1
             except Exception:
-                conn.rollback()
+                conn.execute("ROLLBACK TO SAVEPOINT row_insert")
                 logger.warning(
                     "row_insert_failed",
                     message_id=row.get("message_id"),

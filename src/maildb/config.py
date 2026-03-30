@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     user_email: str | None = None
     attachment_dir: str = "~/maildb/attachments"
     ingest_chunk_size_mb: int = 50
-    ingest_tmp_dir: str = "/tmp/maildb-ingest-tmp-dir"
+    ingest_tmp_dir: str = "/tmp/maildb-ingest-tmp-dir"  # noqa: S108
     ingest_workers: int = -1
     embed_workers: int = 4
     embed_batch_size: int = 50

@@ -40,18 +40,6 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
         assert cur.fetchone()[0] > 0
 
 
-def _insert_unembedded_email(pool, message_id):
-    with pool.connection() as conn:
-        conn.execute(
-            """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
-                   body_text, created_at)
-               VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
-                   'Body text', now())""",
-            {"id": uuid4(), "message_id": message_id},
-        )
-        conn.commit()
-
-
 def test_embed_resumes_after_completion(test_pool):
     embed_task = create_task(test_pool, phase="embed")
     complete_task(test_pool, embed_task["id"], messages_total=0)
