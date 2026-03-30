@@ -1,6 +1,9 @@
 # src/maildb/config.py
 from __future__ import annotations
 
+from pathlib import Path
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -17,9 +20,16 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
     user_email: str | None = None
-    attachment_dir: str = "./attachments"
+    attachment_dir: str = "~/maildb/attachments"
     ingest_chunk_size_mb: int = 50
-    ingest_tmp_dir: str = "./ingest_tmp"
+    ingest_tmp_dir: str = "/tmp/maildb-ingest-tmp-dir"
     ingest_workers: int = -1
     embed_workers: int = 4
     embed_batch_size: int = 50
+
+    @model_validator(mode="after")
+    def _expand_paths(self) -> Settings:
+        """Expand ~ and resolve relative paths for directory settings."""
+        self.attachment_dir = str(Path(self.attachment_dir).expanduser())
+        self.ingest_tmp_dir = str(Path(self.ingest_tmp_dir).expanduser())
+        return self
