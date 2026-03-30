@@ -64,9 +64,13 @@ def _print_status(status: dict) -> None:  # type: ignore[type-arg]
         )
     lines.append("")
     lines.append(f"Messages: {status.get('total_emails', 0):,}")
-    lines.append(
-        f"Embeddings: {status.get('total_embedded', 0):,} / {status.get('total_emails', 0):,}"
-    )
+    real = status.get("total_embedded_real", status.get("total_embedded", 0))
+    skipped = status.get("total_embedded_skipped", 0)
+    total = status.get("total_emails", 0)
+    if skipped > 0:
+        lines.append(f"Embeddings: {real:,} real + {skipped:,} skipped / {total:,}")
+    else:
+        lines.append(f"Embeddings: {real:,} / {total:,}")
     lines.append(
         f"Attachments: {status.get('total_attachments', 0):,} "
         f"({status.get('total_attachments_unique', 0):,} unique)"
