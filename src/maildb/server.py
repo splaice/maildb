@@ -85,7 +85,25 @@ def find(
     limit: int = 50,
     order: str = "date DESC",
 ) -> list[dict[str, Any]]:
-    """Search emails by structured filters: sender, domain, date range, attachments, subject, labels."""
+    """Search emails by structured attribute filters.
+
+    Parameters:
+      sender: exact email address (e.g. "alice@acme.com")
+      sender_domain: domain portion (e.g. "acme.com")
+      recipient: address in To/CC/BCC fields
+      after: ISO date string, inclusive (e.g. "2025-01-01")
+      before: ISO date string, exclusive
+      has_attachment: filter by attachment presence
+      subject_contains: case-insensitive substring match in subject
+      labels: array containment filter (AND logic, e.g. ["INBOX", "Finance"])
+      limit: max results (default 50)
+      order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
+
+    Returns list of email dicts with: id, message_id, thread_id, subject, sender_name,
+    sender_address, sender_domain, recipients, date, body_text, has_attachment, labels.
+
+    Example: find(sender_domain="stripe.com", after="2025-01-01", has_attachment=True)
+    """
     db = _get_db(ctx)
     results = db.find(
         sender=sender,
@@ -116,7 +134,18 @@ def search(
     labels: list[str] | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Semantic search for emails by natural language query, with optional structured filters."""
+    """Semantic search for emails by natural language query. Requires Ollama running.
+
+    Parameters:
+      query: natural language search text (e.g. "budget concerns", "deployment complaints")
+      sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels:
+        same filters as find() — applied on top of semantic ranking
+      limit: max results (default 20)
+
+    Returns list of {email: <email dict>, similarity: float} ordered by descending similarity.
+
+    Example: search("complaints about deployment", sender_domain="eng.acme.com", limit=5)
+    """
     db = _get_db(ctx)
     results = db.search(
         query,
@@ -135,7 +164,15 @@ def search(
 
 @mcp.tool()
 def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
-    """Get all emails in a conversation thread, ordered chronologically."""
+    """Retrieve all emails in a conversation thread, ordered chronologically.
+
+    Parameters:
+      thread_id: the thread identifier (from an email's thread_id field)
+
+    Returns list of email dicts ordered by date ASC.
+
+    Example: get_thread("abc123@mail.gmail.com")
+    """
     db = _get_db(ctx)
     results = db.get_thread(thread_id)
     return [_serialize_email(e) for e in results]
@@ -143,7 +180,15 @@ def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
 
 @mcp.tool()
 def get_thread_for(ctx: Context, message_id: str) -> list[dict[str, Any]]:
-    """Find the full thread containing a specific email message."""
+    """Find the full thread containing a specific email message.
+
+    Parameters:
+      message_id: the RFC 2822 Message-ID of any email in the thread
+
+    Returns list of email dicts (the full thread) ordered by date ASC. Empty list if not found.
+
+    Example: get_thread_for("<msg-id-123@example.com>")
+    """
     db = _get_db(ctx)
     results = db.get_thread_for(message_id)
     return [_serialize_email(e) for e in results]
@@ -158,7 +203,19 @@ def top_contacts(
     group_by: str = "address",
     exclude_domains: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Find most frequent email correspondents. Direction: 'inbound', 'outbound', or 'both'. group_by: 'address' or 'domain'. exclude_domains: list of domains to filter out."""
+    """Find most frequent email correspondents by message count.
+
+    Parameters:
+      group_by: "address" (default) for individual addresses, "domain" for domain aggregation
+      exclude_domains: list of domains to filter out (e.g. ["mycompany.com"])
+      period: ISO date string — only count messages after this date
+      limit: max results (default 10)
+      direction: "inbound" | "outbound" | "both" (default "both")
+
+    Returns list of {address: str, count: int} (or {domain: str, count: int} when group_by="domain").
+
+    Example: top_contacts(group_by="domain", exclude_domains=["postmates.com"], direction="outbound")
+    """
     db = _get_db(ctx)
     return db.top_contacts(
         period=period,
@@ -176,7 +233,19 @@ def topics_with(
     sender_domain: str | None = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """Find representative emails spanning different topics with a contact."""
+    """Find representative emails spanning different topics with a contact.
+
+    Uses embedding-based farthest-point selection for maximum topic diversity.
+
+    Parameters:
+      sender: exact email address (e.g. "bob@acme.com")
+      sender_domain: domain to match (e.g. "acme.com") — provide sender OR sender_domain
+      limit: number of diverse representatives (default 5)
+
+    Returns list of email dicts maximizing topic diversity.
+
+    Example: topics_with(sender="bob@corp.com", limit=5)
+    """
     db = _get_db(ctx)
     results = db.topics_with(sender=sender, sender_domain=sender_domain, limit=limit)
     return [_serialize_email(e) for e in results]
@@ -193,12 +262,19 @@ def unreplied(
     sender_domain: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Find emails that have no reply in the same thread.
+    """Find emails with no reply in the same thread.
 
-    direction: "inbound" (default) — messages from others where user never replied.
-               "outbound" — messages from user where recipient(s) never replied.
-    recipient: For outbound — filter to a specific recipient (To/CC/BCC) and check
-               that this recipient never replied.
+    Parameters:
+      direction: "inbound" (default) — messages from others where you never replied
+                 "outbound" — your messages where recipient(s) never replied
+      recipient: for outbound — filter to a specific recipient and check they never replied
+      after, before: ISO date range filters
+      sender, sender_domain: for inbound — filter by original sender
+      limit: max results (default 100)
+
+    Returns list of email dicts ordered by date DESC.
+
+    Example: unreplied(direction="outbound", recipient="bob@corp.com")
     """
     db = _get_db(ctx)
     results = db.unreplied(
@@ -222,8 +298,17 @@ def correspondence(
     limit: int = 500,
     order: str = "date ASC",
 ) -> list[dict[str, Any]]:
-    """Get all emails exchanged with a specific person (sent by or to them).
-    Returns chronological by default with higher limit (500) for full history.
+    """Get all emails exchanged with a specific person (sent by them or to them).
+
+    Parameters:
+      address: the person's email address (required)
+      after, before: ISO date range filters
+      limit: max results (default 500, higher for full relationship history)
+      order: "date ASC" (default, chronological) or "date DESC"
+
+    Returns list of email dicts.
+
+    Example: correspondence(address="scott@banister.com", after="2024-01-01")
     """
     db = _get_db(ctx)
     results = db.correspondence(
@@ -242,8 +327,19 @@ def mention_search(
     before: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Search for emails containing specific text in body or subject (case-insensitive ILIKE).
-    Unlike search(), does not need Ollama — uses substring matching.
+    """Search for emails containing specific text in body or subject (case-insensitive).
+
+    Unlike search(), uses ILIKE substring matching — no Ollama needed.
+
+    Parameters:
+      text: search term (case-insensitive, e.g. "pei-chin", "chief of staff")
+      sender, sender_domain: optional sender filters
+      after, before: ISO date range filters
+      limit: max results (default 50)
+
+    Returns list of email dicts ordered by date DESC.
+
+    Example: mention_search(text="quarterly review", sender_domain="acme.com")
     """
     db = _get_db(ctx)
     results = db.mention_search(
@@ -264,8 +360,18 @@ def cluster(
     message_ids: list[str] | None = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """Extract diverse topic representatives from an email subset.
-    Provide either where (DSL filter dict) or message_ids (list of message_id strings).
+    """Extract diverse topic representatives from an email subset using embedding similarity.
+
+    Provide exactly one of where or message_ids (not both).
+
+    Parameters:
+      where: DSL filter dict (e.g. {"field": "sender_domain", "eq": "stripe.com"})
+      message_ids: explicit list of message_id strings (for chaining with other tools)
+      limit: number of diverse representatives (default 5)
+
+    Returns list of email dicts maximizing topic diversity via farthest-point selection.
+
+    Example: cluster(where={"and": [{"field": "sender_domain", "eq": "stripe.com"}, {"field": "date", "gte": "2024-01-01"}]}, limit=5)
     """
     db = _get_db(ctx)
     results = db.cluster(where=where, message_ids=message_ids, limit=limit)
@@ -279,7 +385,17 @@ def long_threads(
     after: str | None = None,
     participant: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Find email threads with many messages."""
+    """Find email threads with many messages.
+
+    Parameters:
+      min_messages: minimum message count threshold (default 5)
+      after: ISO date string — only count messages after this date
+      participant: only threads where this address appears as sender
+
+    Returns list of {thread_id, message_count, first_date, last_date, participants[]}.
+
+    Example: long_threads(min_messages=10, participant="alice@example.com")
+    """
     db = _get_db(ctx)
     return db.long_threads(min_messages=min_messages, after=after, participant=participant)
 
@@ -291,12 +407,21 @@ def query(
 ) -> list[dict[str, Any]]:
     """Execute a structured query using the maildb DSL.
 
-    spec: JSON object with optional keys:
-      from: "emails" | "sent_to" | "email_labels"
-      select: [{field: "col"}, {count: "*", as: "n"}, ...]
-      where: {field: "col", op: value} or {and/or/not: [...]}
-      group_by, having, order_by, limit, offset
-    Returns list of dicts. 5s timeout, 1000-row cap.
+    Parameters:
+      spec: JSON object with keys:
+        from: "emails" | "sent_to" | "email_labels" (default: "emails")
+        select: [{field: "col"}, {count: "*", as: "n"}, {date_trunc: "month", field: "date", as: "period"}]
+        where: {field: "col", op: value} or {and/or/not: [...]}
+          Operators: eq, neq, gt, gte, lt, lte, ilike, not_ilike, in, not_in, contains, is_null
+        group_by: ["col1", "col2"]
+        having: same syntax as where, can reference select aliases
+        order_by: [{field: "col", dir: "asc|desc"}]
+        limit: int (max 1000, default 50)
+        offset: int
+
+    Returns list of dicts. 5s statement timeout enforced.
+
+    Example: query(spec={"from": "sent_to", "select": [{"field": "recipient_domain"}, {"count": "*", "as": "n"}], "group_by": ["recipient_domain"], "order_by": [{"field": "n", "dir": "desc"}], "limit": 10})
     """
     db = _get_db(ctx)
     return db.query(spec)
