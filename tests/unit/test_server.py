@@ -172,7 +172,9 @@ def test_serialize_email_explicit_fields_with_body_length() -> None:
 def test_serialize_email_body_max_chars_truncates() -> None:
     email = _make_email()
     email.body_text = "Hello world, this is a long email body"
-    d = _serialize_email(email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=11)
+    d = _serialize_email(
+        email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=11
+    )
     assert d["body_text"] == "Hello world..."
     assert d["body_truncated"] is True
 
@@ -180,7 +182,9 @@ def test_serialize_email_body_max_chars_truncates() -> None:
 def test_serialize_email_body_max_chars_no_truncation_needed() -> None:
     email = _make_email()
     email.body_text = "Short"
-    d = _serialize_email(email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=100)
+    d = _serialize_email(
+        email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=100
+    )
     assert d["body_text"] == "Short"
     assert "body_truncated" not in d
 

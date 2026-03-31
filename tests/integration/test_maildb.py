@@ -207,11 +207,13 @@ def seed_recipient_counts(test_pool):  # type: ignore[no-untyped-def]
             "sender_name": "Alice",
             "sender_address": "alice@example.com",
             "sender_domain": "example.com",
-            "recipients": json.dumps({
-                "to": ["bob@example.com", "carol@example.com"],
-                "cc": ["dave@example.com"],
-                "bcc": [],
-            }),
+            "recipients": json.dumps(
+                {
+                    "to": ["bob@example.com", "carol@example.com"],
+                    "cc": ["dave@example.com"],
+                    "bcc": [],
+                }
+            ),
             "date": datetime(2025, 1, 2, 10, 0, tzinfo=UTC),
             "body_text": "Group discussion.",
             "body_html": None,
@@ -230,11 +232,13 @@ def seed_recipient_counts(test_pool):  # type: ignore[no-untyped-def]
             "sender_name": "Alice",
             "sender_address": "alice@example.com",
             "sender_domain": "example.com",
-            "recipients": json.dumps({
-                "to": ["bob@example.com"],
-                "cc": [],
-                "bcc": ["secret@example.com"],
-            }),
+            "recipients": json.dumps(
+                {
+                    "to": ["bob@example.com"],
+                    "cc": [],
+                    "bcc": ["secret@example.com"],
+                }
+            ),
             "date": datetime(2025, 1, 3, 10, 0, tzinfo=UTC),
             "body_text": "Secret copy.",
             "body_html": None,
@@ -279,7 +283,7 @@ def test_find_direct_only(test_pool, seed_recipient_counts) -> None:  # type: ig
 
 def test_find_max_to(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results, total = db.find(sender="alice@example.com", max_to=1)
+    results, _ = db.find(sender="alice@example.com", max_to=1)
     message_ids = [e.message_id for e in results]
     assert "rcpt-1@example.com" in message_ids
     assert "rcpt-3@example.com" in message_ids
@@ -288,7 +292,7 @@ def test_find_max_to(test_pool, seed_recipient_counts) -> None:  # type: ignore[
 
 def test_find_max_cc(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results, total = db.find(sender="alice@example.com", max_cc=0)
+    results, _ = db.find(sender="alice@example.com", max_cc=0)
     message_ids = [e.message_id for e in results]
     assert "rcpt-1@example.com" in message_ids
     assert "rcpt-3@example.com" in message_ids
@@ -297,7 +301,7 @@ def test_find_max_cc(test_pool, seed_recipient_counts) -> None:  # type: ignore[
 
 def test_find_max_recipients(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results, total = db.find(sender="alice@example.com", max_recipients=2)
+    results, _ = db.find(sender="alice@example.com", max_recipients=2)
     message_ids = [e.message_id for e in results]
     # rcpt-1: 1 total, rcpt-3: 2 total (1 To + 1 BCC), rcpt-2: 3 total
     assert "rcpt-1@example.com" in message_ids

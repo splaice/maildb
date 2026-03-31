@@ -221,17 +221,19 @@ def find(
       has_attachment: filter by attachment presence
       subject_contains: case-insensitive substring match in subject
       labels: array containment filter (AND logic, e.g. ["INBOX", "Finance"])
+      max_to: max number of To recipients (e.g. 1 for direct messages)
+      max_cc: max number of CC recipients (e.g. 0 for no-CC messages)
+      max_recipients: max total recipients across To + CC + BCC
+      direct_only: shorthand for max_to=1, max_cc=0 (cannot combine with max_to/max_cc)
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
       order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
-      fields: list of field names to return (default: all). Valid: id, message_id, thread_id,
-        subject, sender_name, sender_address, sender_domain, recipients, date, body_text,
-        has_attachment, attachments, labels, in_reply_to, references, created_at
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
+        Pass ["body_text", ...] to include body content.
 
-    Returns list of email dicts with: id, message_id, thread_id, subject, sender_name,
-    sender_address, sender_domain, recipients, date, body_text, has_attachment, labels.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
-    Example: find(sender_domain="stripe.com", after="2025-01-01", has_attachment=True)
+    Example: find(sender="disney@postmates.com", direct_only=True, limit=100)
     """
     db = _get_db(ctx)
     results, total = db.find(
@@ -283,11 +285,12 @@ def search(
       query: natural language search text (e.g. "budget concerns", "deployment complaints")
       sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels:
         same filters as find() — applied on top of semantic ranking
+      max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
       limit: max results (default 20)
       offset: skip first N results for pagination (default 0)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
 
-    Returns list of {email: <email dict>, similarity: float} ordered by descending similarity.
+    Returns {total, offset, limit, results: [{email: {headers + body_length}, similarity}, ...]}.
 
     Example: search("complaints about deployment", sender_domain="eng.acme.com", limit=5)
     """
@@ -457,11 +460,12 @@ def unreplied(
       recipient: for outbound — filter to a specific recipient and check they never replied
       after, before: ISO date range filters
       sender, sender_domain: for inbound — filter by original sender
+      max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
       limit: max results (default 100)
       offset: skip first N results for pagination (default 0)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
 
-    Returns list of email dicts ordered by date DESC.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
     Example: unreplied(direction="outbound", recipient="bob@corp.com")
     """
@@ -501,9 +505,9 @@ def correspondence(
       limit: max results (default 500, higher for full relationship history)
       offset: skip first N results for pagination (default 0)
       order: "date ASC" (default, chronological) or "date DESC"
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
 
-    Returns list of email dicts.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
     Example: correspondence(address="scott@banister.com", after="2024-01-01")
     """
@@ -541,11 +545,12 @@ def mention_search(
       text: search term (case-insensitive, e.g. "pei-chin", "chief of staff")
       sender, sender_domain: optional sender filters
       after, before: ISO date range filters
+      max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
 
-    Returns list of email dicts ordered by date DESC.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
     Example: mention_search(text="quarterly review", sender_domain="acme.com")
     """
@@ -688,7 +693,9 @@ def get_emails(
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     # For get_emails, include body_text by default (unlike list tools)
     serialized = [
-        _serialize_email(e, fields=valid or SERIALIZABLE_EMAIL_FIELDS, body_max_chars=body_max_chars)
+        _serialize_email(
+            e, fields=valid or SERIALIZABLE_EMAIL_FIELDS, body_max_chars=body_max_chars
+        )
         for e in results
     ]
     return _wrap_response(serialized, total=len(serialized), offset=0, limit=len(ids))

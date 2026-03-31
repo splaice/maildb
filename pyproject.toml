@@ -86,7 +86,7 @@ max-complexity = 12
     "PLR2004", # magic values in assertions are fine
     "S108",    # /tmp paths in test data are not real temp file operations
 ]
-"src/maildb/maildb.py" = ["S608"]  # SQL construction is safe (parameterized)
+"src/maildb/maildb.py" = ["S608", "C901"]  # SQL construction is safe (parameterized); complexity from filter params
 "src/maildb/dsl.py" = ["S608"]  # SQL construction is safe (parameterized, whitelisted)
 "src/maildb/ingest/orchestrator.py" = ["C901"]  # pipeline orchestration is inherently sequential
 "tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
