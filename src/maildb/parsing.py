@@ -186,6 +186,19 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
         except (ValueError, TypeError):
             logger.warning("unparseable_date", message_id=message_id, raw_date=raw_date)
 
+    # Fallback: extract date from first Received header
+    if date is None:
+        received = msg.get("Received")
+        if received:
+            parts = received.rsplit(";", 1)
+            if len(parts) == 2:
+                try:
+                    date = email.utils.parsedate_to_datetime(parts[1].strip())
+                    if date.tzinfo is None:
+                        date = date.replace(tzinfo=UTC)
+                except (ValueError, TypeError):
+                    pass
+
     in_reply_to_raw = _safe_header(msg, "In-Reply-To")
     in_reply_to = _strip_angles(in_reply_to_raw) if in_reply_to_raw else None
     references = _parse_references(_safe_header(msg, "References"))

@@ -246,3 +246,30 @@ def test_recipients_filters_none_like_addresses() -> None:
     result = parse_message(mb.mboxMessage(msg))
     assert result is not None
     assert all(addr.strip() for addr in result["recipients"]["cc"])
+
+
+def test_date_falls_back_to_received_header() -> None:
+    """When Date header is missing, parse date from Received header."""
+    msg = MIMEText("Hello")
+    msg["Message-ID"] = "<no-date@test.com>"
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    # No Date header — add a Received header instead
+    msg["Received"] = "from mx.example.com by mail.example.com; Mon, 20 Jan 2025 10:00:00 +0000"
+
+    result = parse_message(msg)
+    assert result["date"] is not None
+    assert result["date"].year == 2025
+    assert result["date"].month == 1
+    assert result["date"].day == 20
+
+
+def test_date_none_when_no_date_or_received() -> None:
+    """When neither Date nor Received header exists, date is None."""
+    msg = MIMEText("Hello")
+    msg["Message-ID"] = "<no-date-at-all@test.com>"
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+
+    result = parse_message(msg)
+    assert result["date"] is None
