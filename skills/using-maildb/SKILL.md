@@ -1,123 +1,135 @@
 ---
 name: using-maildb
-description: Use when querying, searching, or retrieving emails from the maildb system — via Python library or MCP tools. Triggers on "use maildb", "find in maildb", "search maildb", "check my email", email lookup requests
+description: Use when querying, searching, or retrieving emails from the maildb MCP server. Triggers on email lookup requests, "find emails", "search maildb", "check my email", contact analysis, thread retrieval, unreplied messages
 ---
 
 # Using MailDB
 
-MailDB is a local email database with semantic search. All data stays on the user's machine (PostgreSQL + pgvector + Ollama).
+MailDB is a local email database with semantic search, exposed as an MCP server. All data stays on the user's machine (PostgreSQL + pgvector + Ollama). All interactions use MCP tools — no Python imports needed.
 
-## Choosing a Method
+## Choosing a Tool
 
 ```dot
-digraph method_choice {
+digraph tool_choice {
     "What do you need?" [shape=doublecircle];
     "Know exact filters?" [shape=diamond];
-    "Use find()" [shape=box];
+    "find" [shape=box];
     "Describing a topic?" [shape=diamond];
-    "Use search()" [shape=box];
-    "Use search() with filters" [shape=box];
+    "search" [shape=box];
     "Need full conversation?" [shape=diamond];
-    "Use get_thread()" [shape=box];
-    "Need keyword search in body?" [shape=diamond];
-    "Use mention_search()" [shape=box];
-    "Need full correspondence with a person?" [shape=diamond];
-    "Use correspondence()" [shape=box];
-    "Need diverse topics from a subset?" [shape=diamond];
-    "Use cluster()" [shape=box];
-    "Need aggregation/grouping?" [shape=diamond];
-    "Use query() DSL" [shape=box];
-    "Need contact analysis?" [shape=diamond];
-    "See Analysis Methods below" [shape=box];
+    "get_thread / get_thread_for" [shape=box];
+    "Keyword in body/subject?" [shape=diamond];
+    "mention_search" [shape=box];
+    "Full history with a person?" [shape=diamond];
+    "correspondence" [shape=box];
+    "Diverse topics from a subset?" [shape=diamond];
+    "cluster or topics_with" [shape=box];
+    "Aggregation/grouping?" [shape=diamond];
+    "query (DSL)" [shape=box];
+    "Contact or thread analysis?" [shape=diamond];
+    "top_contacts / unreplied / long_threads" [shape=box];
 
     "What do you need?" -> "Know exact filters?";
-    "Know exact filters?" -> "Use find()" [label="yes: sender, date, labels"];
+    "Know exact filters?" -> "find" [label="yes"];
     "Know exact filters?" -> "Describing a topic?" [label="no"];
-    "Describing a topic?" -> "Use search()" [label="topic only"];
-    "Describing a topic?" -> "Use search() with filters" [label="topic + filters"];
+    "Describing a topic?" -> "search" [label="yes"];
     "Describing a topic?" -> "Need full conversation?" [label="no"];
-    "Need full conversation?" -> "Use get_thread()" [label="yes"];
-    "Need full conversation?" -> "Need keyword search in body?" [label="no"];
-    "Need keyword search in body?" -> "Use mention_search()" [label="yes"];
-    "Need keyword search in body?" -> "Need full correspondence with a person?" [label="no"];
-    "Need full correspondence with a person?" -> "Use correspondence()" [label="yes"];
-    "Need full correspondence with a person?" -> "Need diverse topics from a subset?" [label="no"];
-    "Need diverse topics from a subset?" -> "Use cluster()" [label="yes"];
-    "Need diverse topics from a subset?" -> "Need aggregation/grouping?" [label="no"];
-    "Need aggregation/grouping?" -> "Use query() DSL" [label="yes"];
-    "Need aggregation/grouping?" -> "Need contact analysis?" [label="no"];
-    "Need contact analysis?" -> "See Analysis Methods below" [label="yes"];
+    "Need full conversation?" -> "get_thread / get_thread_for" [label="yes"];
+    "Need full conversation?" -> "Keyword in body/subject?" [label="no"];
+    "Keyword in body/subject?" -> "mention_search" [label="yes"];
+    "Keyword in body/subject?" -> "Full history with a person?" [label="no"];
+    "Full history with a person?" -> "correspondence" [label="yes"];
+    "Full history with a person?" -> "Diverse topics from a subset?" [label="no"];
+    "Diverse topics from a subset?" -> "cluster or topics_with" [label="yes"];
+    "Diverse topics from a subset?" -> "Aggregation/grouping?" [label="no"];
+    "Aggregation/grouping?" -> "query (DSL)" [label="yes"];
+    "Aggregation/grouping?" -> "Contact or thread analysis?" [label="no"];
+    "Contact or thread analysis?" -> "top_contacts / unreplied / long_threads" [label="yes"];
 }
 ```
 
-## Quick Reference
+## MCP Tools Quick Reference
 
-### Core Query Methods
+### Search & Retrieval
 
-| Method | Returns | Use When |
-|--------|---------|----------|
-| `find(**filters)` | `list[Email]` | Exact attribute filtering (sender, date, labels, attachments) |
-| `search(query, **filters)` | `list[SearchResult]` | Natural language topic search, optionally combined with filters |
-| `get_thread(thread_id)` | `list[Email]` | Retrieve full conversation (chronological order) |
-| `get_thread_for(message_id)` | `list[Email]` | Find which thread contains a message, then return it |
-| `correspondence(address, **filters)` | `list[Email]` | Full bidirectional email history with a person |
-| `mention_search(text, **filters)` | `list[Email]` | Keyword search in body/subject (no Ollama needed) |
+| Tool | Use When |
+|------|----------|
+| `find(sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels, limit, offset, order, fields)` | Exact attribute filtering |
+| `search(query, sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels, limit, offset, fields)` | Natural language topic search (needs Ollama) |
+| `get_thread(thread_id, fields)` | Full conversation by thread ID |
+| `get_thread_for(message_id, fields)` | Find thread containing a message |
+| `correspondence(address, after, before, limit, offset, order, fields)` | Bidirectional email history with a person |
+| `mention_search(text, sender, sender_domain, after, before, limit, offset, fields)` | Keyword search in body/subject (no Ollama) |
 
-### Analysis Methods
+### Analysis
 
-| Method | Returns | Use When | Requires `user_email` |
-|--------|---------|----------|-----------------------|
-| `top_contacts(period, limit, direction, group_by, exclude_domains)` | `list[dict]` with `{address, count}` | Most frequent correspondents; supports `group_by="domain"` and `exclude_domains` | Yes |
-| `topics_with(sender\|sender_domain)` | `list[Email]` | Diverse topic sample with a contact | No |
-| `unreplied(after, before, sender, direction, recipient)` | `list[Email]` | Inbound (or outbound with `direction="outbound"`) messages with no reply; filter by `recipient` | Yes |
-| `long_threads(min_messages, after, participant)` | `list[dict]` | Threads exceeding message count; filter by `participant` | No |
-| `cluster(where\|message_ids, limit)` | `list[Email]` | Diverse topic extraction from any subset | No |
-| `query(spec)` | `list[dict]` | Generalized DSL: aggregation, grouping, filtering | No |
+| Tool | Use When | Needs `user_email` |
+|------|----------|--------------------|
+| `top_contacts(period, limit, offset, direction, group_by, exclude_domains)` | Most frequent correspondents; `group_by="domain"` for domain view | Yes |
+| `topics_with(sender or sender_domain, limit, offset, fields)` | Diverse topic sample with a contact | No |
+| `unreplied(direction, recipient, after, before, sender, sender_domain, limit, offset, fields)` | Messages with no reply; `direction="outbound"` for sent | Yes |
+| `long_threads(min_messages, after, participant, limit, offset)` | Threads exceeding message count | No |
+| `cluster(where or message_ids, limit, offset, fields)` | Diverse topic extraction from any subset | No |
+| `query(spec)` | DSL: aggregation, grouping, custom selects | No |
 
-### Shared Filter Parameters
+### Common Parameters
 
-All of `find()` and `search()` accept these filters:
+| Parameter | Type | Notes |
+|-----------|------|-------|
+| `limit` | int | Max results (defaults vary per tool) |
+| `offset` | int | Skip first N results for pagination (default 0) |
+| `fields` | list[str] | Return only these fields. Valid: `id`, `message_id`, `thread_id`, `subject`, `sender_name`, `sender_address`, `sender_domain`, `recipients`, `date`, `body_text`, `has_attachment`, `attachments`, `labels`, `in_reply_to`, `references`, `created_at` |
+| `after` | str | ISO date, inclusive (e.g. `"2025-01-01"`) |
+| `before` | str | ISO date, exclusive |
+| `order` | str | `"date DESC"`, `"date ASC"`, `"sender_address ASC"`, `"sender_address DESC"` |
 
-| Parameter | Type | Example | Notes |
-|-----------|------|---------|-------|
-| `sender` | `str` | `"alice@acme.com"` | Exact email address |
-| `sender_domain` | `str` | `"acme.com"` | All senders at domain |
-| `recipient` | `str` | `"bob@acme.com"` | In To/CC/BCC |
-| `after` | `str` | `"2025-01-15"` | ISO date string, inclusive |
-| `before` | `str` | `"2025-03-01"` | ISO date string, exclusive |
-| `has_attachment` | `bool` | `True` | Filter by attachment presence |
-| `subject_contains` | `str` | `"invoice"` | Case-insensitive substring |
-| `labels` | `list[str]` | `["INBOX", "Finance"]` | Array containment (AND) |
-| `limit` | `int` | `50` (find) / `20` (search) | Max results |
-| `order` | `str` | `"date DESC"` | find() only: `date DESC/ASC`, `sender_address DESC/ASC` |
+### Response Shape
 
-### Return Types
+All tools return JSON dicts. `embedding` and `body_html` are always excluded from responses.
 
-**`Email` fields:** `id`, `message_id`, `thread_id`, `subject`, `sender_name`, `sender_address`, `sender_domain`, `recipients` (with `.to`, `.cc`, `.bcc`), `date`, `body_text`, `body_html`, `has_attachment`, `attachments` (list of `{filename, content_type, size}`), `labels`, `in_reply_to`, `references`
+When `fields` is omitted, all available fields are returned. When specified, only those fields appear:
 
-**`SearchResult` fields:** `email` (an `Email`), `similarity` (float 0-1, higher = more relevant)
+```
+find(sender_domain="stripe.com", fields=["subject", "sender_address", "date"])
+→ [{"subject": "...", "sender_address": "...", "date": "..."}, ...]
+```
+
+`search` returns `[{"email": {...}, "similarity": 0.95}, ...]` — `similarity` is always included; `fields` applies to the nested email.
+
+### Pagination
+
+Use `offset` with `limit` to page through results:
+
+```
+find(sender_domain="stripe.com", limit=10, offset=0)   # Page 1
+find(sender_domain="stripe.com", limit=10, offset=10)  # Page 2
+```
 
 ## Common Patterns
 
-### Find + expand to thread
-```python
-from maildb import MailDB
-db = MailDB()
-emails = db.find(sender_domain="stripe.com", after="2025-01-01", has_attachment=True)
-if emails:
-    thread = db.get_thread(emails[0].thread_id)
+**Find + expand to thread:**
+```
+emails = find(sender_domain="stripe.com", after="2025-01-01", limit=5)
+thread = get_thread(thread_id=emails[0]["thread_id"])
 ```
 
-### Semantic search + thread context
-```python
-results = db.search("budget concerns", sender_domain="finance.acme.com", limit=5)
-if results:
-    best = results[0]  # highest similarity
-    thread = db.get_thread(best.email.thread_id)
+**Semantic search + thread context:**
+```
+results = search(query="budget concerns", sender_domain="finance.acme.com", limit=5)
+thread = get_thread(thread_id=results[0]["email"]["thread_id"])
 ```
 
-### Via MCP (no code needed)
-When the maildb MCP server is running, all methods are available as tools. The MCP server returns JSON dicts (not dataclasses), with embeddings stripped.
+**Lightweight browsing (minimal fields):**
+```
+find(sender_domain="github.com", fields=["subject", "date", "sender_address"], limit=20)
+```
+
+**Chain cluster with prior results:**
+```
+emails = find(sender_domain="stripe.com", limit=50)
+ids = [e["message_id"] for e in emails]
+cluster(message_ids=ids, limit=5, fields=["subject", "body_text", "date"])
+```
 
 ## DSL Quick Reference (query tool)
 
@@ -130,58 +142,16 @@ When the maildb MCP server is running, all methods are available as tools. The M
 | `having` | Same as where, on aliases |
 | `order_by` | `[{field: "col", dir: "desc"}]` |
 | `limit` | Max 1000 (default 50) |
+| `offset` | For pagination |
 
-**Operators:** eq, neq, gt, gte, lt, lte, ilike, in, not_in, contains, is_null
-
-**Example:**
-```python
-db.query({"from": "sent_to", "select": [{"field": "recipient_domain"}, {"count": "*", "as": "n"}], "group_by": ["recipient_domain"], "order_by": [{"field": "n", "dir": "desc"}], "limit": 10})
-```
-
-## MCP Server Setup
-
-**Run:** `uv run --directory /path/to/maildb python -m maildb`
-
-**Config for claude_desktop_config.json:**
-```json
-{
-  "mcpServers": {
-    "maildb": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/maildb", "python", "-m", "maildb"],
-      "env": {
-        "MAILDB_DATABASE_URL": "postgresql://maildb@localhost:5432/maildb",
-        "MAILDB_USER_EMAIL": "you@example.com"
-      }
-    }
-  }
-}
-```
-
-The `env` block is optional if the project has a `.env` file — `uv run --directory` sets cwd so pydantic-settings finds it.
-
-## Importing Email Data
-
-```bash
-# Full pipeline: split -> parse -> index -> embed
-uv run python -m maildb.ingest /path/to/emails.mbox
-
-# Skip embedding (faster, but no semantic search)
-uv run python -m maildb.ingest /path/to/emails.mbox --skip-embed
-
-# Check progress
-uv run python -m maildb.ingest status
-
-# Reset specific phase
-uv run python -m maildb.ingest reset --phase embed --yes
-```
+**Operators:** eq, neq, gt, gte, lt, lte, ilike, not_ilike, in, not_in, contains, is_null
 
 ## Things to Know
 
-- **No "team" concept.** Filter by `sender_domain` for company/team, or `sender` for individuals. For fuzzy groups, use semantic search — the query vector includes sender context.
-- **`user_email` required** for `unreplied()` and `top_contacts()`. Set via `MAILDB_USER_EMAIL` env var.
-- **Dates are ISO strings.** Pass `"2025-01-15"`, not datetime objects.
-- **`search()` needs Ollama running** to embed the query. `find()`, `mention_search()`, and `correspondence()` work without it.
-- **`query()` DSL** has a 5s timeout and a 1000-row hard cap.
-- **`cluster()` chains well** with other tools via the `message_ids` parameter — pass IDs from any prior result set.
-- **Embedding model:** nomic-embed-text (768 dims) via local Ollama. No external API calls.
+- **No Python imports needed.** All interactions via MCP tools. Responses are JSON dicts.
+- **`user_email` required** for `unreplied` and `top_contacts`. Set via `MAILDB_USER_EMAIL` env var.
+- **`search` needs Ollama running.** `find`, `mention_search`, and `correspondence` work without it.
+- **`query` DSL** has a 5s timeout and 1000-row hard cap.
+- **`cluster` chains well** with other tools via `message_ids` — pass IDs from any prior result.
+- **Use `fields`** to reduce response size. Most queries only need `subject`, `sender_address`, `date`.
+- **Null-date emails** (e.g. Google Chat transcripts) are excluded from `unreplied` results automatically.
