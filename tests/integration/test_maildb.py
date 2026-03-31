@@ -453,3 +453,186 @@ def test_search_results_ordered_by_similarity(test_pool, seed_emails) -> None:  
     # Results should be in descending similarity order
     for i in range(len(results) - 1):
         assert results[i].similarity >= results[i + 1].similarity
+
+
+# ---------------------------------------------------------------------------
+# Unreplied outbound direction tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def seed_unreplied_outbound(test_pool):  # type: ignore[no-untyped-def]
+    """Seed data for outbound unreplied tests. user_email=alice@example.com."""
+    emails = [
+        # Alice→Dave (to), Dave never replies
+        {
+            "message_id": "unr-out-1@example.com",
+            "thread_id": "unr-out-1@example.com",
+            "subject": "Hey Dave",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({"to": ["dave@example.com"], "cc": [], "bcc": []}),
+            "date": datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
+            "body_text": "Hey Dave, any updates?",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["Sent"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": [0.1] * 768,
+        },
+        # Alice→Eve (to), Eve replies
+        {
+            "message_id": "unr-out-2@example.com",
+            "thread_id": "unr-out-2@example.com",
+            "subject": "Hey Eve",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({"to": ["eve@example.com"], "cc": [], "bcc": []}),
+            "date": datetime(2025, 3, 2, 10, 0, tzinfo=UTC),
+            "body_text": "Hey Eve, how are you?",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["Sent"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": [0.2] * 768,
+        },
+        # Eve→Alice (reply to unr-out-2)
+        {
+            "message_id": "unr-out-3@corp.com",
+            "thread_id": "unr-out-2@example.com",
+            "subject": "Re: Hey Eve",
+            "sender_name": "Eve",
+            "sender_address": "eve@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({"to": ["alice@example.com"], "cc": [], "bcc": []}),
+            "date": datetime(2025, 3, 3, 10, 0, tzinfo=UTC),
+            "body_text": "Doing great!",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": "unr-out-2@example.com",
+            "references": ["unr-out-2@example.com"],
+            "embedding": [0.3] * 768,
+        },
+        # Frank→Alice, Alice never replies (inbound unreplied)
+        {
+            "message_id": "unr-in-1@corp.com",
+            "thread_id": "unr-in-1@corp.com",
+            "subject": "Question from Frank",
+            "sender_name": "Frank",
+            "sender_address": "frank@corp.com",
+            "sender_domain": "corp.com",
+            "recipients": json.dumps({"to": ["alice@example.com"], "cc": [], "bcc": []}),
+            "date": datetime(2025, 3, 4, 10, 0, tzinfo=UTC),
+            "body_text": "Can you review this?",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": [0.4] * 768,
+        },
+        # Alice→Eve (to) + Dave (cc), nobody replies
+        {
+            "message_id": "unr-out-4@example.com",
+            "thread_id": "unr-out-4@example.com",
+            "subject": "Team update",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps(
+                {"to": ["eve@example.com"], "cc": ["dave@example.com"], "bcc": []}
+            ),
+            "date": datetime(2025, 3, 5, 10, 0, tzinfo=UTC),
+            "body_text": "Here is the team update.",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["Sent"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": [0.5] * 768,
+        },
+    ]
+
+    insert_sql = """
+    INSERT INTO emails (
+        message_id, thread_id, subject, sender_name, sender_address, sender_domain,
+        recipients, date, body_text, body_html, has_attachment, attachments,
+        labels, in_reply_to, "references", embedding
+    ) VALUES (
+        %(message_id)s, %(thread_id)s, %(subject)s, %(sender_name)s, %(sender_address)s,
+        %(sender_domain)s, %(recipients)s, %(date)s, %(body_text)s, %(body_html)s,
+        %(has_attachment)s, %(attachments)s, %(labels)s, %(in_reply_to)s,
+        %(references)s, %(embedding)s
+    )
+    """
+
+    with test_pool.connection() as conn:
+        for e in emails:
+            conn.execute(insert_sql, e)
+        conn.commit()
+
+
+def test_unreplied_outbound(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    """Outbound unreplied: messages Alice sent where nobody replied."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results = db.unreplied(direction="outbound")
+    message_ids = [e.message_id for e in results]
+    # unr-out-1 (Dave never replied) and unr-out-4 (nobody replied) should appear
+    assert "unr-out-1@example.com" in message_ids
+    assert "unr-out-4@example.com" in message_ids
+    # unr-out-2 should NOT appear (Eve replied)
+    assert "unr-out-2@example.com" not in message_ids
+    # Inbound message should NOT appear
+    assert "unr-in-1@corp.com" not in message_ids
+
+
+def test_unreplied_outbound_with_recipient(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    """Outbound unreplied filtered to a specific recipient."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results = db.unreplied(direction="outbound", recipient="dave@example.com")
+    message_ids = [e.message_id for e in results]
+    # unr-out-1 (to Dave, no reply) and unr-out-4 (cc Dave, no reply) should appear
+    assert "unr-out-1@example.com" in message_ids
+    assert "unr-out-4@example.com" in message_ids
+    # unr-out-2 only went to Eve, not Dave
+    assert "unr-out-2@example.com" not in message_ids
+
+
+def test_unreplied_inbound_default(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    """Default direction='inbound' returns only inbound unreplied messages."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results = db.unreplied()  # default direction="inbound"
+    message_ids = [e.message_id for e in results]
+    # Only Frank's message is inbound unreplied
+    assert "unr-in-1@corp.com" in message_ids
+    # None of Alice's outbound should appear
+    assert "unr-out-1@example.com" not in message_ids
+    assert "unr-out-2@example.com" not in message_ids
+    assert "unr-out-4@example.com" not in message_ids
+
+
+def test_unreplied_outbound_multi_recipient_partial_reply(
+    test_pool, seed_unreplied_outbound
+) -> None:  # type: ignore[no-untyped-def]
+    """Outbound with recipient filter: Eve replied to unr-out-2 but not unr-out-4."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results = db.unreplied(direction="outbound", recipient="eve@example.com")
+    message_ids = [e.message_id for e in results]
+    # unr-out-2: Eve replied → should NOT appear
+    assert "unr-out-2@example.com" not in message_ids
+    # unr-out-4: Eve was a to-recipient but never replied → should appear
+    assert "unr-out-4@example.com" in message_ids

@@ -439,34 +439,34 @@ class MailDB:
     def unreplied(
         self,
         *,
+        direction: str = "inbound",
+        recipient: str | None = None,
         after: str | None = None,
         before: str | None = None,
         sender: str | None = None,
         sender_domain: str | None = None,
         limit: int = 100,
     ) -> list[Email]:
-        """Inbound messages with no outbound reply in the same thread."""
+        """Messages with no reply in the same thread.
+
+        Args:
+            direction: "inbound" (default) — messages FROM others where user never
+                replied. "outbound" — messages FROM user where recipient (or anyone)
+                never replied.
+            recipient: For outbound only — filter to messages sent to this address
+                (To/CC/BCC) and check that *this* recipient never replied.
+            after: Only include messages on or after this date (ISO 8601).
+            before: Only include messages before this date (ISO 8601).
+            sender: For inbound — filter to messages from this sender.
+            sender_domain: For inbound — filter to messages from this domain.
+            limit: Maximum number of results (default 100).
+        """
+        if direction not in ("inbound", "outbound"):
+            msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
+            raise ValueError(msg)
+
         user_email = self._require_user_email()
-
-        conditions: list[str] = [
-            "e.sender_address != %(user_email)s",
-        ]
         params: dict[str, Any] = {"user_email": user_email}
-
-        if after:
-            conditions.append("e.date >= %(after)s")
-            params["after"] = after
-        if before:
-            conditions.append("e.date < %(before)s")
-            params["before"] = before
-        if sender:
-            conditions.append("e.sender_address = %(sender)s")
-            params["sender"] = sender
-        if sender_domain:
-            conditions.append("e.sender_domain = %(sender_domain)s")
-            params["sender_domain"] = sender_domain
-
-        where = " AND ".join(conditions)
 
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
@@ -474,20 +474,87 @@ class MailDB:
             e.attachments, e.labels, e.in_reply_to, e."references", e.embedding, e.created_at
         """
 
-        params["limit"] = limit
-        sql = f"""
-            SELECT {select_cols_aliased}
-            FROM emails e
-            WHERE {where}
-              AND NOT EXISTS (
-                  SELECT 1 FROM emails reply
-                  WHERE reply.thread_id = e.thread_id
-                    AND reply.sender_address = %(user_email)s
-                    AND reply.date > e.date
-              )
-            ORDER BY e.date DESC
-            LIMIT %(limit)s
-        """
+        if direction == "inbound":
+            conditions: list[str] = [
+                "e.sender_address != %(user_email)s",
+            ]
+            if after:
+                conditions.append("e.date >= %(after)s")
+                params["after"] = after
+            if before:
+                conditions.append("e.date < %(before)s")
+                params["before"] = before
+            if sender:
+                conditions.append("e.sender_address = %(sender)s")
+                params["sender"] = sender
+            if sender_domain:
+                conditions.append("e.sender_domain = %(sender_domain)s")
+                params["sender_domain"] = sender_domain
+
+            where = " AND ".join(conditions)
+            params["limit"] = limit
+            sql = f"""
+                SELECT {select_cols_aliased}
+                FROM emails e
+                WHERE {where}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM emails reply
+                      WHERE reply.thread_id = e.thread_id
+                        AND reply.sender_address = %(user_email)s
+                        AND reply.date > e.date
+                  )
+                ORDER BY e.date DESC
+                LIMIT %(limit)s
+            """
+        else:
+            # Outbound: messages FROM user where recipients never replied
+            conditions = [
+                "e.sender_address = %(user_email)s",
+            ]
+            if after:
+                conditions.append("e.date >= %(after)s")
+                params["after"] = after
+            if before:
+                conditions.append("e.date < %(before)s")
+                params["before"] = before
+
+            if recipient:
+                recipient_json = json.dumps([recipient])
+                conditions.append(
+                    "(e.recipients->'to' @> %(recipient_json)s"
+                    " OR e.recipients->'cc' @> %(recipient_json)s"
+                    " OR e.recipients->'bcc' @> %(recipient_json)s)"
+                )
+                params["recipient_json"] = recipient_json
+                not_exists = """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM emails reply
+                        WHERE reply.thread_id = e.thread_id
+                          AND reply.sender_address = %(recipient)s
+                          AND reply.date > e.date
+                    )
+                """
+                params["recipient"] = recipient
+            else:
+                not_exists = """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM emails reply
+                        WHERE reply.thread_id = e.thread_id
+                          AND reply.sender_address != %(user_email)s
+                          AND reply.date > e.date
+                    )
+                """
+
+            where = " AND ".join(conditions)
+            params["limit"] = limit
+            sql = f"""
+                SELECT {select_cols_aliased}
+                FROM emails e
+                WHERE {where}
+                  {not_exists}
+                ORDER BY e.date DESC
+                LIMIT %(limit)s
+            """
 
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]

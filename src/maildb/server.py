@@ -177,16 +177,30 @@ def topics_with(
 @mcp.tool()
 def unreplied(
     ctx: Context,
+    direction: str = "inbound",
+    recipient: str | None = None,
     after: str | None = None,
     before: str | None = None,
     sender: str | None = None,
     sender_domain: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Find inbound emails that have no outbound reply in the same thread."""
+    """Find emails that have no reply in the same thread.
+
+    direction: "inbound" (default) — messages from others where user never replied.
+               "outbound" — messages from user where recipient(s) never replied.
+    recipient: For outbound — filter to a specific recipient (To/CC/BCC) and check
+               that this recipient never replied.
+    """
     db = _get_db(ctx)
     results = db.unreplied(
-        after=after, before=before, sender=sender, sender_domain=sender_domain, limit=limit
+        direction=direction,
+        recipient=recipient,
+        after=after,
+        before=before,
+        sender=sender,
+        sender_domain=sender_domain,
+        limit=limit,
     )
     return [_serialize_email(e) for e in results]
 
