@@ -214,6 +214,25 @@ def unreplied(
 
 
 @mcp.tool()
+def correspondence(
+    ctx: Context,
+    address: str,
+    after: str | None = None,
+    before: str | None = None,
+    limit: int = 500,
+    order: str = "date ASC",
+) -> list[dict[str, Any]]:
+    """Get all emails exchanged with a specific person (sent by or to them).
+    Returns chronological by default with higher limit (500) for full history.
+    """
+    db = _get_db(ctx)
+    results = db.correspondence(
+        address=address, after=after, before=before, limit=limit, order=order
+    )
+    return [_serialize_email(e) for e in results]
+
+
+@mcp.tool()
 def long_threads(
     ctx: Context,
     min_messages: int = 5,

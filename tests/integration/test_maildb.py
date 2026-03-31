@@ -745,3 +745,38 @@ def test_unreplied_invalid_direction(test_pool, seed_unreplied_outbound) -> None
     db = MailDB._from_pool(test_pool, config=config)
     with pytest.raises(ValueError, match="direction"):
         db.unreplied(direction="sideways")  # type: ignore[arg-type]
+
+
+def test_correspondence(test_pool, seed_advanced) -> None:
+    """correspondence() returns all emails exchanged with a person."""
+    db = MailDB._from_pool(test_pool)
+    results = db.correspondence(address="bob@corp.com")
+    msg_ids = [e.message_id for e in results]
+    assert "adv-1@example.com" in msg_ids  # sent TO bob
+    assert "adv-2@corp.com" in msg_ids  # sent BY bob
+    assert "adv-3@corp.com" in msg_ids  # sent BY bob
+    assert "adv-4@other.com" not in msg_ids  # carol, not bob
+
+
+def test_correspondence_chronological_order(test_pool, seed_advanced) -> None:
+    """Default order is date ASC (chronological)."""
+    db = MailDB._from_pool(test_pool)
+    results = db.correspondence(address="bob@corp.com")
+    dates = [e.date for e in results]
+    assert dates == sorted(dates)
+
+
+def test_correspondence_with_date_filter(test_pool, seed_advanced) -> None:
+    """Date filters narrow results."""
+    db = MailDB._from_pool(test_pool)
+    results = db.correspondence(address="bob@corp.com", after="2025-01-12")
+    msg_ids = [e.message_id for e in results]
+    assert "adv-3@corp.com" in msg_ids
+    assert "adv-1@example.com" not in msg_ids
+
+
+def test_correspondence_limit(test_pool, seed_advanced) -> None:
+    """Limit restricts result count."""
+    db = MailDB._from_pool(test_pool)
+    results = db.correspondence(address="bob@corp.com", limit=1)
+    assert len(results) == 1

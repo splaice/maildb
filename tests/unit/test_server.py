@@ -78,6 +78,7 @@ def test_mcp_has_all_tools() -> None:
         "topics_with",
         "unreplied",
         "long_threads",
+        "correspondence",
     }
 
     assert expected <= tool_names, f"Missing tools: {expected - tool_names}"

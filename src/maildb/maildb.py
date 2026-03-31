@@ -581,6 +581,48 @@ class MailDB:
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]
 
+    def correspondence(
+        self,
+        *,
+        address: str,
+        after: str | None = None,
+        before: str | None = None,
+        limit: int = 500,
+        order: str = "date ASC",
+    ) -> list[Email]:
+        """All emails exchanged with a specific person.
+        Returns emails where address is sender OR is in recipients (to/cc/bcc).
+        Default chronological order, higher limit than find().
+        """
+        if order not in VALID_ORDERS:
+            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
+            raise ValueError(msg)
+
+        conditions: list[str] = [
+            "(sender_address = %(address)s "
+            "OR recipients->'to' @> %(address_json)s "
+            "OR recipients->'cc' @> %(address_json)s "
+            "OR recipients->'bcc' @> %(address_json)s)"
+        ]
+        params: dict[str, Any] = {
+            "address": address,
+            "address_json": json.dumps([address]),
+            "limit": limit,
+        }
+
+        if after:
+            conditions.append("date >= %(after)s")
+            params["after"] = after
+        if before:
+            conditions.append("date < %(before)s")
+            params["before"] = before
+
+        where = " AND ".join(conditions)
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s"
+
+        rows = _query_dicts(self._pool, sql, params)
+        return [Email.from_row(row) for row in rows]
+
     def long_threads(
         self,
         *,
