@@ -347,7 +347,7 @@ def test_unreplied_outbound_with_seed_advanced(test_pool, seed_advanced) -> None
                 'outbound-1@example.com', 'outbound-1@example.com',
                 'Follow up', 'Alice', 'alice@example.com', 'example.com',
                 %(recipients)s, '2025-01-25 10:00:00+00', 'Following up on our chat.', NULL,
-                false, '[]', '["Sent"]', NULL, '{}', %(embedding)s
+                false, '{}', '{Sent}', NULL, '{}', %(embedding)s
             )
             """,
             {
@@ -384,7 +384,7 @@ def test_unreplied_excludes_null_date(test_pool, seed_advanced) -> None:  # type
                 'null-date@chat.google.com', 'null-date@chat.google.com',
                 'Chat with Team', 'Bot', 'bot@chat.google.com', 'chat.google.com',
                 %(recipients)s, NULL, 'chat transcript', NULL,
-                false, '[]', '["Chat"]', NULL, '{}', %(embedding)s
+                false, '{}', '{Chat}', NULL, '{}', %(embedding)s
             )
             """,
             {
