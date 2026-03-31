@@ -176,6 +176,147 @@ def test_find_returns_total(test_pool, seed_emails) -> None:  # type: ignore[no-
     assert total == 3  # seed_emails has 3 emails
 
 
+@pytest.fixture
+def seed_recipient_counts(test_pool):  # type: ignore[no-untyped-def]
+    """Seed data for recipient count filter tests."""
+    emails = [
+        # Direct message: 1 To, 0 CC
+        {
+            "message_id": "rcpt-1@example.com",
+            "thread_id": "rcpt-1@example.com",
+            "subject": "Direct message",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({"to": ["bob@example.com"], "cc": [], "bcc": []}),
+            "date": datetime(2025, 1, 1, 10, 0, tzinfo=UTC),
+            "body_text": "Just for you.",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": None,
+        },
+        # Group message: 2 To, 1 CC
+        {
+            "message_id": "rcpt-2@example.com",
+            "thread_id": "rcpt-2@example.com",
+            "subject": "Group thread",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({
+                "to": ["bob@example.com", "carol@example.com"],
+                "cc": ["dave@example.com"],
+                "bcc": [],
+            }),
+            "date": datetime(2025, 1, 2, 10, 0, tzinfo=UTC),
+            "body_text": "Group discussion.",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": None,
+        },
+        # BCC message: 1 To, 0 CC, 1 BCC
+        {
+            "message_id": "rcpt-3@example.com",
+            "thread_id": "rcpt-3@example.com",
+            "subject": "BCC message",
+            "sender_name": "Alice",
+            "sender_address": "alice@example.com",
+            "sender_domain": "example.com",
+            "recipients": json.dumps({
+                "to": ["bob@example.com"],
+                "cc": [],
+                "bcc": ["secret@example.com"],
+            }),
+            "date": datetime(2025, 1, 3, 10, 0, tzinfo=UTC),
+            "body_text": "Secret copy.",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": None,
+        },
+    ]
+
+    insert_sql = """
+    INSERT INTO emails (
+        message_id, thread_id, subject, sender_name, sender_address, sender_domain,
+        recipients, date, body_text, body_html, has_attachment, attachments,
+        labels, in_reply_to, "references", embedding
+    ) VALUES (
+        %(message_id)s, %(thread_id)s, %(subject)s, %(sender_name)s, %(sender_address)s,
+        %(sender_domain)s, %(recipients)s, %(date)s, %(body_text)s, %(body_html)s,
+        %(has_attachment)s, %(attachments)s, %(labels)s, %(in_reply_to)s,
+        %(references)s, %(embedding)s
+    )
+    """
+
+    with test_pool.connection() as conn:
+        for e in emails:
+            conn.execute(insert_sql, e)
+        conn.commit()
+
+
+def test_find_direct_only(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.find(sender="alice@example.com", direct_only=True)
+    # rcpt-1 (1 To, 0 CC) and rcpt-3 (1 To, 0 CC, 1 BCC — BCC unconstrained)
+    message_ids = [e.message_id for e in results]
+    assert "rcpt-1@example.com" in message_ids
+    assert "rcpt-3@example.com" in message_ids
+    assert "rcpt-2@example.com" not in message_ids
+    assert total == 2
+
+
+def test_find_max_to(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.find(sender="alice@example.com", max_to=1)
+    message_ids = [e.message_id for e in results]
+    assert "rcpt-1@example.com" in message_ids
+    assert "rcpt-3@example.com" in message_ids
+    assert "rcpt-2@example.com" not in message_ids
+
+
+def test_find_max_cc(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.find(sender="alice@example.com", max_cc=0)
+    message_ids = [e.message_id for e in results]
+    assert "rcpt-1@example.com" in message_ids
+    assert "rcpt-3@example.com" in message_ids
+    assert "rcpt-2@example.com" not in message_ids
+
+
+def test_find_max_recipients(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.find(sender="alice@example.com", max_recipients=2)
+    message_ids = [e.message_id for e in results]
+    # rcpt-1: 1 total, rcpt-3: 2 total (1 To + 1 BCC), rcpt-2: 3 total
+    assert "rcpt-1@example.com" in message_ids
+    assert "rcpt-3@example.com" in message_ids
+    assert "rcpt-2@example.com" not in message_ids
+
+
+def test_find_direct_only_conflicts_with_max_to(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match="direct_only"):
+        db.find(direct_only=True, max_to=2)
+
+
+def test_find_direct_only_conflicts_with_max_cc(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match="direct_only"):
+        db.find(direct_only=True, max_cc=1)
+
+
 def test_get_thread(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     thread = db.get_thread("find-test-1@example.com")

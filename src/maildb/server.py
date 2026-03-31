@@ -444,6 +444,10 @@ def unreplied(
     limit: int = 100,
     offset: int = 0,
     fields: list[str] | None = None,
+    max_to: int | None = None,
+    max_cc: int | None = None,
+    max_recipients: int | None = None,
+    direct_only: bool = False,
 ) -> dict[str, Any]:
     """Find emails with no reply in the same thread.
 
@@ -524,6 +528,10 @@ def mention_search(
     limit: int = 50,
     offset: int = 0,
     fields: list[str] | None = None,
+    max_to: int | None = None,
+    max_cc: int | None = None,
+    max_recipients: int | None = None,
+    direct_only: bool = False,
 ) -> dict[str, Any]:
     """Search for emails containing specific text in body or subject (case-insensitive).
 
@@ -550,6 +558,10 @@ def mention_search(
         before=before,
         limit=limit,
         offset=offset,
+        max_to=max_to,
+        max_cc=max_cc,
+        max_recipients=max_recipients,
+        direct_only=direct_only,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     serialized = [_serialize_email(e, valid) for e in results]

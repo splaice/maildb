@@ -131,6 +131,14 @@ class MailDB:
         direct_only: bool = False,
     ) -> tuple[list[str], dict[str, Any]]:
         """Build WHERE-clause conditions and params from common filter kwargs."""
+        if direct_only and (max_to is not None or max_cc is not None):
+            msg = "Cannot combine direct_only with max_to or max_cc"
+            raise ValueError(msg)
+
+        if direct_only:
+            max_to = 1
+            max_cc = 0
+
         conditions: list[str] = []
         params: dict[str, Any] = {}
 
@@ -165,6 +173,24 @@ class MailDB:
         if labels is not None:
             conditions.append("labels @> %(labels)s")
             params["labels"] = labels
+        if max_to is not None:
+            conditions.append(
+                "jsonb_array_length(COALESCE(recipients->'to', '[]'::jsonb)) <= %(max_to)s"
+            )
+            params["max_to"] = max_to
+        if max_cc is not None:
+            conditions.append(
+                "jsonb_array_length(COALESCE(recipients->'cc', '[]'::jsonb)) <= %(max_cc)s"
+            )
+            params["max_cc"] = max_cc
+        if max_recipients is not None:
+            conditions.append(
+                "(jsonb_array_length(COALESCE(recipients->'to', '[]'::jsonb))"
+                " + jsonb_array_length(COALESCE(recipients->'cc', '[]'::jsonb))"
+                " + jsonb_array_length(COALESCE(recipients->'bcc', '[]'::jsonb))"
+                ") <= %(max_recipients)s"
+            )
+            params["max_recipients"] = max_recipients
 
         return conditions, params
 
