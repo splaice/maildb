@@ -176,6 +176,7 @@ class MailDB:
         subject_contains: str | None = None,
         labels: list[str] | None = None,
         limit: int = 50,
+        offset: int = 0,
         order: str = "date DESC",
     ) -> list[Email]:
         """Structured query with dynamic WHERE clauses."""
@@ -195,8 +196,9 @@ class MailDB:
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        query = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s"
+        query = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s OFFSET %(offset)s"
         params["limit"] = limit
+        params["offset"] = offset
 
         rows = _query_dicts(self._pool, query, params)
         return [Email.from_row(row) for row in rows]
@@ -214,6 +216,7 @@ class MailDB:
         subject_contains: str | None = None,
         labels: list[str] | None = None,
         limit: int = 20,
+        offset: int = 0,
     ) -> list[SearchResult]:
         """Semantic search with optional structured filters."""
         query_embedding = self._embedding_client.embed(query)
@@ -238,9 +241,10 @@ class MailDB:
             FROM emails
             WHERE {where}
             ORDER BY embedding <=> %(query_embedding)s::vector
-            LIMIT %(limit)s
+            LIMIT %(limit)s OFFSET %(offset)s
         """
         params["limit"] = limit
+        params["offset"] = offset
 
         rows = _query_dicts(self._pool, sql, params)
         return [
@@ -283,6 +287,7 @@ class MailDB:
         *,
         period: str | None = None,
         limit: int = 10,
+        offset: int = 0,
         direction: str = "both",
         group_by: str = "address",
         exclude_domains: list[str] | None = None,
@@ -301,7 +306,7 @@ class MailDB:
             raise ValueError(msg)
 
         user_email = self._require_user_email()
-        params: dict[str, Any] = {"user_email": user_email, "limit": limit}
+        params: dict[str, Any] = {"user_email": user_email, "limit": limit, "offset": offset}
 
         if period:
             period_cond = "AND date >= %(period_start)s"
@@ -336,7 +341,7 @@ class MailDB:
                   {exclude_inbound}
                 GROUP BY {inbound_col}
                 ORDER BY count DESC
-                LIMIT %(limit)s
+                LIMIT %(limit)s OFFSET %(offset)s
             """
             return _query_dicts(self._pool, sql, params)
 
@@ -357,7 +362,7 @@ class MailDB:
                   {exclude_outbound}
                 GROUP BY {outbound_col}
                 ORDER BY count DESC
-                LIMIT %(limit)s
+                LIMIT %(limit)s OFFSET %(offset)s
             """
             return _query_dicts(self._pool, sql, params)
 
@@ -390,7 +395,7 @@ class MailDB:
             ) AS combined
             GROUP BY {label}
             ORDER BY count DESC
-            LIMIT %(limit)s
+            LIMIT %(limit)s OFFSET %(offset)s
         """
         return _query_dicts(self._pool, sql, params)
 
@@ -400,6 +405,7 @@ class MailDB:
         sender: str | None = None,
         sender_domain: str | None = None,
         limit: int = 5,
+        offset: int = 0,
     ) -> list[Email]:
         """Representative emails spanning different topics with a contact.
 
@@ -428,7 +434,8 @@ class MailDB:
         emails = [Email.from_row(row) for row in rows]
         if not emails:
             return []
-        return self._farthest_point_select(emails, limit)
+        selected = self._farthest_point_select(emails, limit + offset)
+        return selected[offset:]
 
     @staticmethod
     def _farthest_point_select(emails: list[Email], limit: int) -> list[Email]:
@@ -463,6 +470,7 @@ class MailDB:
         where: dict[str, Any] | None = None,
         message_ids: list[str] | None = None,
         limit: int = 5,
+        offset: int = 0,
     ) -> list[Email]:
         """Diverse topic extraction from arbitrary email subsets.
 
@@ -499,7 +507,8 @@ class MailDB:
         emails = [Email.from_row(row) for row in rows]
         if not emails:
             return []
-        return self._farthest_point_select(emails, limit)
+        selected = self._farthest_point_select(emails, limit + offset)
+        return selected[offset:]
 
     @staticmethod
     def _cosine_distance(a: list[float], b: list[float]) -> float:
@@ -521,6 +530,7 @@ class MailDB:
         sender: str | None = None,
         sender_domain: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[Email]:
         """Messages with no reply in the same thread.
 
@@ -574,6 +584,7 @@ class MailDB:
 
             where = " AND ".join(conditions)
             params["limit"] = limit
+            params["offset"] = offset
             sql = f"""
                 SELECT {select_cols_aliased}
                 FROM emails e
@@ -585,7 +596,7 @@ class MailDB:
                         AND reply.date > e.date
                   )
                 ORDER BY e.date DESC
-                LIMIT %(limit)s
+                LIMIT %(limit)s OFFSET %(offset)s
             """
         else:
             # Outbound: messages FROM user where recipients never replied
@@ -629,13 +640,14 @@ class MailDB:
 
             where = " AND ".join(conditions)
             params["limit"] = limit
+            params["offset"] = offset
             sql = f"""
                 SELECT {select_cols_aliased}
                 FROM emails e
                 WHERE {where}
                   {not_exists}
                 ORDER BY e.date DESC
-                LIMIT %(limit)s
+                LIMIT %(limit)s OFFSET %(offset)s
             """
 
         rows = _query_dicts(self._pool, sql, params)
@@ -648,6 +660,7 @@ class MailDB:
         after: str | None = None,
         before: str | None = None,
         limit: int = 500,
+        offset: int = 0,
         order: str = "date ASC",
     ) -> list[Email]:
         """All emails exchanged with a specific person.
@@ -668,6 +681,7 @@ class MailDB:
             "address": address,
             "address_json": json.dumps([address]),
             "limit": limit,
+            "offset": offset,
         }
 
         if after:
@@ -678,7 +692,7 @@ class MailDB:
             params["before"] = before
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s"
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s OFFSET %(offset)s"
 
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]
@@ -692,6 +706,7 @@ class MailDB:
         after: str | None = None,
         before: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[Email]:
         """Case-insensitive keyword search in body_text and subject.
         Unlike search(), uses ILIKE (substring match) and does not require Ollama.
@@ -701,7 +716,7 @@ class MailDB:
         conditions: list[str] = [
             "(body_text ILIKE %(pattern)s ESCAPE '\\' OR subject ILIKE %(pattern)s ESCAPE '\\')"
         ]
-        params: dict[str, Any] = {"pattern": pattern, "limit": limit}
+        params: dict[str, Any] = {"pattern": pattern, "limit": limit, "offset": offset}
         if sender:
             conditions.append("sender_address = %(sender)s")
             params["sender"] = sender
@@ -715,7 +730,7 @@ class MailDB:
             conditions.append("date < %(before)s")
             params["before"] = before
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT %(limit)s"
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT %(limit)s OFFSET %(offset)s"
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]
 
@@ -755,12 +770,13 @@ class MailDB:
         min_messages: int = 5,
         after: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Threads exceeding a message count threshold.
         participant: only threads where this address appears as sender.
         """
         conditions: list[str] = []
-        params: dict[str, Any] = {"min_messages": min_messages, "limit": limit}
+        params: dict[str, Any] = {"min_messages": min_messages, "limit": limit, "offset": offset}
         if after:
             conditions.append("date >= %(after)s")
             params["after"] = after
@@ -777,6 +793,6 @@ class MailDB:
             GROUP BY thread_id
             HAVING count(*) >= %(min_messages)s {having_participant}
             ORDER BY count(*) DESC
-            LIMIT %(limit)s
+            LIMIT %(limit)s OFFSET %(offset)s
         """
         return _query_dicts(self._pool, sql, params)

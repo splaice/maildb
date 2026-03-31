@@ -161,6 +161,14 @@ def test_find_order_date_asc(test_pool, seed_emails) -> None:  # type: ignore[no
     assert results[0].date <= results[-1].date
 
 
+def test_find_offset(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    all_results = db.find(limit=10)
+    offset_results = db.find(limit=10, offset=2)
+    assert len(offset_results) == len(all_results) - 2
+    assert offset_results[0].message_id == all_results[2].message_id
+
+
 def test_get_thread(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     thread = db.get_thread("find-test-1@example.com")
