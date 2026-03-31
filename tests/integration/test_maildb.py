@@ -539,7 +539,7 @@ def test_unreplied_outbound_with_seed_advanced(test_pool, seed_advanced) -> None
         )
         conn.commit()
 
-    unreplied_emails = db.unreplied(direction="outbound")
+    unreplied_emails, _ = db.unreplied(direction="outbound")
     message_ids = [e.message_id for e in unreplied_emails]
     assert "outbound-1@example.com" in message_ids
 
@@ -578,7 +578,7 @@ def test_unreplied_excludes_null_date(test_pool, seed_advanced) -> None:  # type
 
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    unreplied_emails = db.unreplied()
+    unreplied_emails, _ = db.unreplied()
     message_ids = [e.message_id for e in unreplied_emails]
     assert "null-date@chat.google.com" not in message_ids
 
