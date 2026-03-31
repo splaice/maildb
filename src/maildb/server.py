@@ -83,6 +83,7 @@ SERIALIZABLE_EMAIL_FIELDS = frozenset(
         "date",
         "body_text",
         "body_length",
+        "body_truncated",
         "has_attachment",
         "attachments",
         "labels",

@@ -125,6 +125,7 @@ def test_serializable_email_fields_constant() -> None:
         "date",
         "body_text",
         "body_length",
+        "body_truncated",
         "has_attachment",
         "attachments",
         "labels",
@@ -165,6 +166,29 @@ def test_serialize_email_explicit_fields_with_body_length() -> None:
     d = _serialize_email(email, fields=frozenset({"subject", "body_length"}))
     assert d["body_length"] == 11
     assert "body_text" not in d
+
+
+def test_serialize_email_body_max_chars_truncates() -> None:
+    email = _make_email()
+    email.body_text = "Hello world, this is a long email body"
+    d = _serialize_email(email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=11)
+    assert d["body_text"] == "Hello world..."
+    assert d["body_truncated"] is True
+
+
+def test_serialize_email_body_max_chars_no_truncation_needed() -> None:
+    email = _make_email()
+    email.body_text = "Short"
+    d = _serialize_email(email, fields=frozenset({"body_text", "body_truncated"}), body_max_chars=100)
+    assert d["body_text"] == "Short"
+    assert "body_truncated" not in d
+
+
+def test_serialize_email_body_max_chars_null_body() -> None:
+    email = _make_email()
+    email.body_text = None
+    d = _serialize_email(email, fields=frozenset({"body_text"}), body_max_chars=10)
+    assert d["body_text"] is None
 
 
 def test_mcp_has_all_tools() -> None:
