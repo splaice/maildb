@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
-from maildb.dsl import parse_query
+from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
 from maildb.models import Email, SearchResult
 
@@ -415,37 +415,80 @@ class MailDB:
             return []
 
         emails = [Email.from_row(row) for row in rows]
+        if not emails:
+            return []
+        return self._farthest_point_select(emails, limit)
 
-        # Greedy farthest-point selection
+    @staticmethod
+    def _farthest_point_select(emails: list[Email], limit: int) -> list[Email]:
+        """Greedy farthest-point selection on embeddings for diverse topic extraction."""
         if len(emails) <= limit:
             return emails
-
         selected: list[Email] = [emails[0]]
         remaining = list(emails[1:])
-
         while len(selected) < limit and remaining:
             best_idx = -1
             best_dist = -1.0
-
             for i, candidate in enumerate(remaining):
                 if candidate.embedding is None:
                     continue
-                # Min distance to any already-selected email
                 min_dist = float("inf")
                 for sel in selected:
                     if sel.embedding is None:
                         continue
-                    dist = self._cosine_distance(candidate.embedding, sel.embedding)
+                    dist = MailDB._cosine_distance(candidate.embedding, sel.embedding)
                     min_dist = min(min_dist, dist)
                 if min_dist > best_dist:
                     best_dist = min_dist
                     best_idx = i
-
             if best_idx < 0:
                 break
             selected.append(remaining.pop(best_idx))
-
         return selected
+
+    def cluster(
+        self,
+        *,
+        where: dict[str, Any] | None = None,
+        message_ids: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[Email]:
+        """Diverse topic extraction from arbitrary email subsets.
+
+        Provide either where (DSL filter) or message_ids (explicit list), not both.
+        """
+        if where is None and message_ids is None:
+            msg = "Either where or message_ids must be provided"
+            raise ValueError(msg)
+        if where is not None and message_ids is not None:
+            msg = "Provide either where or message_ids, not both"
+            raise ValueError(msg)
+
+        if message_ids is not None:
+            if not message_ids:
+                return []
+            placeholders = ", ".join(f"%(mid_{i})s" for i in range(len(message_ids)))
+            params: dict[str, Any] = {f"mid_{i}": mid for i, mid in enumerate(message_ids)}
+            sql = f"""
+                SELECT {SELECT_COLS} FROM emails
+                WHERE message_id IN ({placeholders})
+                  AND embedding IS NOT NULL
+                ORDER BY date DESC
+            """
+            rows = _query_dicts(self._pool, sql, params)
+        else:
+            where_sql, params = build_where_clause(where, source="emails")  # type: ignore[arg-type]
+            sql = f"""
+                SELECT {SELECT_COLS} FROM emails
+                WHERE {where_sql} AND embedding IS NOT NULL
+                ORDER BY date DESC LIMIT 500
+            """
+            rows = _query_dicts(self._pool, sql, params)
+
+        emails = [Email.from_row(row) for row in rows]
+        if not emails:
+            return []
+        return self._farthest_point_select(emails, limit)
 
     @staticmethod
     def _cosine_distance(a: list[float], b: list[float]) -> float:

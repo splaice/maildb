@@ -10,7 +10,7 @@ import pytest
 
 from maildb.config import Settings
 from maildb.maildb import MailDB
-from maildb.models import SearchResult
+from maildb.models import Email, SearchResult
 
 pytestmark = pytest.mark.integration
 
@@ -876,3 +876,46 @@ def test_query_serialization(test_pool, seed_emails) -> None:
     db = MailDB._from_pool(test_pool)
     results = db.query({"where": {"field": "sender_domain", "eq": "stripe.com"}})
     json_mod.dumps(results, default=str)  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# cluster() tests
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_with_message_ids(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.cluster(
+        message_ids=["adv-1@example.com", "adv-2@corp.com", "adv-3@corp.com", "adv-4@other.com"],
+        limit=2,
+    )
+    assert len(results) == 2
+    assert all(isinstance(e, Email) for e in results)
+
+
+def test_cluster_with_where(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.cluster(where={"field": "sender_domain", "eq": "corp.com"}, limit=2)
+    assert len(results) >= 1
+    assert all(e.sender_domain == "corp.com" for e in results)
+
+
+def test_cluster_fewer_than_limit(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.cluster(where={"field": "sender_address", "eq": "carol@other.com"}, limit=10)
+    assert len(results) == 1
+
+
+def test_cluster_requires_where_or_ids(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"where.*message_ids"):
+        db.cluster()
+
+
+def test_cluster_rejects_both_where_and_ids(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"where.*message_ids"):
+        db.cluster(
+            where={"field": "sender_domain", "eq": "corp.com"},
+            message_ids=["adv-1@example.com"],
+        )

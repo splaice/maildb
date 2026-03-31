@@ -258,6 +258,21 @@ def mention_search(
 
 
 @mcp.tool()
+def cluster(
+    ctx: Context,
+    where: dict[str, Any] | None = None,
+    message_ids: list[str] | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Extract diverse topic representatives from an email subset.
+    Provide either where (DSL filter dict) or message_ids (list of message_id strings).
+    """
+    db = _get_db(ctx)
+    results = db.cluster(where=where, message_ids=message_ids, limit=limit)
+    return [_serialize_email(e) for e in results]
+
+
+@mcp.tool()
 def long_threads(
     ctx: Context,
     min_messages: int = 5,

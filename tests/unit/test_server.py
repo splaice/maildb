@@ -81,6 +81,7 @@ def test_mcp_has_all_tools() -> None:
         "correspondence",
         "mention_search",
         "query",
+        "cluster",
     }
 
     assert expected <= tool_names, f"Missing tools: {expected - tool_names}"
