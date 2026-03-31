@@ -171,6 +171,7 @@ def find(
     labels: list[str] | None = None,
     limit: int = 50,
     order: str = "date DESC",
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Search emails by structured attribute filters.
 
@@ -185,6 +186,9 @@ def find(
       labels: array containment filter (AND logic, e.g. ["INBOX", "Finance"])
       limit: max results (default 50)
       order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
+      fields: list of field names to return (default: all). Valid: id, message_id, thread_id,
+        subject, sender_name, sender_address, sender_domain, recipients, date, body_text,
+        has_attachment, attachments, labels, in_reply_to, references, created_at
 
     Returns list of email dicts with: id, message_id, thread_id, subject, sender_name,
     sender_address, sender_domain, recipients, date, body_text, has_attachment, labels.
@@ -204,7 +208,8 @@ def find(
         limit=limit,
         order=order,
     )
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -221,6 +226,7 @@ def search(
     subject_contains: str | None = None,
     labels: list[str] | None = None,
     limit: int = 20,
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search for emails by natural language query. Requires Ollama running.
 
@@ -229,6 +235,7 @@ def search(
       sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels:
         same filters as find() — applied on top of semantic ranking
       limit: max results (default 20)
+      fields: list of field names to return (default: all)
 
     Returns list of {email: <email dict>, similarity: float} ordered by descending similarity.
 
@@ -247,16 +254,22 @@ def search(
         labels=labels,
         limit=limit,
     )
-    return [_serialize_search_result(sr) for sr in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_search_result(sr, valid) for sr in results]
 
 
 @mcp.tool()
 @log_tool
-def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
+def get_thread(
+    ctx: Context,
+    thread_id: str,
+    fields: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Retrieve all emails in a conversation thread, ordered chronologically.
 
     Parameters:
       thread_id: the thread identifier (from an email's thread_id field)
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts ordered by date ASC.
 
@@ -264,16 +277,22 @@ def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
     """
     db = _get_db(ctx)
     results = db.get_thread(thread_id)
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
 @log_tool
-def get_thread_for(ctx: Context, message_id: str) -> list[dict[str, Any]]:
+def get_thread_for(
+    ctx: Context,
+    message_id: str,
+    fields: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Find the full thread containing a specific email message.
 
     Parameters:
       message_id: the RFC 2822 Message-ID of any email in the thread
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts (the full thread) ordered by date ASC. Empty list if not found.
 
@@ -281,7 +300,8 @@ def get_thread_for(ctx: Context, message_id: str) -> list[dict[str, Any]]:
     """
     db = _get_db(ctx)
     results = db.get_thread_for(message_id)
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -324,6 +344,7 @@ def topics_with(
     sender: str | None = None,
     sender_domain: str | None = None,
     limit: int = 5,
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Find representative emails spanning different topics with a contact.
 
@@ -333,6 +354,7 @@ def topics_with(
       sender: exact email address (e.g. "bob@acme.com")
       sender_domain: domain to match (e.g. "acme.com") — provide sender OR sender_domain
       limit: number of diverse representatives (default 5)
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts maximizing topic diversity.
 
@@ -340,7 +362,8 @@ def topics_with(
     """
     db = _get_db(ctx)
     results = db.topics_with(sender=sender, sender_domain=sender_domain, limit=limit)
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -354,6 +377,7 @@ def unreplied(
     sender: str | None = None,
     sender_domain: str | None = None,
     limit: int = 100,
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Find emails with no reply in the same thread.
 
@@ -364,6 +388,7 @@ def unreplied(
       after, before: ISO date range filters
       sender, sender_domain: for inbound — filter by original sender
       limit: max results (default 100)
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts ordered by date DESC.
 
@@ -379,7 +404,8 @@ def unreplied(
         sender_domain=sender_domain,
         limit=limit,
     )
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -391,6 +417,7 @@ def correspondence(
     before: str | None = None,
     limit: int = 500,
     order: str = "date ASC",
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Get all emails exchanged with a specific person (sent by them or to them).
 
@@ -399,6 +426,7 @@ def correspondence(
       after, before: ISO date range filters
       limit: max results (default 500, higher for full relationship history)
       order: "date ASC" (default, chronological) or "date DESC"
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts.
 
@@ -408,7 +436,8 @@ def correspondence(
     results = db.correspondence(
         address=address, after=after, before=before, limit=limit, order=order
     )
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -421,6 +450,7 @@ def mention_search(
     after: str | None = None,
     before: str | None = None,
     limit: int = 50,
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Search for emails containing specific text in body or subject (case-insensitive).
 
@@ -431,6 +461,7 @@ def mention_search(
       sender, sender_domain: optional sender filters
       after, before: ISO date range filters
       limit: max results (default 50)
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts ordered by date DESC.
 
@@ -445,7 +476,8 @@ def mention_search(
         before=before,
         limit=limit,
     )
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
@@ -455,6 +487,7 @@ def cluster(
     where: dict[str, Any] | None = None,
     message_ids: list[str] | None = None,
     limit: int = 5,
+    fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract diverse topic representatives from an email subset using embedding similarity.
 
@@ -464,6 +497,7 @@ def cluster(
       where: DSL filter dict (e.g. {"field": "sender_domain", "eq": "stripe.com"})
       message_ids: explicit list of message_id strings (for chaining with other tools)
       limit: number of diverse representatives (default 5)
+      fields: list of field names to return (default: all)
 
     Returns list of email dicts maximizing topic diversity via farthest-point selection.
 
@@ -471,7 +505,8 @@ def cluster(
     """
     db = _get_db(ctx)
     results = db.cluster(where=where, message_ids=message_ids, limit=limit)
-    return [_serialize_email(e) for e in results]
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    return [_serialize_email(e, valid) for e in results]
 
 
 @mcp.tool()
