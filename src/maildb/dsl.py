@@ -171,10 +171,11 @@ def parse_query(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     has_group_by = bool(spec.get("group_by"))
 
     select_aliases: set[str] = set()
-    select_exprs = _resolve_select(spec.get("select"), allowed, has_group_by, select_aliases)
+    alias_exprs: dict[str, str] = {}
+    select_exprs = _resolve_select(spec.get("select"), allowed, has_group_by, select_aliases, alias_exprs)
     where_sql = _resolve_where(spec.get("where"), allowed, acc)
     group_sql = _resolve_group_by(spec.get("group_by"), allowed)
-    having_sql = _resolve_having(spec.get("having"), allowed, select_aliases, acc)
+    having_sql = _resolve_having(spec.get("having"), allowed, select_aliases, acc, alias_exprs)
     order_sql = _resolve_order_by(spec.get("order_by"), allowed, select_aliases, has_group_by)
     limit_sql = _resolve_limit(spec.get("limit", 50), spec.get("offset", 0))
 
@@ -226,9 +227,10 @@ def _resolve_select(
     allowed: set[str],
     has_group_by: bool,
     aliases: set[str],
+    alias_exprs: dict[str, str] | None = None,
 ) -> list[str]:
     if raw_select:
-        return _build_select(raw_select, allowed, has_group_by, aliases)
+        return _build_select(raw_select, allowed, has_group_by, aliases, alias_exprs)
     # Default: all columns with body_text truncated
     cols: list[str] = []
     for c in sorted(allowed):
@@ -269,12 +271,31 @@ def _resolve_having(
     allowed: set[str],
     select_aliases: set[str],
     acc: _ParamAccumulator,
+    alias_exprs: dict[str, str] | None = None,
 ) -> str:
     if not having:
         return ""
-    having_allowed = allowed | select_aliases
+    having_allowed = allowed | select_aliases | set((alias_exprs or {}).values())
+    # Rewrite alias references to underlying expressions for PostgreSQL compatibility
+    having = _expand_having_aliases(having, alias_exprs or {})
     fragment = _build_where(having, having_allowed, acc)
     return f" HAVING {fragment}"
+
+
+def _expand_having_aliases(clause: dict[str, Any], alias_exprs: dict[str, str]) -> dict[str, Any]:
+    """Replace alias references in HAVING field names with their underlying SQL expressions."""
+    if not alias_exprs:
+        return clause
+    # Boolean combinators
+    for key in ("and", "or"):
+        if key in clause:
+            return {key: [_expand_having_aliases(sub, alias_exprs) for sub in clause[key]]}
+    if "not" in clause:
+        return {"not": _expand_having_aliases(clause["not"], alias_exprs)}
+    # Leaf: substitute field if it's an alias
+    if "field" in clause and clause["field"] in alias_exprs:
+        clause = {**clause, "field": alias_exprs[clause["field"]]}
+    return clause
 
 
 def _resolve_order_by(
@@ -317,6 +338,7 @@ def _build_select(
     allowed: set[str],
     has_group_by: bool,
     aliases: set[str],
+    alias_exprs: dict[str, str] | None = None,
 ) -> list[str]:
     """Translate select items into SQL expression strings."""
     exprs: list[str] = []
@@ -325,7 +347,12 @@ def _build_select(
         exprs.append(expr)
         # Track alias
         if "as" in item:
-            aliases.add(item["as"])
+            alias = item["as"]
+            aliases.add(alias)
+            # Track the expression behind the alias (strip " AS alias" suffix)
+            if alias_exprs is not None:
+                base_expr = expr[: expr.rfind(" AS ")]
+                alias_exprs[alias] = base_expr
         elif (
             "field" in item
             and not any(k in item for k in _AGGREGATES)
@@ -436,9 +463,19 @@ def _build_where(
         return f"(NOT {inner})"
 
     # Leaf condition: {"field": "col", "op": "eq", "value": ...}
+    # Also accept shorthand: {"field": "col", "eq": "val"} where operator is a key.
     field = where["field"]
-    op = where["op"]
-    value = where.get("value")
+    if "op" in where:
+        op = where["op"]
+        value = where.get("value")
+    else:
+        # Shorthand: find the operator key
+        op_keys = [k for k in where if k in _OPERATORS]
+        if not op_keys:
+            msg = "Missing 'op' or operator key in where clause"
+            raise ValueError(msg)
+        op = op_keys[0]
+        value = where[op]
 
     if field not in allowed:
         msg = f"Unknown column: {field!r}"

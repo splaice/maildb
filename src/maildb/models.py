@@ -24,6 +24,18 @@ class Recipients:
     bcc: list[str]
 
 
+def _parse_embedding(raw: Any) -> list[float] | None:
+    """Parse embedding from pgvector (may be string or list)."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [float(x) for x in raw]
+    if isinstance(raw, str):
+        # pgvector returns strings like "[0.1,0.2,...]"
+        return [float(x) for x in raw.strip("[]").split(",")]
+    return [float(x) for x in raw]
+
+
 @dataclass
 class Email:
     id: UUID
@@ -93,7 +105,7 @@ class Email:
             labels=row.get("labels") or [],
             in_reply_to=row.get("in_reply_to"),
             references=row.get("references") or [],
-            embedding=row.get("embedding"),
+            embedding=_parse_embedding(row.get("embedding")),
             created_at=row["created_at"],
         )
 

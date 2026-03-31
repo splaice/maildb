@@ -262,7 +262,7 @@ class TestGroupByHavingOrderBy:
                 "having": {"field": "cnt", "op": "gte", "value": 2},
             }
         )
-        assert "HAVING cnt >= %(__p0)s" in sql
+        assert "HAVING count(*) >= %(__p0)s" in sql
         assert params["__p0"] == 2
 
     def test_order_by(self) -> None:
