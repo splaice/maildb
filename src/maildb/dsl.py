@@ -172,7 +172,9 @@ def parse_query(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     select_aliases: set[str] = set()
     alias_exprs: dict[str, str] = {}
-    select_exprs = _resolve_select(spec.get("select"), allowed, has_group_by, select_aliases, alias_exprs)
+    select_exprs = _resolve_select(
+        spec.get("select"), allowed, has_group_by, select_aliases, alias_exprs
+    )
     where_sql = _resolve_where(spec.get("where"), allowed, acc)
     group_sql = _resolve_group_by(spec.get("group_by"), allowed)
     having_sql = _resolve_having(spec.get("having"), allowed, select_aliases, acc, alias_exprs)
