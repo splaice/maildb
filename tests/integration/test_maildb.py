@@ -313,8 +313,10 @@ def test_top_contacts_outbound(test_pool, seed_advanced) -> None:  # type: ignor
     assert contacts[0]["address"] == "bob@corp.com"
 
 
-def test_top_contacts_requires_user_email(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
-    db = MailDB._from_pool(test_pool)
+def test_top_contacts_requires_user_email(test_pool, seed_advanced, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
+    config = Settings(user_email=None, _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
     with pytest.raises(ValueError, match="user_email"):
         db.top_contacts()
 
@@ -329,8 +331,10 @@ def test_unreplied(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped
     assert "adv-4@other.com" in message_ids
 
 
-def test_unreplied_requires_user_email(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
-    db = MailDB._from_pool(test_pool)
+def test_unreplied_requires_user_email(test_pool, seed_advanced, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
+    config = Settings(user_email=None, _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
     with pytest.raises(ValueError, match="user_email"):
         db.unreplied()
 
