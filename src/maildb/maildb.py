@@ -623,6 +623,42 @@ class MailDB:
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]
 
+    def mention_search(
+        self,
+        *,
+        text: str,
+        sender: str | None = None,
+        sender_domain: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Email]:
+        """Case-insensitive keyword search in body_text and subject.
+        Unlike search(), uses ILIKE (substring match) and does not require Ollama.
+        """
+        escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        conditions: list[str] = [
+            "(body_text ILIKE %(pattern)s ESCAPE '\\' OR subject ILIKE %(pattern)s ESCAPE '\\')"
+        ]
+        params: dict[str, Any] = {"pattern": pattern, "limit": limit}
+        if sender:
+            conditions.append("sender_address = %(sender)s")
+            params["sender"] = sender
+        if sender_domain:
+            conditions.append("sender_domain = %(sender_domain)s")
+            params["sender_domain"] = sender_domain
+        if after:
+            conditions.append("date >= %(after)s")
+            params["after"] = after
+        if before:
+            conditions.append("date < %(before)s")
+            params["before"] = before
+        where = " AND ".join(conditions)
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT %(limit)s"
+        rows = _query_dicts(self._pool, sql, params)
+        return [Email.from_row(row) for row in rows]
+
     def long_threads(
         self,
         *,

@@ -780,3 +780,54 @@ def test_correspondence_limit(test_pool, seed_advanced) -> None:
     db = MailDB._from_pool(test_pool)
     results = db.correspondence(address="bob@corp.com", limit=1)
     assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# mention_search tests
+# ---------------------------------------------------------------------------
+
+
+def test_mention_search_body(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="spreadsheet")
+    assert len(results) == 1
+    assert results[0].message_id == "find-test-2@example.com"
+
+
+def test_mention_search_subject(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="Invoice")
+    assert len(results) == 1
+    assert results[0].message_id == "find-test-3@stripe.com"
+
+
+def test_mention_search_case_insensitive(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="BUDGET")
+    assert len(results) >= 1
+
+
+def test_mention_search_with_sender_filter(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="budget", sender="alice@example.com")
+    assert len(results) == 1
+    assert results[0].sender_address == "alice@example.com"
+
+
+def test_mention_search_escapes_like_chars(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="100%_done")
+    assert len(results) == 0
+
+
+def test_mention_search_ordered_by_date_desc(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="budget")
+    if len(results) >= 2:
+        assert results[0].date >= results[1].date
+
+
+def test_mention_search_limit(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.mention_search(text="budget", limit=1)
+    assert len(results) <= 1

@@ -233,6 +233,31 @@ def correspondence(
 
 
 @mcp.tool()
+def mention_search(
+    ctx: Context,
+    text: str,
+    sender: str | None = None,
+    sender_domain: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Search for emails containing specific text in body or subject (case-insensitive ILIKE).
+    Unlike search(), does not need Ollama — uses substring matching.
+    """
+    db = _get_db(ctx)
+    results = db.mention_search(
+        text=text,
+        sender=sender,
+        sender_domain=sender_domain,
+        after=after,
+        before=before,
+        limit=limit,
+    )
+    return [_serialize_email(e) for e in results]
+
+
+@mcp.tool()
 def long_threads(
     ctx: Context,
     min_messages: int = 5,
