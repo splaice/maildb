@@ -339,6 +339,37 @@ def test_unreplied_requires_user_email(test_pool, seed_advanced, monkeypatch) ->
         db.unreplied()
 
 
+def test_unreplied_excludes_null_date(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """Emails with null date should not appear in unreplied results."""
+    # Insert a null-date email (simulating a Google Chat transcript)
+    with test_pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO emails (
+                message_id, thread_id, subject, sender_name, sender_address, sender_domain,
+                recipients, date, body_text, body_html, has_attachment, attachments,
+                labels, in_reply_to, "references", embedding
+            ) VALUES (
+                'null-date@chat.google.com', 'null-date@chat.google.com',
+                'Chat with Team', 'Bot', 'bot@chat.google.com', 'chat.google.com',
+                %(recipients)s, NULL, 'chat transcript', NULL,
+                false, '[]', '["Chat"]', NULL, '{}', %(embedding)s
+            )
+            """,
+            {
+                "recipients": json_mod.dumps({"to": ["alice@example.com"], "cc": [], "bcc": []}),
+                "embedding": [0.0] * 768,
+            },
+        )
+        conn.commit()
+
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    unreplied_emails = db.unreplied()
+    message_ids = [e.message_id for e in unreplied_emails]
+    assert "null-date@chat.google.com" not in message_ids
+
+
 def test_long_threads(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     threads = db.long_threads(min_messages=2)

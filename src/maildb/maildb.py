@@ -557,6 +557,7 @@ class MailDB:
         if direction == "inbound":
             conditions: list[str] = [
                 "e.sender_address != %(user_email)s",
+                "e.date IS NOT NULL",
             ]
             if after:
                 conditions.append("e.date >= %(after)s")
@@ -590,6 +591,7 @@ class MailDB:
             # Outbound: messages FROM user where recipients never replied
             conditions = [
                 "e.sender_address = %(user_email)s",
+                "e.date IS NOT NULL",
             ]
             if after:
                 conditions.append("e.date >= %(after)s")
