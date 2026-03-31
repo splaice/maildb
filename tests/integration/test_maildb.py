@@ -331,6 +331,37 @@ def test_unreplied(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped
     assert "adv-4@other.com" in message_ids
 
 
+def test_unreplied_outbound_with_seed_advanced(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """Verify outbound direction works when user_email matches sender address."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    # Insert an outbound message from Alice to Carol with no reply
+    with test_pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO emails (
+                message_id, thread_id, subject, sender_name, sender_address, sender_domain,
+                recipients, date, body_text, body_html, has_attachment, attachments,
+                labels, in_reply_to, "references", embedding
+            ) VALUES (
+                'outbound-1@example.com', 'outbound-1@example.com',
+                'Follow up', 'Alice', 'alice@example.com', 'example.com',
+                %(recipients)s, '2025-01-25 10:00:00+00', 'Following up on our chat.', NULL,
+                false, '[]', '["Sent"]', NULL, '{}', %(embedding)s
+            )
+            """,
+            {
+                "recipients": json_mod.dumps({"to": ["carol@other.com"], "cc": [], "bcc": []}),
+                "embedding": [0.0] * 768,
+            },
+        )
+        conn.commit()
+
+    unreplied_emails = db.unreplied(direction="outbound")
+    message_ids = [e.message_id for e in unreplied_emails]
+    assert "outbound-1@example.com" in message_ids
+
+
 def test_unreplied_requires_user_email(test_pool, seed_advanced, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
     config = Settings(user_email=None, _env_file=None)  # type: ignore[call-arg]
