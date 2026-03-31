@@ -269,27 +269,65 @@ class MailDB:
         period: str | None = None,
         limit: int = 10,
         direction: str = "both",
+        group_by: str = "address",
+        exclude_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Most frequent correspondents via GROUP BY aggregation."""
-        user_email = self._require_user_email()
+        """Most frequent correspondents via GROUP BY aggregation.
 
-        conditions: list[str] = []
+        Args:
+            period: Only count messages after this date (ISO format).
+            limit: Max results to return.
+            direction: 'inbound', 'outbound', or 'both'.
+            group_by: 'address' (default) or 'domain' to aggregate by domain.
+            exclude_domains: List of domains to exclude from results.
+        """
+        if group_by not in ("address", "domain"):
+            msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
+            raise ValueError(msg)
+
+        user_email = self._require_user_email()
         params: dict[str, Any] = {"user_email": user_email, "limit": limit}
 
-        if direction == "inbound":
-            conditions.append("sender_address != %(user_email)s")
-            group_col = "sender_address"
-        elif direction == "outbound":
-            conditions.append("sender_address = %(user_email)s")
-            # For outbound, group by recipient — need a different query
-            if period:
-                period_cond = "AND date >= %(period_start)s"
-                params["period_start"] = period
-            else:
-                period_cond = ""
+        if period:
+            period_cond = "AND date >= %(period_start)s"
+            params["period_start"] = period
+        else:
+            period_cond = ""
 
+        if exclude_domains:
+            params["exclude_domains"] = exclude_domains
+            exclude_inbound = "AND sender_domain != ALL(%(exclude_domains)s)"
+            exclude_outbound = "AND split_part(r.addr, '@', 2) != ALL(%(exclude_domains)s)"
+        else:
+            exclude_inbound = ""
+            exclude_outbound = ""
+
+        # Column aliases depend on group_by mode
+        label = group_by  # "address" or "domain"
+
+        if group_by == "domain":
+            inbound_col = "sender_domain"
+            outbound_col = "split_part(r.addr, '@', 2)"
+        else:
+            inbound_col = "sender_address"
+            outbound_col = "r.addr"
+
+        if direction == "inbound":
             sql = f"""
-                SELECT r.addr AS address, count(*) AS count
+                SELECT {inbound_col} AS {label}, count(*) AS count
+                FROM emails
+                WHERE sender_address != %(user_email)s
+                  {period_cond}
+                  {exclude_inbound}
+                GROUP BY {inbound_col}
+                ORDER BY count DESC
+                LIMIT %(limit)s
+            """
+            return _query_dicts(self._pool, sql, params)
+
+        if direction == "outbound":
+            sql = f"""
+                SELECT {outbound_col} AS {label}, count(*) AS count
                 FROM emails,
                      LATERAL (
                          SELECT jsonb_array_elements_text(recipients->'to') AS addr
@@ -301,65 +339,44 @@ class MailDB:
                 WHERE sender_address = %(user_email)s
                   AND r.addr != %(user_email)s
                   {period_cond}
-                GROUP BY r.addr
-                ORDER BY count DESC
-                LIMIT %(limit)s
-            """
-            return _query_dicts(self._pool, sql, params)
-        else:  # both
-            if period:
-                period_cond_inbound = "AND date >= %(period_start)s"
-                period_cond_outbound = "AND date >= %(period_start)s"
-                params["period_start"] = period
-            else:
-                period_cond_inbound = ""
-                period_cond_outbound = ""
-
-            sql = f"""
-                SELECT address, sum(count) AS count
-                FROM (
-                    SELECT sender_address AS address, count(*) AS count
-                    FROM emails
-                    WHERE sender_address != %(user_email)s
-                      {period_cond_inbound}
-                    GROUP BY sender_address
-
-                    UNION ALL
-
-                    SELECT r.addr AS address, count(*) AS count
-                    FROM emails,
-                         LATERAL (
-                             SELECT jsonb_array_elements_text(recipients->'to') AS addr
-                             UNION ALL
-                             SELECT jsonb_array_elements_text(recipients->'cc')
-                             UNION ALL
-                             SELECT jsonb_array_elements_text(recipients->'bcc')
-                         ) AS r(addr)
-                    WHERE sender_address = %(user_email)s
-                      AND r.addr != %(user_email)s
-                      {period_cond_outbound}
-                    GROUP BY r.addr
-                ) AS combined
-                GROUP BY address
+                  {exclude_outbound}
+                GROUP BY {outbound_col}
                 ORDER BY count DESC
                 LIMIT %(limit)s
             """
             return _query_dicts(self._pool, sql, params)
 
-        if period:
-            conditions.append("date >= %(period_start)s")
-            params["period_start"] = period
-
-        where = " AND ".join(conditions) if conditions else "TRUE"
         sql = f"""
-            SELECT {group_col} AS address, count(*) AS count
-            FROM emails
-            WHERE {where}
-            GROUP BY {group_col}
+            SELECT {label}, sum(count) AS count
+            FROM (
+                SELECT {inbound_col} AS {label}, count(*) AS count
+                FROM emails
+                WHERE sender_address != %(user_email)s
+                  {period_cond}
+                  {exclude_inbound}
+                GROUP BY {inbound_col}
+
+                UNION ALL
+
+                SELECT {outbound_col} AS {label}, count(*) AS count
+                FROM emails,
+                     LATERAL (
+                         SELECT jsonb_array_elements_text(recipients->'to') AS addr
+                         UNION ALL
+                         SELECT jsonb_array_elements_text(recipients->'cc')
+                         UNION ALL
+                         SELECT jsonb_array_elements_text(recipients->'bcc')
+                     ) AS r(addr)
+                WHERE sender_address = %(user_email)s
+                  AND r.addr != %(user_email)s
+                  {period_cond}
+                  {exclude_outbound}
+                GROUP BY {outbound_col}
+            ) AS combined
+            GROUP BY {label}
             ORDER BY count DESC
             LIMIT %(limit)s
         """
-
         return _query_dicts(self._pool, sql, params)
 
     def topics_with(

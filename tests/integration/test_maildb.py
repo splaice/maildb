@@ -433,6 +433,79 @@ def test_top_contacts_with_period(test_pool, seed_advanced) -> None:  # type: ig
     assert carol["count"] == 1
 
 
+def test_top_contacts_domain_grouping_outbound(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """group_by='domain' with direction='outbound' groups recipients by domain."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="outbound", group_by="domain")
+    assert len(contacts) >= 1
+    domains = {c["domain"] for c in contacts}
+    assert "corp.com" in domains
+
+
+def test_top_contacts_domain_grouping_inbound(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """group_by='domain' with direction='inbound' groups senders by domain."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="inbound", group_by="domain")
+    domains = {c["domain"] for c in contacts}
+    assert "corp.com" in domains
+    assert "other.com" in domains
+
+
+def test_top_contacts_exclude_domains(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """exclude_domains filters out contacts from specified domains."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="inbound", exclude_domains=["corp.com"])
+    addresses = {c["address"] for c in contacts}
+    assert "bob@corp.com" not in addresses
+    assert "carol@other.com" in addresses
+
+
+def test_top_contacts_domain_grouping_with_exclusion(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """group_by='domain' combined with exclude_domains."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(
+        direction="inbound", group_by="domain", exclude_domains=["other.com"]
+    )
+    domains = {c["domain"] for c in contacts}
+    assert "corp.com" in domains
+    assert "other.com" not in domains
+
+
+def test_top_contacts_domain_grouping_both(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """group_by='domain' with direction='both' combines inbound and outbound domains."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="both", group_by="domain")
+    # corp.com: 2 inbound (bob) + 1 outbound (alice->bob) = 3
+    corp = next(c for c in contacts if c["domain"] == "corp.com")
+    assert corp["count"] == 3
+    # other.com: 1 inbound (carol) = 1
+    other = next(c for c in contacts if c["domain"] == "other.com")
+    assert other["count"] == 1
+
+
+def test_top_contacts_exclude_multiple_domains(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """Excluding all contact domains returns empty results."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="inbound", exclude_domains=["corp.com", "other.com"])
+    assert contacts == []
+
+
+def test_top_contacts_default_unchanged(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    """Default group_by='address' with no exclusions still works as before."""
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    contacts = db.top_contacts(direction="inbound")
+    assert len(contacts) >= 2
+    assert contacts[0]["address"] == "bob@corp.com"
+    assert contacts[0]["count"] == 2
+
+
 def test_unreplied_respects_limit(test_pool, seed_advanced) -> None:
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)

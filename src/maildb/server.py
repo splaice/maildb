@@ -155,10 +155,18 @@ def top_contacts(
     period: str | None = None,
     limit: int = 10,
     direction: str = "both",
+    group_by: str = "address",
+    exclude_domains: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Find most frequent email correspondents. Direction: 'inbound', 'outbound', or 'both'."""
+    """Find most frequent email correspondents. Direction: 'inbound', 'outbound', or 'both'. group_by: 'address' or 'domain'. exclude_domains: list of domains to filter out."""
     db = _get_db(ctx)
-    return db.top_contacts(period=period, limit=limit, direction=direction)
+    return db.top_contacts(
+        period=period,
+        limit=limit,
+        direction=direction,
+        group_by=group_by,
+        exclude_domains=exclude_domains,
+    )
 
 
 @mcp.tool()
