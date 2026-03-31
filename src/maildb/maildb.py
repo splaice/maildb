@@ -584,30 +584,30 @@ class MailDB:
     def long_threads(
         self,
         *,
+        participant: str | None = None,
         min_messages: int = 5,
         after: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Threads exceeding a message count threshold."""
+        """Threads exceeding a message count threshold.
+        participant: only threads where this address appears as sender.
+        """
         conditions: list[str] = []
         params: dict[str, Any] = {"min_messages": min_messages}
-
         if after:
             conditions.append("date >= %(after)s")
             params["after"] = after
-
         where = " AND ".join(conditions) if conditions else "TRUE"
-
+        having_participant = ""
+        if participant:
+            having_participant = "AND %(participant)s = ANY(array_agg(sender_address))"
+            params["participant"] = participant
         sql = f"""
-            SELECT thread_id,
-                   count(*) AS message_count,
-                   min(date) AS first_date,
-                   max(date) AS last_date,
+            SELECT thread_id, count(*) AS message_count,
+                   min(date) AS first_date, max(date) AS last_date,
                    array_agg(DISTINCT sender_address) AS participants
-            FROM emails
-            WHERE {where}
+            FROM emails WHERE {where}
             GROUP BY thread_id
-            HAVING count(*) >= %(min_messages)s
+            HAVING count(*) >= %(min_messages)s {having_participant}
             ORDER BY count(*) DESC
         """
-
         return _query_dicts(self._pool, sql, params)

@@ -218,7 +218,8 @@ def long_threads(
     ctx: Context,
     min_messages: int = 5,
     after: str | None = None,
+    participant: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find email threads with many messages."""
     db = _get_db(ctx)
-    return db.long_threads(min_messages=min_messages, after=after)
+    return db.long_threads(min_messages=min_messages, after=after, participant=participant)

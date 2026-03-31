@@ -393,6 +393,35 @@ def test_long_threads_with_after(test_pool, seed_advanced) -> None:  # type: ign
     assert threads[0]["message_count"] >= 2
 
 
+def test_long_threads_with_participant(test_pool, seed_advanced) -> None:
+    """long_threads with participant filters to threads with that sender."""
+    db = MailDB._from_pool(test_pool)
+    threads = db.long_threads(min_messages=2, participant="bob@corp.com")
+    assert len(threads) >= 1
+    assert threads[0]["thread_id"] == "adv-1@example.com"
+
+
+def test_long_threads_participant_no_match(test_pool, seed_advanced) -> None:
+    """Participant not in any long thread returns empty."""
+    db = MailDB._from_pool(test_pool)
+    threads = db.long_threads(min_messages=2, participant="nobody@nowhere.com")
+    assert len(threads) == 0
+
+
+def test_long_threads_no_participant_unchanged(test_pool, seed_advanced) -> None:
+    """Without participant, current behavior preserved."""
+    db = MailDB._from_pool(test_pool)
+    threads = db.long_threads(min_messages=2)
+    assert len(threads) >= 1
+
+
+def test_long_threads_participant_cc_only_no_match(test_pool, seed_advanced) -> None:
+    """Participant who is only in CC (not as sender) should NOT match."""
+    db = MailDB._from_pool(test_pool)
+    threads = db.long_threads(min_messages=2, participant="carol@other.com")
+    assert len(threads) == 0
+
+
 def test_unreplied_with_sender_filter(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     """unreplied(sender=...) should only return unreplied from that sender."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
