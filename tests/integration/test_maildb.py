@@ -636,3 +636,10 @@ def test_unreplied_outbound_multi_recipient_partial_reply(
     assert "unr-out-2@example.com" not in message_ids
     # unr-out-4: Eve was a to-recipient but never replied → should appear
     assert "unr-out-4@example.com" in message_ids
+
+
+def test_unreplied_invalid_direction(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    with pytest.raises(ValueError, match="direction"):
+        db.unreplied(direction="sideways")  # type: ignore[arg-type]

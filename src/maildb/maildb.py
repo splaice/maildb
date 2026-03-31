@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from psycopg.rows import dict_row
@@ -439,7 +439,7 @@ class MailDB:
     def unreplied(
         self,
         *,
-        direction: str = "inbound",
+        direction: Literal["inbound", "outbound"] = "inbound",
         recipient: str | None = None,
         after: str | None = None,
         before: str | None = None,
@@ -464,6 +464,11 @@ class MailDB:
         if direction not in ("inbound", "outbound"):
             msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
             raise ValueError(msg)
+
+        if direction == "inbound" and recipient is not None:
+            raise ValueError("'recipient' is only valid for direction='outbound'")
+        if direction == "outbound" and (sender is not None or sender_domain is not None):
+            raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
 
         user_email = self._require_user_email()
         params: dict[str, Any] = {"user_email": user_email}

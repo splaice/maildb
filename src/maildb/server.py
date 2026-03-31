@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -177,7 +177,7 @@ def topics_with(
 @mcp.tool()
 def unreplied(
     ctx: Context,
-    direction: str = "inbound",
+    direction: Literal["inbound", "outbound"] = "inbound",
     recipient: str | None = None,
     after: str | None = None,
     before: str | None = None,
