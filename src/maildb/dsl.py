@@ -7,6 +7,7 @@ using strict column/operator whitelists and value binding.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,25 @@ _AGGREGATES: set[str] = {
 # ---------------------------------------------------------------------------
 
 _MAX_ROWS = 1000
+
+# ---------------------------------------------------------------------------
+# Date-trunc precision whitelist
+# ---------------------------------------------------------------------------
+
+_DATE_TRUNC_INTERVALS: set[str] = {"year", "month", "week", "day"}
+
+# ---------------------------------------------------------------------------
+# Alias validation
+# ---------------------------------------------------------------------------
+
+_ALIAS_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_alias(alias: str) -> None:
+    if not _ALIAS_RE.match(alias):
+        msg = f"Invalid alias '{alias}'. Must match [a-zA-Z_][a-zA-Z0-9_]*"
+        raise ValueError(msg)
+
 
 # ---------------------------------------------------------------------------
 # CTE templates
@@ -184,7 +204,7 @@ def build_where_clause(
 
     allowed = _SOURCE_COLUMNS[source]
     acc = _ParamAccumulator()
-    fragment, _ = _build_where(where, allowed, acc)
+    fragment = _build_where(where, allowed, acc)
     return fragment, acc.params
 
 
@@ -227,7 +247,7 @@ def _resolve_where(
 ) -> str:
     if not where:
         return ""
-    fragment, _ = _build_where(where, allowed, acc)
+    fragment = _build_where(where, allowed, acc)
     return f" WHERE {fragment}"
 
 
@@ -253,7 +273,7 @@ def _resolve_having(
     if not having:
         return ""
     having_allowed = allowed | select_aliases
-    fragment, _ = _build_where(having, having_allowed, acc)
+    fragment = _build_where(having, having_allowed, acc)
     return f" HAVING {fragment}"
 
 
@@ -280,10 +300,10 @@ def _resolve_order_by(
 
 
 def _resolve_limit(limit: int, offset: int) -> str:
-    capped = min(limit, _MAX_ROWS)
+    capped = min(int(limit), _MAX_ROWS)
     sql = f" LIMIT {capped}"
     if offset:
-        sql += f" OFFSET {offset}"
+        sql += f" OFFSET {int(offset)}"
     return sql
 
 
@@ -321,7 +341,11 @@ def _select_item(
     has_group_by: bool,
 ) -> str:
     """Convert a single select item to a SQL expression."""
-    alias_suffix = f" AS {item['as']}" if "as" in item else ""
+    if "as" in item:
+        _validate_alias(item["as"])
+        alias_suffix = f" AS {item['as']}"
+    else:
+        alias_suffix = ""
 
     # Date truncation
     if "date_trunc" in item:
@@ -330,6 +354,9 @@ def _select_item(
             msg = f"Unknown column in select: {field!r}"
             raise ValueError(msg)
         precision = item["date_trunc"]
+        if precision not in _DATE_TRUNC_INTERVALS:
+            msg = f"Invalid date_trunc precision: {precision!r}. Must be one of {sorted(_DATE_TRUNC_INTERVALS)}"
+            raise ValueError(msg)
         return f"date_trunc('{precision}', {field}){alias_suffix}"
 
     # Aggregation
@@ -389,24 +416,24 @@ def _build_where(
     where: dict[str, Any],
     allowed: set[str],
     acc: _ParamAccumulator,
-) -> tuple[str, None]:
+) -> str:
     """Recursively build a WHERE/HAVING clause fragment.
 
-    Returns ``(sql_fragment, None)``.  Parameters are accumulated
+    Returns an SQL fragment string.  Parameters are accumulated
     via the *acc* accumulator.
     """
     # Boolean combinators
     if "and" in where:
-        parts = [_build_where(sub, allowed, acc)[0] for sub in where["and"]]
-        return f"({' AND '.join(parts)})", None
+        parts = [_build_where(sub, allowed, acc) for sub in where["and"]]
+        return f"({' AND '.join(parts)})"
 
     if "or" in where:
-        parts = [_build_where(sub, allowed, acc)[0] for sub in where["or"]]
-        return f"({' OR '.join(parts)})", None
+        parts = [_build_where(sub, allowed, acc) for sub in where["or"]]
+        return f"({' OR '.join(parts)})"
 
     if "not" in where:
-        inner, _ = _build_where(where["not"], allowed, acc)
-        return f"(NOT {inner})", None
+        inner = _build_where(where["not"], allowed, acc)
+        return f"(NOT {inner})"
 
     # Leaf condition: {"field": "col", "op": "eq", "value": ...}
     field = where["field"]
@@ -423,21 +450,21 @@ def _build_where(
     # is_null -- no parameter needed
     if op == "is_null":
         if value:
-            return f"{field} IS NULL", None
-        return f"{field} IS NOT NULL", None
+            return f"{field} IS NULL"
+        return f"{field} IS NOT NULL"
 
     # in / not_in
     if op in ("in", "not_in"):
         pname = acc.add(tuple(value))  # type: ignore[arg-type]
         keyword = "IN" if op == "in" else "NOT IN"
-        return f"{field} {keyword} %({pname})s", None
+        return f"{field} {keyword} %({pname})s"
 
     # contains (array containment)
     if op == "contains":
         pname = acc.add(value)
-        return f"{field} @> %({pname})s", None
+        return f"{field} @> %({pname})s"
 
     # Standard comparison / pattern operators
     sql_op = _OP_SQL[op]
     pname = acc.add(value)
-    return f"{field} {sql_op} %({pname})s", None
+    return f"{field} {sql_op} %({pname})s"

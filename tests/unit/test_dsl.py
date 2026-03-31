@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from maildb.dsl import parse_query
+from maildb.dsl import build_where_clause, parse_query
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -314,3 +314,73 @@ class TestSources:
                     "where": {"field": "recipient_domain", "op": "eq", "value": "x.com"},
                 }
             )
+
+
+# ---------------------------------------------------------------------------
+# build_where_clause public API
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWhereClause:
+    def test_basic_filter(self) -> None:
+        sql, params = build_where_clause({"field": "sender_domain", "op": "eq", "value": "a.com"})
+        assert "sender_domain" in sql
+        assert "a.com" in params.values()
+
+    def test_rejects_unknown_source(self) -> None:
+        with pytest.raises(ValueError, match="Unknown source"):
+            build_where_clause(
+                {"field": "sender_domain", "op": "eq", "value": "a.com"}, source="bad"
+            )
+
+    def test_compound_filter(self) -> None:
+        sql, params = build_where_clause(
+            {
+                "and": [
+                    {"field": "sender_domain", "op": "eq", "value": "a.com"},
+                    {"field": "date", "op": "gte", "value": "2025-01-01"},
+                ]
+            }
+        )
+        assert "AND" in sql
+        assert len(params) == 2
+
+
+# ---------------------------------------------------------------------------
+# Security: alias & date_trunc validation
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityValidation:
+    def test_rejects_invalid_alias(self) -> None:
+        with pytest.raises(ValueError, match="Invalid alias"):
+            parse_query({"select": [{"field": "subject", "as": "bad alias!"}]})
+
+    def test_rejects_sql_injection_alias(self) -> None:
+        with pytest.raises(ValueError, match="Invalid alias"):
+            parse_query({"select": [{"field": "subject", "as": "x; DROP TABLE emails"}]})
+
+    def test_accepts_valid_alias(self) -> None:
+        sql, _ = parse_query({"select": [{"field": "sender_domain", "as": "domain"}]})
+        assert "AS domain" in sql
+
+    def test_rejects_invalid_date_trunc_precision(self) -> None:
+        with pytest.raises(ValueError, match="Invalid date_trunc precision"):
+            parse_query(
+                {
+                    "select": [
+                        {"date_trunc": "'; DROP TABLE emails; --", "field": "date", "as": "period"}
+                    ],
+                    "group_by": ["sender_domain"],
+                }
+            )
+
+    def test_accepts_valid_date_trunc_precision(self) -> None:
+        for precision in ("year", "month", "week", "day"):
+            sql, _ = parse_query(
+                {
+                    "select": [{"date_trunc": precision, "field": "date", "as": "period"}],
+                    "group_by": ["sender_domain"],
+                }
+            )
+            assert f"date_trunc('{precision}', date)" in sql
