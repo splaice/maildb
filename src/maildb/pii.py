@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping
 
 # --- Field-based redaction ---
 
@@ -79,8 +82,8 @@ def _truncate(value: str) -> str:
 def scrub_pii(
     logger: Any,
     method_name: str,
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
     """structlog processor: redact PII, then truncate long values."""
     for key in list(event_dict.keys()):
         # Field-based: redact entire value if key is sensitive
