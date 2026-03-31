@@ -29,3 +29,24 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.database_url == "postgresql://custom:5432/mydb"
     assert settings.user_email == "me@example.com"
+
+
+def test_debug_log_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAILDB_DEBUG_LOG", raising=False)
+    monkeypatch.delenv("MAILDB_DEBUG_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("MAILDB_DEBUG_LOG_MAX_BYTES", raising=False)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.debug_log.endswith(".maildb/debug.log")
+    assert "~" not in settings.debug_log  # path should be expanded
+    assert settings.debug_log_level == "DEBUG"
+    assert settings.debug_log_max_bytes == 10_485_760
+
+
+def test_debug_log_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAILDB_DEBUG_LOG", "/tmp/custom-debug.log")
+    monkeypatch.setenv("MAILDB_DEBUG_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("MAILDB_DEBUG_LOG_MAX_BYTES", "5242880")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.debug_log == "/tmp/custom-debug.log"
+    assert settings.debug_log_level == "INFO"
+    assert settings.debug_log_max_bytes == 5_242_880

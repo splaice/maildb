@@ -27,9 +27,15 @@ class Settings(BaseSettings):
     embed_workers: int = 4
     embed_batch_size: int = 50
 
+    # Debug logging
+    debug_log: str = "~/.maildb/debug.log"
+    debug_log_level: str = "DEBUG"
+    debug_log_max_bytes: int = 10_485_760  # 10MB
+
     @model_validator(mode="after")
     def _expand_paths(self) -> Settings:
         """Expand ~ and resolve relative paths for directory settings."""
         self.attachment_dir = str(Path(self.attachment_dir).expanduser())
         self.ingest_tmp_dir = str(Path(self.ingest_tmp_dir).expanduser())
+        self.debug_log = str(Path(self.debug_log).expanduser())
         return self
