@@ -170,6 +170,7 @@ def find(
     subject_contains: str | None = None,
     labels: list[str] | None = None,
     limit: int = 50,
+    offset: int = 0,
     order: str = "date DESC",
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -185,6 +186,7 @@ def find(
       subject_contains: case-insensitive substring match in subject
       labels: array containment filter (AND logic, e.g. ["INBOX", "Finance"])
       limit: max results (default 50)
+      offset: skip first N results for pagination (default 0)
       order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
       fields: list of field names to return (default: all). Valid: id, message_id, thread_id,
         subject, sender_name, sender_address, sender_domain, recipients, date, body_text,
@@ -206,6 +208,7 @@ def find(
         subject_contains=subject_contains,
         labels=labels,
         limit=limit,
+        offset=offset,
         order=order,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
@@ -226,6 +229,7 @@ def search(
     subject_contains: str | None = None,
     labels: list[str] | None = None,
     limit: int = 20,
+    offset: int = 0,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search for emails by natural language query. Requires Ollama running.
@@ -235,6 +239,7 @@ def search(
       sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels:
         same filters as find() — applied on top of semantic ranking
       limit: max results (default 20)
+      offset: skip first N results for pagination (default 0)
       fields: list of field names to return (default: all)
 
     Returns list of {email: <email dict>, similarity: float} ordered by descending similarity.
@@ -253,6 +258,7 @@ def search(
         subject_contains=subject_contains,
         labels=labels,
         limit=limit,
+        offset=offset,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_search_result(sr, valid) for sr in results]
@@ -310,6 +316,7 @@ def top_contacts(
     ctx: Context,
     period: str | None = None,
     limit: int = 10,
+    offset: int = 0,
     direction: str = "both",
     group_by: str = "address",
     exclude_domains: list[str] | None = None,
@@ -321,6 +328,7 @@ def top_contacts(
       exclude_domains: list of domains to filter out (e.g. ["mycompany.com"])
       period: ISO date string — only count messages after this date
       limit: max results (default 10)
+      offset: skip first N results for pagination (default 0)
       direction: "inbound" | "outbound" | "both" (default "both")
 
     Returns list of {address: str, count: int} (or {domain: str, count: int} when group_by="domain").
@@ -331,6 +339,7 @@ def top_contacts(
     return db.top_contacts(
         period=period,
         limit=limit,
+        offset=offset,
         direction=direction,
         group_by=group_by,
         exclude_domains=exclude_domains,
@@ -344,6 +353,7 @@ def topics_with(
     sender: str | None = None,
     sender_domain: str | None = None,
     limit: int = 5,
+    offset: int = 0,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Find representative emails spanning different topics with a contact.
@@ -354,6 +364,7 @@ def topics_with(
       sender: exact email address (e.g. "bob@acme.com")
       sender_domain: domain to match (e.g. "acme.com") — provide sender OR sender_domain
       limit: number of diverse representatives (default 5)
+      offset: skip first N results for pagination (default 0)
       fields: list of field names to return (default: all)
 
     Returns list of email dicts maximizing topic diversity.
@@ -361,7 +372,9 @@ def topics_with(
     Example: topics_with(sender="bob@corp.com", limit=5)
     """
     db = _get_db(ctx)
-    results = db.topics_with(sender=sender, sender_domain=sender_domain, limit=limit)
+    results = db.topics_with(
+        sender=sender, sender_domain=sender_domain, limit=limit, offset=offset
+    )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_email(e, valid) for e in results]
 
@@ -377,6 +390,7 @@ def unreplied(
     sender: str | None = None,
     sender_domain: str | None = None,
     limit: int = 100,
+    offset: int = 0,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Find emails with no reply in the same thread.
@@ -388,6 +402,7 @@ def unreplied(
       after, before: ISO date range filters
       sender, sender_domain: for inbound — filter by original sender
       limit: max results (default 100)
+      offset: skip first N results for pagination (default 0)
       fields: list of field names to return (default: all)
 
     Returns list of email dicts ordered by date DESC.
@@ -403,6 +418,7 @@ def unreplied(
         sender=sender,
         sender_domain=sender_domain,
         limit=limit,
+        offset=offset,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_email(e, valid) for e in results]
@@ -416,6 +432,7 @@ def correspondence(
     after: str | None = None,
     before: str | None = None,
     limit: int = 500,
+    offset: int = 0,
     order: str = "date ASC",
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -425,6 +442,7 @@ def correspondence(
       address: the person's email address (required)
       after, before: ISO date range filters
       limit: max results (default 500, higher for full relationship history)
+      offset: skip first N results for pagination (default 0)
       order: "date ASC" (default, chronological) or "date DESC"
       fields: list of field names to return (default: all)
 
@@ -434,7 +452,7 @@ def correspondence(
     """
     db = _get_db(ctx)
     results = db.correspondence(
-        address=address, after=after, before=before, limit=limit, order=order
+        address=address, after=after, before=before, limit=limit, offset=offset, order=order
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_email(e, valid) for e in results]
@@ -450,6 +468,7 @@ def mention_search(
     after: str | None = None,
     before: str | None = None,
     limit: int = 50,
+    offset: int = 0,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Search for emails containing specific text in body or subject (case-insensitive).
@@ -461,6 +480,7 @@ def mention_search(
       sender, sender_domain: optional sender filters
       after, before: ISO date range filters
       limit: max results (default 50)
+      offset: skip first N results for pagination (default 0)
       fields: list of field names to return (default: all)
 
     Returns list of email dicts ordered by date DESC.
@@ -475,6 +495,7 @@ def mention_search(
         after=after,
         before=before,
         limit=limit,
+        offset=offset,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_email(e, valid) for e in results]
@@ -487,6 +508,7 @@ def cluster(
     where: dict[str, Any] | None = None,
     message_ids: list[str] | None = None,
     limit: int = 5,
+    offset: int = 0,
     fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract diverse topic representatives from an email subset using embedding similarity.
@@ -497,6 +519,7 @@ def cluster(
       where: DSL filter dict (e.g. {"field": "sender_domain", "eq": "stripe.com"})
       message_ids: explicit list of message_id strings (for chaining with other tools)
       limit: number of diverse representatives (default 5)
+      offset: skip first N results for pagination (default 0)
       fields: list of field names to return (default: all)
 
     Returns list of email dicts maximizing topic diversity via farthest-point selection.
@@ -504,7 +527,7 @@ def cluster(
     Example: cluster(where={"and": [{"field": "sender_domain", "eq": "stripe.com"}, {"field": "date", "gte": "2024-01-01"}]}, limit=5)
     """
     db = _get_db(ctx)
-    results = db.cluster(where=where, message_ids=message_ids, limit=limit)
+    results = db.cluster(where=where, message_ids=message_ids, limit=limit, offset=offset)
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     return [_serialize_email(e, valid) for e in results]
 
@@ -517,6 +540,7 @@ def long_threads(
     after: str | None = None,
     participant: str | None = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Find email threads with many messages.
 
@@ -525,6 +549,7 @@ def long_threads(
       after: ISO date string — only count messages after this date
       participant: only threads where this address appears as sender
       limit: maximum number of threads to return (default 50)
+      offset: skip first N results for pagination (default 0)
 
     Returns list of {thread_id, message_count, first_date, last_date, participants[]}.
 
@@ -536,6 +561,7 @@ def long_threads(
         after=after,
         participant=participant,
         limit=limit,
+        offset=offset,
     )
 
 
