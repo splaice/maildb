@@ -50,6 +50,13 @@ def test_serialize_email_drops_embedding() -> None:
     assert "embedding" not in d
 
 
+def test_serialize_email_drops_body_html() -> None:
+    email = _make_email()
+    email.body_html = "<p>Hello world</p>"
+    d = _serialize_email(email)
+    assert "body_html" not in d
+
+
 def test_serialize_email_is_json_serializable() -> None:
     email = _make_email()
     d = _serialize_email(email)

@@ -83,6 +83,7 @@ def _serialize_email(email: Any) -> dict[str, Any]:
         d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
     # Drop embedding from serialized output (too large, not useful for agents)
     d.pop("embedding", None)
+    d.pop("body_html", None)
     return d
 
 
