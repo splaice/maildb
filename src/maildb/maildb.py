@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import date, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
 import structlog
 from psycopg.rows import dict_row
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
+from maildb.dsl import parse_query
 from maildb.embeddings import EmbeddingClient
 from maildb.models import Email, SearchResult
 
@@ -658,6 +662,35 @@ class MailDB:
         sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT %(limit)s"
         rows = _query_dicts(self._pool, sql, params)
         return [Email.from_row(row) for row in rows]
+
+    def query(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
+        """Execute a Tier 2 DSL query and return results as dicts.
+        Accepts a DSL specification dict. See dsl.py for full schema.
+        Enforces 5s statement timeout and 1000-row hard cap.
+        """
+        sql, params = parse_query(spec)
+        with self._pool.connection() as conn:
+            conn.execute("SET LOCAL statement_timeout = '5s'")
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = [dict(row) for row in cur.fetchall()]
+            conn.commit()  # releases the SET LOCAL
+        return self._serialize_query_results(rows)
+
+    @staticmethod
+    def _serialize_query_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Make query results JSON-serializable."""
+
+        def _convert(v: Any) -> Any:
+            if isinstance(v, UUID):
+                return str(v)
+            if isinstance(v, (datetime, date)):
+                return v.isoformat()
+            if isinstance(v, Decimal):
+                return float(v)
+            return v
+
+        return [{k: _convert(v) for k, v in row.items()} for row in rows]
 
     def long_threads(
         self,

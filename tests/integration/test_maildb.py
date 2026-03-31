@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import json as json_mod
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -831,3 +832,47 @@ def test_mention_search_limit(test_pool, seed_emails) -> None:  # type: ignore[n
     db = MailDB._from_pool(test_pool)
     results = db.mention_search(text="budget", limit=1)
     assert len(results) <= 1
+
+
+# ---------------------------------------------------------------------------
+# query() / DSL tests
+# ---------------------------------------------------------------------------
+
+
+def test_query_simple_filter(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    results = db.query({"where": {"field": "sender_domain", "eq": "stripe.com"}})
+    assert len(results) == 1
+    assert results[0]["sender_domain"] == "stripe.com"
+
+
+def test_query_aggregation(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    results = db.query(
+        {
+            "select": [{"field": "sender_domain"}, {"count": "*", "as": "total"}],
+            "group_by": ["sender_domain"],
+            "order_by": [{"field": "total", "dir": "desc"}],
+        }
+    )
+    assert len(results) >= 1
+    example_row = next(r for r in results if r["sender_domain"] == "example.com")
+    assert example_row["total"] == 2
+
+
+def test_query_row_limit(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    results = db.query({"limit": 9999})
+    assert len(results) <= 1000
+
+
+def test_query_invalid_spec(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError):
+        db.query({"from": "nonexistent"})
+
+
+def test_query_serialization(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    results = db.query({"where": {"field": "sender_domain", "eq": "stripe.com"}})
+    json_mod.dumps(results, default=str)  # Should not raise

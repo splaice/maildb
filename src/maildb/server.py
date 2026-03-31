@@ -267,3 +267,21 @@ def long_threads(
     """Find email threads with many messages."""
     db = _get_db(ctx)
     return db.long_threads(min_messages=min_messages, after=after, participant=participant)
+
+
+@mcp.tool()
+def query(
+    ctx: Context,
+    spec: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Execute a structured query using the maildb DSL.
+
+    spec: JSON object with optional keys:
+      from: "emails" | "sent_to" | "email_labels"
+      select: [{field: "col"}, {count: "*", as: "n"}, ...]
+      where: {field: "col", op: value} or {and/or/not: [...]}
+      group_by, having, order_by, limit, offset
+    Returns list of dicts. 5s timeout, 1000-row cap.
+    """
+    db = _get_db(ctx)
+    return db.query(spec)
