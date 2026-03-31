@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -42,9 +43,14 @@ def _query_dicts(
     params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute a query and return rows as dicts."""
+    logger.debug("sql_execute", sql=sql, params=params)
+    t0 = time.monotonic()
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+    elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.debug("sql_complete", rows=len(rows), elapsed_ms=elapsed_ms)
+    return rows
 
 
 def _query_one_dict(
@@ -53,10 +59,15 @@ def _query_one_dict(
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Execute a query and return a single row as dict, or None."""
+    logger.debug("sql_execute", sql=sql, params=params)
+    t0 = time.monotonic()
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         row = cur.fetchone()
-        return dict(row) if row else None
+    elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+    result = dict(row) if row else None
+    logger.debug("sql_complete", rows=1 if result else 0, elapsed_ms=elapsed_ms)
+    return result
 
 
 class MailDB:
