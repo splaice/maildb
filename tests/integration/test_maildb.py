@@ -866,6 +866,23 @@ def test_query_row_limit(test_pool, seed_emails) -> None:
     assert len(results) <= 1000
 
 
+def test_query_group_by_date_trunc_alias(test_pool, seed_emails) -> None:
+    db = MailDB._from_pool(test_pool)
+    results = db.query(
+        {
+            "select": [
+                {"date_trunc": "month", "field": "date", "as": "month"},
+                {"count": "*", "as": "n"},
+            ],
+            "group_by": ["month"],
+            "order_by": [{"field": "month", "dir": "asc"}],
+        }
+    )
+    assert len(results) >= 1
+    assert "month" in results[0]
+    assert "n" in results[0]
+
+
 def test_query_invalid_spec(test_pool, seed_emails) -> None:
     db = MailDB._from_pool(test_pool)
     with pytest.raises(ValueError):

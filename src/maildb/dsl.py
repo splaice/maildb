@@ -176,7 +176,7 @@ def parse_query(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         spec.get("select"), allowed, has_group_by, select_aliases, alias_exprs
     )
     where_sql = _resolve_where(spec.get("where"), allowed, acc)
-    group_sql = _resolve_group_by(spec.get("group_by"), allowed)
+    group_sql = _resolve_group_by(spec.get("group_by"), allowed, select_aliases, alias_exprs)
     having_sql = _resolve_having(spec.get("having"), allowed, select_aliases, acc, alias_exprs)
     order_sql = _resolve_order_by(spec.get("order_by"), allowed, select_aliases, has_group_by)
     limit_sql = _resolve_limit(spec.get("limit", 50), spec.get("offset", 0))
@@ -258,14 +258,26 @@ def _resolve_where(
 def _resolve_group_by(
     group_by: list[str] | None,
     allowed: set[str],
+    select_aliases: set[str] | None = None,
+    alias_exprs: dict[str, str] | None = None,
 ) -> str:
     if not group_by:
         return ""
+    parts: list[str] = []
     for col in group_by:
-        if col not in allowed:
+        if col in allowed:
+            parts.append(col)
+        elif select_aliases and col in select_aliases:
+            # Use the underlying expression for aliases (PostgreSQL requires
+            # expressions, not aliases, in GROUP BY)
+            if alias_exprs and col in alias_exprs:
+                parts.append(alias_exprs[col])
+            else:
+                parts.append(col)
+        else:
             msg = f"Unknown column in group_by: {col!r}"
             raise ValueError(msg)
-    return f" GROUP BY {', '.join(group_by)}"
+    return f" GROUP BY {', '.join(parts)}"
 
 
 def _resolve_having(

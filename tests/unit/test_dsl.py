@@ -275,6 +275,30 @@ class TestGroupByHavingOrderBy:
         )
         assert "ORDER BY cnt DESC" in sql
 
+    def test_group_by_alias(self) -> None:
+        """group_by should accept select aliases and expand to underlying expression."""
+        sql, _ = parse_query(
+            {
+                "select": [
+                    {"date_trunc": "month", "field": "date", "as": "month"},
+                    {"count": "*", "as": "n"},
+                ],
+                "group_by": ["month"],
+                "order_by": [{"field": "month", "dir": "asc"}],
+            }
+        )
+        assert "GROUP BY date_trunc('month', date)" in sql
+        assert "ORDER BY month ASC" in sql
+
+    def test_group_by_rejects_unknown(self) -> None:
+        with pytest.raises(ValueError, match="Unknown column in group_by"):
+            parse_query(
+                {
+                    "select": [{"count": "*", "as": "n"}],
+                    "group_by": ["nonexistent"],
+                }
+            )
+
     def test_default_order_is_date_desc(self) -> None:
         sql, _ = parse_query({})
         assert "ORDER BY date DESC" in sql
