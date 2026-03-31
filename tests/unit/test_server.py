@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from maildb.models import Email, Recipients, SearchResult
-from maildb.server import _serialize_email, _serialize_search_result, mcp
+from maildb.server import (
+    SERIALIZABLE_EMAIL_FIELDS,
+    _serialize_email,
+    _serialize_search_result,
+    mcp,
+)
 
 
 def _make_email() -> Email:
@@ -71,6 +76,60 @@ def test_serialize_search_result() -> None:
     assert d["similarity"] == 0.95
     assert "embedding" not in d["email"]
     json.dumps(d)  # Should not raise
+
+
+def test_serialize_email_with_fields_returns_only_requested() -> None:
+    email = _make_email()
+    d = _serialize_email(email, fields=frozenset({"subject", "date"}))
+    assert set(d.keys()) == {"subject", "date"}
+    assert d["subject"] == "Test Subject"
+
+
+def test_serialize_email_with_fields_none_returns_all() -> None:
+    email = _make_email()
+    d = _serialize_email(email, fields=None)
+    # Should have all serializable fields (no embedding, no body_html)
+    assert "subject" in d
+    assert "sender_address" in d
+    assert "embedding" not in d
+    assert "body_html" not in d
+
+
+def test_serialize_email_with_invalid_field_ignores_it() -> None:
+    email = _make_email()
+    d = _serialize_email(email, fields=frozenset({"subject", "nonexistent_field"}))
+    assert set(d.keys()) == {"subject"}
+
+
+def test_serialize_search_result_with_fields() -> None:
+    email = _make_email()
+    sr = SearchResult(email=email, similarity=0.95)
+    d = _serialize_search_result(sr, fields=frozenset({"subject", "date"}))
+    assert d["similarity"] == 0.95
+    assert set(d["email"].keys()) == {"subject", "date"}
+
+
+def test_serializable_email_fields_constant() -> None:
+    """SERIALIZABLE_EMAIL_FIELDS contains exactly the expected fields."""
+    expected = {
+        "id",
+        "message_id",
+        "thread_id",
+        "subject",
+        "sender_name",
+        "sender_address",
+        "sender_domain",
+        "recipients",
+        "date",
+        "body_text",
+        "has_attachment",
+        "attachments",
+        "labels",
+        "in_reply_to",
+        "references",
+        "created_at",
+    }
+    assert expected == SERIALIZABLE_EMAIL_FIELDS
 
 
 def test_mcp_has_all_tools() -> None:

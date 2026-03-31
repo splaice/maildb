@@ -70,8 +70,32 @@ def log_tool[F: Callable[..., Any]](func: F) -> F:
 
 # --- Serialization ---
 
+SERIALIZABLE_EMAIL_FIELDS = frozenset(
+    {
+        "id",
+        "message_id",
+        "thread_id",
+        "subject",
+        "sender_name",
+        "sender_address",
+        "sender_domain",
+        "recipients",
+        "date",
+        "body_text",
+        "has_attachment",
+        "attachments",
+        "labels",
+        "in_reply_to",
+        "references",
+        "created_at",
+    }
+)
 
-def _serialize_email(email: Any) -> dict[str, Any]:
+
+def _serialize_email(
+    email: Any,
+    fields: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Convert an Email dataclass to a JSON-serializable dict."""
     d = asdict(email)
     # Convert non-serializable types
@@ -81,16 +105,22 @@ def _serialize_email(email: Any) -> dict[str, Any]:
         d["date"] = d["date"].isoformat() if d["date"] else None
     if isinstance(d.get("created_at"), datetime):
         d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
-    # Drop embedding from serialized output (too large, not useful for agents)
+    # Always drop these
     d.pop("embedding", None)
     d.pop("body_html", None)
+    # Apply field selection
+    if fields is not None:
+        d = {k: v for k, v in d.items() if k in fields}
     return d
 
 
-def _serialize_search_result(sr: Any) -> dict[str, Any]:
+def _serialize_search_result(
+    sr: Any,
+    fields: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Convert a SearchResult to a JSON-serializable dict."""
     return {
-        "email": _serialize_email(sr.email),
+        "email": _serialize_email(sr.email, fields),
         "similarity": sr.similarity,
     }
 
