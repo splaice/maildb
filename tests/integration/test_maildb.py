@@ -317,6 +317,28 @@ def test_find_direct_only_conflicts_with_max_cc(test_pool, seed_recipient_counts
         db.find(direct_only=True, max_cc=1)
 
 
+def test_get_emails_by_message_ids(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.get_emails(["find-test-1@example.com", "find-test-3@stripe.com"])
+    assert len(results) == 2
+    # Should preserve input order
+    assert results[0].message_id == "find-test-1@example.com"
+    assert results[1].message_id == "find-test-3@stripe.com"
+
+
+def test_get_emails_missing_ids_skipped(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.get_emails(["find-test-1@example.com", "nonexistent@x.com"])
+    assert len(results) == 1
+    assert results[0].message_id == "find-test-1@example.com"
+
+
+def test_get_emails_empty_list(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results = db.get_emails([])
+    assert results == []
+
+
 def test_get_thread(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     thread = db.get_thread("find-test-1@example.com")

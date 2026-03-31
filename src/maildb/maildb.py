@@ -194,6 +194,20 @@ class MailDB:
 
         return conditions, params
 
+    def get_emails(self, message_ids: list[str]) -> list[Email]:
+        """Fetch full email objects by message_id, preserving input order."""
+        if not message_ids:
+            return []
+        placeholders = ", ".join(f"%(mid_{i})s" for i in range(len(message_ids)))
+        params: dict[str, Any] = {f"mid_{i}": mid for i, mid in enumerate(message_ids)}
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE message_id IN ({placeholders})"
+        rows = _query_dicts(self._pool, sql, params)
+        emails_by_id: dict[str, Email] = {}
+        for row in rows:
+            email = Email.from_row(row)
+            emails_by_id[email.message_id] = email
+        return [emails_by_id[mid] for mid in message_ids if mid in emails_by_id]
+
     def find(
         self,
         *,

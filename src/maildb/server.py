@@ -660,3 +660,35 @@ def query(
     """
     db = _get_db(ctx)
     return db.query(spec)
+
+
+@mcp.tool()
+@log_tool
+def get_emails(
+    ctx: Context,
+    ids: list[str],
+    body_max_chars: int | None = None,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch full email objects by message ID, with optional body truncation.
+
+    Parameters:
+      ids: list of RFC 2822 Message-ID strings
+      body_max_chars: truncate body_text to N characters (None = full body).
+        When truncated, body_truncated=true is added.
+      fields: list of field names to return (default: all including body_text)
+
+    Returns {total, results: [{email}, ...]}.
+    Results include body_text by default. Order matches input ids list.
+
+    Example: get_emails(ids=["abc@mail.gmail.com", "def@mail.gmail.com"], body_max_chars=500)
+    """
+    db = _get_db(ctx)
+    results = db.get_emails(ids)
+    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    # For get_emails, include body_text by default (unlike list tools)
+    serialized = [
+        _serialize_email(e, fields=valid or SERIALIZABLE_EMAIL_FIELDS, body_max_chars=body_max_chars)
+        for e in results
+    ]
+    return _wrap_response(serialized, total=len(serialized), offset=0, limit=len(ids))
