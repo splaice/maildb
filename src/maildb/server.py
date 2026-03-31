@@ -42,7 +42,12 @@ def log_tool[F: Callable[..., Any]](func: F) -> F:
         elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
 
         # Compute result stats
-        row_count = len(result) if isinstance(result, list) else 1
+        if isinstance(result, dict) and "results" in result:
+            row_count = len(result["results"])
+        elif isinstance(result, list):
+            row_count = len(result)
+        else:
+            row_count = 1
         response_bytes = len(json.dumps(result, default=str).encode())
 
         if response_bytes > RESPONSE_SIZE_WARNING_BYTES:
@@ -130,6 +135,17 @@ def _serialize_email(
     return d
 
 
+def _wrap_response(
+    results: list[dict[str, Any]],
+    *,
+    total: int,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Wrap a list of results with pagination metadata."""
+    return {"total": total, "offset": offset, "limit": limit, "results": results}
+
+
 def _serialize_search_result(
     sr: Any,
     fields: frozenset[str] | None = None,
@@ -189,7 +205,11 @@ def find(
     offset: int = 0,
     order: str = "date DESC",
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    max_to: int | None = None,
+    max_cc: int | None = None,
+    max_recipients: int | None = None,
+    direct_only: bool = False,
+) -> dict[str, Any]:
     """Search emails by structured attribute filters.
 
     Parameters:
@@ -214,7 +234,7 @@ def find(
     Example: find(sender_domain="stripe.com", after="2025-01-01", has_attachment=True)
     """
     db = _get_db(ctx)
-    results = db.find(
+    results, total = db.find(
         sender=sender,
         sender_domain=sender_domain,
         recipient=recipient,
@@ -226,9 +246,14 @@ def find(
         limit=limit,
         offset=offset,
         order=order,
+        max_to=max_to,
+        max_cc=max_cc,
+        max_recipients=max_recipients,
+        direct_only=direct_only,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -247,7 +272,11 @@ def search(
     limit: int = 20,
     offset: int = 0,
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    max_to: int | None = None,
+    max_cc: int | None = None,
+    max_recipients: int | None = None,
+    direct_only: bool = False,
+) -> dict[str, Any]:
     """Semantic search for emails by natural language query. Requires Ollama running.
 
     Parameters:
@@ -263,7 +292,7 @@ def search(
     Example: search("complaints about deployment", sender_domain="eng.acme.com", limit=5)
     """
     db = _get_db(ctx)
-    results = db.search(
+    results, total = db.search(
         query,
         sender=sender,
         sender_domain=sender_domain,
@@ -275,9 +304,14 @@ def search(
         labels=labels,
         limit=limit,
         offset=offset,
+        max_to=max_to,
+        max_cc=max_cc,
+        max_recipients=max_recipients,
+        direct_only=direct_only,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_search_result(sr, valid) for sr in results]
+    serialized = [_serialize_search_result(sr, valid) for sr in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -336,7 +370,7 @@ def top_contacts(
     direction: str = "both",
     group_by: str = "address",
     exclude_domains: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Find most frequent email correspondents by message count.
 
     Parameters:
@@ -352,7 +386,7 @@ def top_contacts(
     Example: top_contacts(group_by="domain", exclude_domains=["mycompany.com"], direction="outbound")
     """
     db = _get_db(ctx)
-    return db.top_contacts(
+    results, total = db.top_contacts(
         period=period,
         limit=limit,
         offset=offset,
@@ -360,6 +394,7 @@ def top_contacts(
         group_by=group_by,
         exclude_domains=exclude_domains,
     )
+    return _wrap_response(results, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -371,7 +406,7 @@ def topics_with(
     limit: int = 5,
     offset: int = 0,
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Find representative emails spanning different topics with a contact.
 
     Uses embedding-based farthest-point selection for maximum topic diversity.
@@ -388,11 +423,12 @@ def topics_with(
     Example: topics_with(sender="bob@corp.com", limit=5)
     """
     db = _get_db(ctx)
-    results = db.topics_with(
+    results, total = db.topics_with(
         sender=sender, sender_domain=sender_domain, limit=limit, offset=offset
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -408,7 +444,7 @@ def unreplied(
     limit: int = 100,
     offset: int = 0,
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Find emails with no reply in the same thread.
 
     Parameters:
@@ -426,7 +462,7 @@ def unreplied(
     Example: unreplied(direction="outbound", recipient="bob@corp.com")
     """
     db = _get_db(ctx)
-    results = db.unreplied(
+    results, total = db.unreplied(
         direction=direction,
         recipient=recipient,
         after=after,
@@ -437,7 +473,8 @@ def unreplied(
         offset=offset,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -451,7 +488,7 @@ def correspondence(
     offset: int = 0,
     order: str = "date ASC",
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Get all emails exchanged with a specific person (sent by them or to them).
 
     Parameters:
@@ -467,11 +504,12 @@ def correspondence(
     Example: correspondence(address="scott@banister.com", after="2024-01-01")
     """
     db = _get_db(ctx)
-    results = db.correspondence(
+    results, total = db.correspondence(
         address=address, after=after, before=before, limit=limit, offset=offset, order=order
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -486,7 +524,7 @@ def mention_search(
     limit: int = 50,
     offset: int = 0,
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Search for emails containing specific text in body or subject (case-insensitive).
 
     Unlike search(), uses ILIKE substring matching — no Ollama needed.
@@ -504,7 +542,7 @@ def mention_search(
     Example: mention_search(text="quarterly review", sender_domain="acme.com")
     """
     db = _get_db(ctx)
-    results = db.mention_search(
+    results, total = db.mention_search(
         text=text,
         sender=sender,
         sender_domain=sender_domain,
@@ -514,7 +552,8 @@ def mention_search(
         offset=offset,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -526,7 +565,7 @@ def cluster(
     limit: int = 5,
     offset: int = 0,
     fields: list[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Extract diverse topic representatives from an email subset using embedding similarity.
 
     Provide exactly one of where or message_ids (not both).
@@ -543,9 +582,10 @@ def cluster(
     Example: cluster(where={"and": [{"field": "sender_domain", "eq": "stripe.com"}, {"field": "date", "gte": "2024-01-01"}]}, limit=5)
     """
     db = _get_db(ctx)
-    results = db.cluster(where=where, message_ids=message_ids, limit=limit, offset=offset)
+    results, total = db.cluster(where=where, message_ids=message_ids, limit=limit, offset=offset)
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
-    return [_serialize_email(e, valid) for e in results]
+    serialized = [_serialize_email(e, valid) for e in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -557,7 +597,7 @@ def long_threads(
     participant: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Find email threads with many messages.
 
     Parameters:
@@ -572,13 +612,14 @@ def long_threads(
     Example: long_threads(min_messages=10, participant="alice@example.com")
     """
     db = _get_db(ctx)
-    return db.long_threads(
+    results, total = db.long_threads(
         min_messages=min_messages,
         after=after,
         participant=participant,
         limit=limit,
         offset=offset,
     )
+    return _wrap_response(results, total=total, offset=offset, limit=limit)
 
 
 @mcp.tool()

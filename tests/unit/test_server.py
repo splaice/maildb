@@ -9,6 +9,7 @@ from maildb.server import (
     SERIALIZABLE_EMAIL_FIELDS,
     _serialize_email,
     _serialize_search_result,
+    _wrap_response,
     mcp,
 )
 
@@ -189,6 +190,17 @@ def test_serialize_email_body_max_chars_null_body() -> None:
     email.body_text = None
     d = _serialize_email(email, fields=frozenset({"body_text"}), body_max_chars=10)
     assert d["body_text"] is None
+
+
+def test_wrap_response() -> None:
+    results = [{"a": 1}, {"a": 2}]
+    wrapped = _wrap_response(results, total=10, offset=0, limit=50)
+    assert wrapped == {"total": 10, "offset": 0, "limit": 50, "results": results}
+
+
+def test_wrap_response_empty() -> None:
+    wrapped = _wrap_response([], total=0, offset=0, limit=50)
+    assert wrapped == {"total": 0, "offset": 0, "limit": 50, "results": []}
 
 
 def test_mcp_has_all_tools() -> None:

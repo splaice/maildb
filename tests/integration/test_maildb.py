@@ -98,54 +98,54 @@ def seed_emails(test_pool):  # type: ignore[no-untyped-def]
 
 def test_find_by_sender(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(sender="alice@example.com")
+    results, _ = db.find(sender="alice@example.com")
     assert len(results) == 1
     assert results[0].sender_address == "alice@example.com"
 
 
 def test_find_by_sender_domain(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(sender_domain="stripe.com")
+    results, _ = db.find(sender_domain="stripe.com")
     assert len(results) == 1
     assert results[0].sender_domain == "stripe.com"
 
 
 def test_find_by_date_range(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(after="2025-01-16", before="2025-02-02")
+    results, _ = db.find(after="2025-01-16", before="2025-02-02")
     assert len(results) == 2  # Bob's reply and Stripe invoice
 
 
 def test_find_by_attachment(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(has_attachment=True)
+    results, _ = db.find(has_attachment=True)
     assert len(results) == 1
     assert results[0].has_attachment is True
 
 
 def test_find_by_subject_contains(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(subject_contains="budget")
+    results, _ = db.find(subject_contains="budget")
     assert len(results) == 2  # Both budget messages
 
 
 def test_find_by_labels(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(labels=["Finance"])
+    results, _ = db.find(labels=["Finance"])
     assert len(results) == 1
     assert "Finance" in results[0].labels
 
 
 def test_find_by_recipient(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(recipient="bob@example.com")
+    results, _ = db.find(recipient="bob@example.com")
     assert len(results) == 1
     assert results[0].message_id == "find-test-1@example.com"
 
 
 def test_find_with_limit(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(limit=1)
+    results, _ = db.find(limit=1)
     assert len(results) == 1
 
 
@@ -157,16 +157,23 @@ def test_find_order_validation(test_pool, seed_emails) -> None:  # type: ignore[
 
 def test_find_order_date_asc(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.find(order="date ASC")
+    results, _ = db.find(order="date ASC")
     assert results[0].date <= results[-1].date
 
 
 def test_find_offset(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    all_results = db.find(limit=10)
-    offset_results = db.find(limit=10, offset=2)
+    all_results, _ = db.find(limit=10)
+    offset_results, _ = db.find(limit=10, offset=2)
     assert len(offset_results) == len(all_results) - 2
     assert offset_results[0].message_id == all_results[2].message_id
+
+
+def test_find_returns_total(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.find(limit=1)
+    assert len(results) == 1
+    assert total == 3  # seed_emails has 3 emails
 
 
 def test_get_thread(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
@@ -187,7 +194,7 @@ def test_search(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     mock_ec = MagicMock()
     mock_ec.embed.return_value = [0.1] * 768
     db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
-    results = db.search("budget discussion")
+    results, _ = db.search("budget discussion")
     assert len(results) > 0
     assert isinstance(results[0], SearchResult)
     assert results[0].similarity > 0
@@ -197,7 +204,7 @@ def test_search_with_filters(test_pool, seed_emails) -> None:  # type: ignore[no
     mock_ec = MagicMock()
     mock_ec.embed.return_value = [0.1] * 768
     db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
-    results = db.search("budget", sender_domain="example.com")
+    results, _ = db.search("budget", sender_domain="example.com")
     assert all(r.email.sender_domain == "example.com" for r in results)
 
 
@@ -306,7 +313,7 @@ def seed_advanced(test_pool):  # type: ignore[no-untyped-def]
 def test_top_contacts_inbound(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(limit=5, direction="inbound")
+    contacts, _ = db.top_contacts(limit=5, direction="inbound")
     # Bob sent 2 messages to Alice, Carol sent 1
     assert len(contacts) >= 2
     assert contacts[0]["address"] == "bob@corp.com"
@@ -316,7 +323,7 @@ def test_top_contacts_inbound(test_pool, seed_advanced) -> None:  # type: ignore
 def test_top_contacts_outbound(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(limit=5, direction="outbound")
+    contacts, _ = db.top_contacts(limit=5, direction="outbound")
     assert len(contacts) >= 1
     assert contacts[0]["address"] == "bob@corp.com"
 
@@ -332,7 +339,7 @@ def test_top_contacts_requires_user_email(test_pool, seed_advanced, monkeypatch)
 def test_unreplied(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    unreplied = db.unreplied()
+    unreplied, _ = db.unreplied()
     # adv-3 and adv-4 are unreplied inbound messages
     message_ids = [e.message_id for e in unreplied]
     assert "adv-3@corp.com" in message_ids
@@ -411,7 +418,7 @@ def test_unreplied_excludes_null_date(test_pool, seed_advanced) -> None:  # type
 
 def test_long_threads(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2)
+    threads, _ = db.long_threads(min_messages=2)
     assert len(threads) >= 1
     assert threads[0]["thread_id"] == "adv-1@example.com"
     assert threads[0]["message_count"] >= 2
@@ -419,13 +426,13 @@ def test_long_threads(test_pool, seed_advanced) -> None:  # type: ignore[no-unty
 
 def test_long_threads_respects_limit(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2, limit=1)
+    threads, _ = db.long_threads(min_messages=2, limit=1)
     assert len(threads) == 1
 
 
 def test_topics_with_sender(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    topics = db.topics_with(sender="bob@corp.com", limit=5)
+    topics, _ = db.topics_with(sender="bob@corp.com", limit=5)
     assert len(topics) >= 1
     assert all(e.sender_address == "bob@corp.com" for e in topics)
 
@@ -445,7 +452,7 @@ def test_get_thread_for_nonexistent(test_pool, seed_emails) -> None:  # type: ig
 def test_topics_with_sender_domain(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     """topics_with(sender_domain=...) should return emails from that domain."""
     db = MailDB._from_pool(test_pool)
-    topics = db.topics_with(sender_domain="corp.com", limit=5)
+    topics, _ = db.topics_with(sender_domain="corp.com", limit=5)
     assert len(topics) >= 1
     assert all(e.sender_domain == "corp.com" for e in topics)
     # Bob is the only sender at corp.com
@@ -464,11 +471,11 @@ def test_long_threads_with_after(test_pool, seed_advanced) -> None:  # type: ign
     db = MailDB._from_pool(test_pool)
 
     # after="2025-01-12" excludes both adv-1 (Jan 10) and adv-2 (Jan 11)
-    threads = db.long_threads(min_messages=2, after="2025-01-12")
+    threads, _ = db.long_threads(min_messages=2, after="2025-01-12")
     assert len(threads) == 0
 
     # after="2025-01-09" includes both messages in adv-1 thread
-    threads = db.long_threads(min_messages=2, after="2025-01-09")
+    threads, _ = db.long_threads(min_messages=2, after="2025-01-09")
     assert len(threads) >= 1
     assert threads[0]["thread_id"] == "adv-1@example.com"
     assert threads[0]["message_count"] >= 2
@@ -477,7 +484,7 @@ def test_long_threads_with_after(test_pool, seed_advanced) -> None:  # type: ign
 def test_long_threads_with_participant(test_pool, seed_advanced) -> None:
     """long_threads with participant filters to threads with that sender."""
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2, participant="bob@corp.com")
+    threads, _ = db.long_threads(min_messages=2, participant="bob@corp.com")
     assert len(threads) >= 1
     assert threads[0]["thread_id"] == "adv-1@example.com"
 
@@ -485,21 +492,21 @@ def test_long_threads_with_participant(test_pool, seed_advanced) -> None:
 def test_long_threads_participant_no_match(test_pool, seed_advanced) -> None:
     """Participant not in any long thread returns empty."""
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2, participant="nobody@nowhere.com")
+    threads, _ = db.long_threads(min_messages=2, participant="nobody@nowhere.com")
     assert len(threads) == 0
 
 
 def test_long_threads_no_participant_unchanged(test_pool, seed_advanced) -> None:
     """Without participant, current behavior preserved."""
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2)
+    threads, _ = db.long_threads(min_messages=2)
     assert len(threads) >= 1
 
 
 def test_long_threads_participant_cc_only_no_match(test_pool, seed_advanced) -> None:
     """Participant who is only in CC (not as sender) should NOT match."""
     db = MailDB._from_pool(test_pool)
-    threads = db.long_threads(min_messages=2, participant="carol@other.com")
+    threads, _ = db.long_threads(min_messages=2, participant="carol@other.com")
     assert len(threads) == 0
 
 
@@ -507,7 +514,7 @@ def test_unreplied_with_sender_filter(test_pool, seed_advanced) -> None:  # type
     """unreplied(sender=...) should only return unreplied from that sender."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    unreplied = db.unreplied(sender="bob@corp.com")
+    unreplied, _ = db.unreplied(sender="bob@corp.com")
     message_ids = [e.message_id for e in unreplied]
     assert "adv-3@corp.com" in message_ids
     assert "adv-4@other.com" not in message_ids
@@ -517,7 +524,7 @@ def test_top_contacts_both(test_pool, seed_advanced) -> None:  # type: ignore[no
     """top_contacts(direction='both') should combine inbound + outbound."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="both")
+    contacts, _ = db.top_contacts(direction="both")
     # Bob: 2 inbound (adv-2, adv-3) + 1 outbound (adv-1 sent to bob) = 3
     bob = next(c for c in contacts if c["address"] == "bob@corp.com")
     assert bob["count"] == 3
@@ -532,7 +539,7 @@ def test_top_contacts_with_period(test_pool, seed_advanced) -> None:  # type: ig
     """top_contacts with period should only count messages after that date."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(period="2025-01-14", direction="inbound")
+    contacts, _ = db.top_contacts(period="2025-01-14", direction="inbound")
     # After Jan 14: Bob sent adv-3 (Jan 15), Carol sent adv-4 (Jan 20)
     addresses = {c["address"] for c in contacts}
     assert "bob@corp.com" in addresses
@@ -547,7 +554,7 @@ def test_top_contacts_domain_grouping_outbound(test_pool, seed_advanced) -> None
     """group_by='domain' with direction='outbound' groups recipients by domain."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="outbound", group_by="domain")
+    contacts, _ = db.top_contacts(direction="outbound", group_by="domain")
     assert len(contacts) >= 1
     domains = {c["domain"] for c in contacts}
     assert "corp.com" in domains
@@ -557,7 +564,7 @@ def test_top_contacts_domain_grouping_inbound(test_pool, seed_advanced) -> None:
     """group_by='domain' with direction='inbound' groups senders by domain."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="inbound", group_by="domain")
+    contacts, _ = db.top_contacts(direction="inbound", group_by="domain")
     domains = {c["domain"] for c in contacts}
     assert "corp.com" in domains
     assert "other.com" in domains
@@ -567,7 +574,7 @@ def test_top_contacts_exclude_domains(test_pool, seed_advanced) -> None:  # type
     """exclude_domains filters out contacts from specified domains."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="inbound", exclude_domains=["corp.com"])
+    contacts, _ = db.top_contacts(direction="inbound", exclude_domains=["corp.com"])
     addresses = {c["address"] for c in contacts}
     assert "bob@corp.com" not in addresses
     assert "carol@other.com" in addresses
@@ -577,7 +584,7 @@ def test_top_contacts_domain_grouping_with_exclusion(test_pool, seed_advanced) -
     """group_by='domain' combined with exclude_domains."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(
+    contacts, _ = db.top_contacts(
         direction="inbound", group_by="domain", exclude_domains=["other.com"]
     )
     domains = {c["domain"] for c in contacts}
@@ -589,7 +596,7 @@ def test_top_contacts_domain_grouping_both(test_pool, seed_advanced) -> None:  #
     """group_by='domain' with direction='both' combines inbound and outbound domains."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="both", group_by="domain")
+    contacts, _ = db.top_contacts(direction="both", group_by="domain")
     # corp.com: 2 inbound (bob) + 1 outbound (alice->bob) = 3
     corp = next(c for c in contacts if c["domain"] == "corp.com")
     assert corp["count"] == 3
@@ -602,7 +609,7 @@ def test_top_contacts_exclude_multiple_domains(test_pool, seed_advanced) -> None
     """Excluding all contact domains returns empty results."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="inbound", exclude_domains=["corp.com", "other.com"])
+    contacts, _ = db.top_contacts(direction="inbound", exclude_domains=["corp.com", "other.com"])
     assert contacts == []
 
 
@@ -610,7 +617,7 @@ def test_top_contacts_default_unchanged(test_pool, seed_advanced) -> None:  # ty
     """Default group_by='address' with no exclusions still works as before."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    contacts = db.top_contacts(direction="inbound")
+    contacts, _ = db.top_contacts(direction="inbound")
     assert len(contacts) >= 2
     assert contacts[0]["address"] == "bob@corp.com"
     assert contacts[0]["count"] == 2
@@ -619,7 +626,7 @@ def test_top_contacts_default_unchanged(test_pool, seed_advanced) -> None:  # ty
 def test_unreplied_respects_limit(test_pool, seed_advanced) -> None:
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    results = db.unreplied(limit=1)
+    results, _ = db.unreplied(limit=1)
     assert len(results) <= 1
 
 
@@ -628,7 +635,7 @@ def test_search_results_ordered_by_similarity(test_pool, seed_emails) -> None:  
     mock_ec = MagicMock()
     mock_ec.embed.return_value = [0.1] * 768
     db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
-    results = db.search("budget discussion")
+    results, _ = db.search("budget discussion")
     assert len(results) >= 2
     # The email with embedding [0.1]*768 should be most similar (cosine similarity = 1.0)
     assert results[0].email.message_id == "find-test-1@example.com"
@@ -769,7 +776,7 @@ def test_unreplied_outbound(test_pool, seed_unreplied_outbound) -> None:  # type
     """Outbound unreplied: messages Alice sent where nobody replied."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    results = db.unreplied(direction="outbound")
+    results, _ = db.unreplied(direction="outbound")
     message_ids = [e.message_id for e in results]
     # unr-out-1 (Dave never replied) and unr-out-4 (nobody replied) should appear
     assert "unr-out-1@example.com" in message_ids
@@ -784,7 +791,7 @@ def test_unreplied_outbound_with_recipient(test_pool, seed_unreplied_outbound) -
     """Outbound unreplied filtered to a specific recipient."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    results = db.unreplied(direction="outbound", recipient="dave@example.com")
+    results, _ = db.unreplied(direction="outbound", recipient="dave@example.com")
     message_ids = [e.message_id for e in results]
     # unr-out-1 (to Dave, no reply) and unr-out-4 (cc Dave, no reply) should appear
     assert "unr-out-1@example.com" in message_ids
@@ -797,7 +804,7 @@ def test_unreplied_inbound_default(test_pool, seed_unreplied_outbound) -> None: 
     """Default direction='inbound' returns only inbound unreplied messages."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    results = db.unreplied()  # default direction="inbound"
+    results, _ = db.unreplied()  # default direction="inbound"
     message_ids = [e.message_id for e in results]
     # Only Frank's message is inbound unreplied
     assert "unr-in-1@corp.com" in message_ids
@@ -813,7 +820,7 @@ def test_unreplied_outbound_multi_recipient_partial_reply(
     """Outbound with recipient filter: Eve replied to unr-out-2 but not unr-out-4."""
     config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
     db = MailDB._from_pool(test_pool, config=config)
-    results = db.unreplied(direction="outbound", recipient="eve@example.com")
+    results, _ = db.unreplied(direction="outbound", recipient="eve@example.com")
     message_ids = [e.message_id for e in results]
     # unr-out-2: Eve replied → should NOT appear
     assert "unr-out-2@example.com" not in message_ids
@@ -831,7 +838,7 @@ def test_unreplied_invalid_direction(test_pool, seed_unreplied_outbound) -> None
 def test_correspondence(test_pool, seed_advanced) -> None:
     """correspondence() returns all emails exchanged with a person."""
     db = MailDB._from_pool(test_pool)
-    results = db.correspondence(address="bob@corp.com")
+    results, _ = db.correspondence(address="bob@corp.com")
     msg_ids = [e.message_id for e in results]
     assert "adv-1@example.com" in msg_ids  # sent TO bob
     assert "adv-2@corp.com" in msg_ids  # sent BY bob
@@ -842,7 +849,7 @@ def test_correspondence(test_pool, seed_advanced) -> None:
 def test_correspondence_chronological_order(test_pool, seed_advanced) -> None:
     """Default order is date ASC (chronological)."""
     db = MailDB._from_pool(test_pool)
-    results = db.correspondence(address="bob@corp.com")
+    results, _ = db.correspondence(address="bob@corp.com")
     dates = [e.date for e in results]
     assert dates == sorted(dates)
 
@@ -850,7 +857,7 @@ def test_correspondence_chronological_order(test_pool, seed_advanced) -> None:
 def test_correspondence_with_date_filter(test_pool, seed_advanced) -> None:
     """Date filters narrow results."""
     db = MailDB._from_pool(test_pool)
-    results = db.correspondence(address="bob@corp.com", after="2025-01-12")
+    results, _ = db.correspondence(address="bob@corp.com", after="2025-01-12")
     msg_ids = [e.message_id for e in results]
     assert "adv-3@corp.com" in msg_ids
     assert "adv-1@example.com" not in msg_ids
@@ -859,7 +866,7 @@ def test_correspondence_with_date_filter(test_pool, seed_advanced) -> None:
 def test_correspondence_limit(test_pool, seed_advanced) -> None:
     """Limit restricts result count."""
     db = MailDB._from_pool(test_pool)
-    results = db.correspondence(address="bob@corp.com", limit=1)
+    results, _ = db.correspondence(address="bob@corp.com", limit=1)
     assert len(results) == 1
 
 
@@ -870,47 +877,47 @@ def test_correspondence_limit(test_pool, seed_advanced) -> None:
 
 def test_mention_search_body(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="spreadsheet")
+    results, _ = db.mention_search(text="spreadsheet")
     assert len(results) == 1
     assert results[0].message_id == "find-test-2@example.com"
 
 
 def test_mention_search_subject(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="Invoice")
+    results, _ = db.mention_search(text="Invoice")
     assert len(results) == 1
     assert results[0].message_id == "find-test-3@stripe.com"
 
 
 def test_mention_search_case_insensitive(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="BUDGET")
+    results, _ = db.mention_search(text="BUDGET")
     assert len(results) >= 1
 
 
 def test_mention_search_with_sender_filter(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="budget", sender="alice@example.com")
+    results, _ = db.mention_search(text="budget", sender="alice@example.com")
     assert len(results) == 1
     assert results[0].sender_address == "alice@example.com"
 
 
 def test_mention_search_escapes_like_chars(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="100%_done")
+    results, _ = db.mention_search(text="100%_done")
     assert len(results) == 0
 
 
 def test_mention_search_ordered_by_date_desc(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="budget")
+    results, _ = db.mention_search(text="budget")
     if len(results) >= 2:
         assert results[0].date >= results[1].date
 
 
 def test_mention_search_limit(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.mention_search(text="budget", limit=1)
+    results, _ = db.mention_search(text="budget", limit=1)
     assert len(results) <= 1
 
 
@@ -982,7 +989,7 @@ def test_query_serialization(test_pool, seed_emails) -> None:
 
 def test_cluster_with_message_ids(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.cluster(
+    results, _ = db.cluster(
         message_ids=["adv-1@example.com", "adv-2@corp.com", "adv-3@corp.com", "adv-4@other.com"],
         limit=2,
     )
@@ -992,14 +999,14 @@ def test_cluster_with_message_ids(test_pool, seed_advanced) -> None:  # type: ig
 
 def test_cluster_with_where(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.cluster(where={"field": "sender_domain", "eq": "corp.com"}, limit=2)
+    results, _ = db.cluster(where={"field": "sender_domain", "eq": "corp.com"}, limit=2)
     assert len(results) >= 1
     assert all(e.sender_domain == "corp.com" for e in results)
 
 
 def test_cluster_fewer_than_limit(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results = db.cluster(where={"field": "sender_address", "eq": "carol@other.com"}, limit=10)
+    results, _ = db.cluster(where={"field": "sender_address", "eq": "carol@other.com"}, limit=10)
     assert len(results) == 1
 
 
