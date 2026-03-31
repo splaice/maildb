@@ -82,6 +82,7 @@ SERIALIZABLE_EMAIL_FIELDS = frozenset(
         "recipients",
         "date",
         "body_text",
+        "body_length",
         "has_attachment",
         "attachments",
         "labels",
@@ -91,10 +92,14 @@ SERIALIZABLE_EMAIL_FIELDS = frozenset(
     }
 )
 
+# Default fields for list tools: everything except body_text (replaced by body_length)
+DEFAULT_LIST_FIELDS = SERIALIZABLE_EMAIL_FIELDS - {"body_text"}
+
 
 def _serialize_email(
     email: Any,
     fields: frozenset[str] | None = None,
+    body_max_chars: int | None = None,
 ) -> dict[str, Any]:
     """Convert an Email dataclass to a JSON-serializable dict."""
     d = asdict(email)
@@ -108,9 +113,19 @@ def _serialize_email(
     # Always drop these
     d.pop("embedding", None)
     d.pop("body_html", None)
+    # Compute body_length from raw body_text
+    raw_body = d.get("body_text")
+    d["body_length"] = len(raw_body) if raw_body is not None else None
+    # Apply body truncation if requested
+    if body_max_chars is not None and raw_body is not None and len(raw_body) > body_max_chars:
+        d["body_text"] = raw_body[:body_max_chars] + "..."
+        d["body_truncated"] = True
     # Apply field selection
     if fields is not None:
         d = {k: v for k, v in d.items() if k in fields}
+    else:
+        # Default: exclude body_text (use body_length instead)
+        d = {k: v for k, v in d.items() if k in DEFAULT_LIST_FIELDS}
     return d
 
 

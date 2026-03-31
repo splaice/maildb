@@ -88,11 +88,13 @@ def test_serialize_email_with_fields_returns_only_requested() -> None:
 def test_serialize_email_with_fields_none_returns_all() -> None:
     email = _make_email()
     d = _serialize_email(email, fields=None)
-    # Should have all serializable fields (no embedding, no body_html)
+    # Should have all default fields (no embedding, no body_html, no body_text)
     assert "subject" in d
     assert "sender_address" in d
+    assert "body_length" in d
     assert "embedding" not in d
     assert "body_html" not in d
+    assert "body_text" not in d
 
 
 def test_serialize_email_with_invalid_field_ignores_it() -> None:
@@ -122,6 +124,7 @@ def test_serializable_email_fields_constant() -> None:
         "recipients",
         "date",
         "body_text",
+        "body_length",
         "has_attachment",
         "attachments",
         "labels",
@@ -130,6 +133,38 @@ def test_serializable_email_fields_constant() -> None:
         "created_at",
     }
     assert expected == SERIALIZABLE_EMAIL_FIELDS
+
+
+def test_serialize_email_default_includes_body_length() -> None:
+    email = _make_email()
+    email.body_text = "Hello world"
+    d = _serialize_email(email)
+    assert d["body_length"] == 11
+    assert "body_text" not in d
+
+
+def test_serialize_email_default_null_body_length() -> None:
+    email = _make_email()
+    email.body_text = None
+    d = _serialize_email(email)
+    assert d["body_length"] is None
+    assert "body_text" not in d
+
+
+def test_serialize_email_explicit_fields_with_body_text() -> None:
+    email = _make_email()
+    email.body_text = "Hello world"
+    d = _serialize_email(email, fields=frozenset({"subject", "body_text"}))
+    assert d["body_text"] == "Hello world"
+    assert "body_length" not in d
+
+
+def test_serialize_email_explicit_fields_with_body_length() -> None:
+    email = _make_email()
+    email.body_text = "Hello world"
+    d = _serialize_email(email, fields=frozenset({"subject", "body_length"}))
+    assert d["body_length"] == 11
+    assert "body_text" not in d
 
 
 def test_mcp_has_all_tools() -> None:
