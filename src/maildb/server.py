@@ -1,17 +1,72 @@
 from __future__ import annotations
 
+import inspect
+import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+import structlog
 from mcp.server.fastmcp import Context, FastMCP
 
 from maildb.maildb import MailDB
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+
+logger = structlog.get_logger()
+
+RESPONSE_SIZE_WARNING_BYTES = 50_000  # 50KB
+
+
+def log_tool[F: Callable[..., Any]](func: F) -> F:
+    """Decorator that logs MCP tool entry params and exit stats."""
+    sig = inspect.signature(func)
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Bind args to param names, excluding 'ctx'
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        params = {k: v for k, v in bound.arguments.items() if k != "ctx" and v is not None}
+
+        tool_name = func.__name__
+        logger.debug("tool_entry", tool=tool_name, **params)
+
+        t0 = time.monotonic()
+        result = func(*args, **kwargs)
+        elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+
+        # Compute result stats
+        row_count = len(result) if isinstance(result, list) else 1
+        response_bytes = len(json.dumps(result, default=str).encode())
+
+        if response_bytes > RESPONSE_SIZE_WARNING_BYTES:
+            logger.warning(
+                "tool_exit",
+                tool=tool_name,
+                rows=row_count,
+                response_bytes=response_bytes,
+                elapsed_ms=elapsed_ms,
+                warning="response exceeds 50KB",
+            )
+        else:
+            logger.debug(
+                "tool_exit",
+                tool=tool_name,
+                rows=row_count,
+                response_bytes=response_bytes,
+                elapsed_ms=elapsed_ms,
+            )
+
+        return result
+
+    return wrapper  # type: ignore[return-value]
+
 
 # --- Serialization ---
 
@@ -72,6 +127,7 @@ def _get_db(ctx: Context) -> MailDB:
 
 
 @mcp.tool()
+@log_tool
 def find(
     ctx: Context,
     sender: str | None = None,
@@ -121,6 +177,7 @@ def find(
 
 
 @mcp.tool()
+@log_tool
 def search(
     ctx: Context,
     query: str,
@@ -163,6 +220,7 @@ def search(
 
 
 @mcp.tool()
+@log_tool
 def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
     """Retrieve all emails in a conversation thread, ordered chronologically.
 
@@ -179,6 +237,7 @@ def get_thread(ctx: Context, thread_id: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+@log_tool
 def get_thread_for(ctx: Context, message_id: str) -> list[dict[str, Any]]:
     """Find the full thread containing a specific email message.
 
@@ -195,6 +254,7 @@ def get_thread_for(ctx: Context, message_id: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+@log_tool
 def top_contacts(
     ctx: Context,
     period: str | None = None,
@@ -227,6 +287,7 @@ def top_contacts(
 
 
 @mcp.tool()
+@log_tool
 def topics_with(
     ctx: Context,
     sender: str | None = None,
@@ -252,6 +313,7 @@ def topics_with(
 
 
 @mcp.tool()
+@log_tool
 def unreplied(
     ctx: Context,
     direction: Literal["inbound", "outbound"] = "inbound",
@@ -290,6 +352,7 @@ def unreplied(
 
 
 @mcp.tool()
+@log_tool
 def correspondence(
     ctx: Context,
     address: str,
@@ -318,6 +381,7 @@ def correspondence(
 
 
 @mcp.tool()
+@log_tool
 def mention_search(
     ctx: Context,
     text: str,
@@ -354,6 +418,7 @@ def mention_search(
 
 
 @mcp.tool()
+@log_tool
 def cluster(
     ctx: Context,
     where: dict[str, Any] | None = None,
@@ -379,6 +444,7 @@ def cluster(
 
 
 @mcp.tool()
+@log_tool
 def long_threads(
     ctx: Context,
     min_messages: int = 5,
@@ -401,6 +467,7 @@ def long_threads(
 
 
 @mcp.tool()
+@log_tool
 def query(
     ctx: Context,
     spec: dict[str, Any],
