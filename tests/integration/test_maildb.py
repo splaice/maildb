@@ -347,6 +347,12 @@ def test_long_threads(test_pool, seed_advanced) -> None:  # type: ignore[no-unty
     assert threads[0]["message_count"] >= 2
 
 
+def test_long_threads_respects_limit(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    threads = db.long_threads(min_messages=2, limit=1)
+    assert len(threads) == 1
+
+
 def test_topics_with_sender(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     topics = db.topics_with(sender="bob@corp.com", limit=5)

@@ -451,6 +451,7 @@ def long_threads(
     min_messages: int = 5,
     after: str | None = None,
     participant: str | None = None,
+    limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Find email threads with many messages.
 
@@ -458,13 +459,19 @@ def long_threads(
       min_messages: minimum message count threshold (default 5)
       after: ISO date string — only count messages after this date
       participant: only threads where this address appears as sender
+      limit: maximum number of threads to return (default 50)
 
     Returns list of {thread_id, message_count, first_date, last_date, participants[]}.
 
     Example: long_threads(min_messages=10, participant="alice@example.com")
     """
     db = _get_db(ctx)
-    return db.long_threads(min_messages=min_messages, after=after, participant=participant)
+    return db.long_threads(
+        min_messages=min_messages,
+        after=after,
+        participant=participant,
+        limit=limit,
+    )
 
 
 @mcp.tool()

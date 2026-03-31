@@ -752,12 +752,13 @@ class MailDB:
         participant: str | None = None,
         min_messages: int = 5,
         after: str | None = None,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Threads exceeding a message count threshold.
         participant: only threads where this address appears as sender.
         """
         conditions: list[str] = []
-        params: dict[str, Any] = {"min_messages": min_messages}
+        params: dict[str, Any] = {"min_messages": min_messages, "limit": limit}
         if after:
             conditions.append("date >= %(after)s")
             params["after"] = after
@@ -774,5 +775,6 @@ class MailDB:
             GROUP BY thread_id
             HAVING count(*) >= %(min_messages)s {having_participant}
             ORDER BY count(*) DESC
+            LIMIT %(limit)s
         """
         return _query_dicts(self._pool, sql, params)
