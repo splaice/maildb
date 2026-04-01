@@ -110,7 +110,7 @@ All email data is stored in a single flat table. This intentional denormalizatio
 ### 4.2 Design Decisions
 
 - **One row per message (not per thread):** Individual messages are the unit of storage and embedding. Threads are reconstructed at query time using `thread_id`. This gives semantic search the precision to identify which specific message in a thread is relevant.
-- **`source_account` for multi-account support:** Each message records the email address of the account it was imported from (e.g., `sean@postmates.com` or `splaice@gmail.com`). This enables account-scoped queries ("search only my personal email") while keeping all data in a single table. When the same message appears in multiple accounts (e.g., both sender and recipient imported their mail), the `UNIQUE (message_id)` constraint deduplicates it — the first import wins. The `source_account` reflects whichever import created the row.
+- **`source_account` for multi-account support:** Each message records the email address of the account it was imported from (e.g., `you@work.com` or `you@gmail.com`). This enables account-scoped queries ("search only my personal email") while keeping all data in a single table. When the same message appears in multiple accounts (e.g., both sender and recipient imported their mail), the `UNIQUE (message_id)` constraint deduplicates it — the first import wins. The `source_account` reflects whichever import created the row.
 - **`import_id` for traceability:** Every invocation of the ingest pipeline generates a UUID that is stamped on all rows created in that session. This supports debugging ("which import produced this data?"), selective re-imports ("delete everything from import X and re-run"), and auditability. Import metadata (source file, account, start time, row counts) is recorded in the `imports` table.
 - **`sender_domain` as a denormalized column:** Queries like "all emails from anyone at stripe.com" are extremely common. Extracting the domain at ingestion time and indexing it avoids per-query string operations.
 - **`recipients` as JSONB:** Keeps the schema flat (no join table) while supporting containment queries. The GIN index on this column enables efficient lookups like "emails where alice@example.com is in the to or cc list."
@@ -394,8 +394,8 @@ Each invocation of the pipeline:
 **CLI usage:**
 
 ```bash
-python -m maildb.ingest --account sean@postmates.com /path/to/work.mbox
-python -m maildb.ingest --account splaice@gmail.com /path/to/personal.mbox
+python -m maildb.ingest --account you@work.com /path/to/work.mbox
+python -m maildb.ingest --account you@gmail.com /path/to/personal.mbox
 python -m maildb.ingest status
 ```
 

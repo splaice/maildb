@@ -333,7 +333,7 @@ def top_contacts(
 
     Returns list of {address: str, count: int} (or {domain: str, count: int} when group_by="domain").
 
-    Example: top_contacts(group_by="domain", exclude_domains=["postmates.com"], direction="outbound")
+    Example: top_contacts(group_by="domain", exclude_domains=["mycompany.com"], direction="outbound")
     """
     db = _get_db(ctx)
     return db.top_contacts(
