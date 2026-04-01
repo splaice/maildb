@@ -1,5 +1,3 @@
-@_shared/prompts/base-persona.md
-
 # Project Standards
 
 Python 3.12+ project using FastAPI, SQLAlchemy, Pydantic v2, managed with uv.
