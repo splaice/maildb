@@ -2,7 +2,7 @@
 
 **Personal Email Database for Agent-Powered Retrieval**
 
-Architecture Document — Version 2.0 — March 2026
+Architecture Document — Version 3.0 — March 2026
 
 PostgreSQL · pgvector · Ollama · Python
 
@@ -49,9 +49,11 @@ The system must support five categories of queries, reflecting the natural ways 
 
 - **Database:** PostgreSQL 16+ with the pgvector extension for vector similarity search.
 - **Embedding model:** nomic-embed-text (768 dimensions), served locally via Ollama. Embedding text is truncated to 6,000 characters to stay within the model's 8,192 token context window.
-- **Python library:** Custom MailDB class using psycopg (v3) for database access and the ollama Python package for embedding generation.
-- **MCP server:** FastMCP server exposing all MailDB methods as tools for AI assistant integration.
-- **Email parsing:** Python's standard library `mailbox` and `email` modules for mbox ingestion.
+- **Python library:** Custom MailDB class using psycopg (v3) with psycopg_pool for connection pooling, and the ollama Python package for embedding generation.
+- **MCP server:** FastMCP server exposing all MailDB methods as tools for AI assistant integration. Includes field selection, offset pagination, and response size management.
+- **DSL engine:** JSON-to-SQL translator (`dsl.py`) supporting arbitrary queries with strict column/operator whitelists, parameterized values, and a 5-second statement timeout.
+- **Email parsing:** Python's standard library `mailbox` and `email` modules for mbox ingestion, with BeautifulSoup4 for HTML-to-text conversion.
+- **Observability:** Dual-sink structured logging via structlog — INFO+ to stderr (safe for MCP stdio transport) and DEBUG+ to a rotating debug log file. A PII scrubbing processor redacts email addresses, SSNs, credit card numbers, and phone numbers from all log output before it reaches either sink.
 - **Target hardware:** Tested on Apple M1 Max with 64GB unified memory. Ollama runs embedding inference on the Metal GPU.
 
 ### 3.2 Architecture Overview
@@ -60,7 +62,8 @@ The system consists of three layers:
 
 - **Ingestion layer:** Reads raw email sources (mbox files initially, Gmail API in Phase 2), parses each message into structured fields, cleans the body text, generates an embedding vector, and upserts the row into PostgreSQL. Deduplication is enforced by the unique constraint on `message_id`.
 - **Storage layer:** A single PostgreSQL database containing one table (`emails`) with B-tree indexes for structured queries, GIN indexes for JSONB and array columns, and an HNSW index on the vector column for approximate nearest neighbor search.
-- **Query layer:** The MailDB Python class, which translates high-level method calls (`find`, `search`, `get_thread`, etc.) into SQL queries. Semantic search queries are first embedded using the same Ollama model, then compared against stored vectors using cosine distance.
+- **Query layer:** The MailDB Python class, which translates high-level method calls (`find`, `search`, `get_thread`, etc.) into SQL queries. Semantic search queries are first embedded using the same Ollama model, then compared against stored vectors using cosine distance. A DSL engine supports arbitrary structured queries beyond the fixed method signatures.
+- **MCP server layer:** A FastMCP server wraps the MailDB class, serializing results to JSON with automatic stripping of `body_html` and `embedding` fields. All email-returning tools support a `fields` parameter for selective field return and an `offset` parameter for pagination. A `log_tool` decorator instruments every tool call with entry parameters, exit stats, and response size warnings (>50KB).
 
 ### 3.3 Data Flow
 
@@ -203,22 +206,33 @@ When the user or agent calls `search()`, the query string is embedded using the 
 
 The agent-facing interface is a Python class called `MailDB`. It wraps all database and embedding operations behind a clean method-based API. Every method returns `Email` objects (or lists of them) with all columns accessible as attributes, including the full body text. This ensures the agent has enough context to summarize, extract action items, or reason about message content.
 
+The primary external interface is the MCP server, which wraps MailDB and adds serialization, field selection, pagination, and observability (see Section 6.6).
+
 ### 6.2 Method Reference
 
-All query methods accept an optional `account` parameter to scope results to a specific source account. When omitted, queries search across all accounts.
+The MailDB class provides three tiers of query methods:
+
+**Tier 1 — Fixed-signature methods** for the most common query patterns. All methods accepting results support `offset` for pagination.
 
 | Method | Description | Parameters |
 |--------|-------------|------------|
-| `find()` | Structured attribute-based lookup | `sender`, `sender_domain`, `after`, `before`, `has_attachment`, `subject_contains`, `labels`, `account`, `limit`, `order` |
-| `search()` | Semantic search with optional structured filters | `query` (text), plus all `find()` filters including `account` |
+| `find()` | Structured attribute-based lookup | `sender`, `sender_domain`, `recipient`, `after`, `before`, `has_attachment`, `subject_contains`, `labels`, `limit`, `offset`, `order` |
+| `search()` | Semantic search with optional structured filters | `query` (text), plus all `find()` filters. Requires Ollama |
 | `get_thread()` | Retrieve full conversation by thread_id | `thread_id` |
 | `get_thread_for()` | Find thread containing a specific message | `message_id` |
-| `top_contacts()` | Most frequent correspondents | `period`, `limit`, `direction` (inbound/outbound/both), `account` |
-| `topics_with()` | Semantic topic clusters for a contact | `sender` or `sender_domain`, `limit` |
-| `unreplied()` | Inbound messages with no outbound reply | `after`, `before`, `sender`, `sender_domain`, `account` |
-| `long_threads()` | Threads exceeding a message count | `min_messages`, `after`, `account` |
-| `accounts()` | List all imported accounts | (none) |
-| `import_history()` | List all import sessions with metadata | `account` (optional) |
+| `correspondence()` | All emails exchanged with a person (sent by them or to them) | `address`, `after`, `before`, `limit`, `offset`, `order` |
+| `mention_search()` | Case-insensitive keyword search in body and subject (ILIKE) | `text`, `sender`, `sender_domain`, `after`, `before`, `limit`, `offset` |
+| `top_contacts()` | Most frequent correspondents | `period`, `limit`, `offset`, `direction` (inbound/outbound/both), `group_by` (address/domain), `exclude_domains` |
+| `topics_with()` | Diverse topic representatives for a contact (farthest-point selection on embeddings) | `sender` or `sender_domain`, `limit`, `offset` |
+| `cluster()` | Diverse topic extraction from arbitrary email subsets | `where` (DSL filter) or `message_ids`, `limit`, `offset` |
+| `unreplied()` | Messages with no reply in the same thread | `direction` (inbound/outbound), `recipient`, `after`, `before`, `sender`, `sender_domain`, `limit`, `offset` |
+| `long_threads()` | Threads exceeding a message count | `min_messages`, `after`, `participant`, `limit`, `offset` |
+
+**Tier 2 — DSL query engine** for arbitrary structured queries beyond the fixed method signatures (see Section 6.5).
+
+| Method | Description | Parameters |
+|--------|-------------|------------|
+| `query()` | Execute a structured query using the JSON DSL | `spec` (dict) |
 
 ### 6.3 Usage Examples
 
@@ -242,19 +256,6 @@ results = db.search("budget concerns",
                     sender_domain="acme.com", after="2024-07-01")
 ```
 
-Account-scoped query — search only one email account:
-
-```python
-results = db.search("offer letter",
-                    account="sean@postmates.com")
-```
-
-Cross-account query — search all accounts (default):
-
-```python
-results = db.find(sender="alice@example.com")  # searches all accounts
-```
-
 Thread expansion — retrieve full conversation from a search hit:
 
 ```python
@@ -262,24 +263,103 @@ hits = db.search("the office move")
 thread = db.get_thread(hits[0].thread_id)
 ```
 
-Pattern query — unreplied inbound messages for a specific account:
+Full correspondence with a person:
 
 ```python
-unreplied = db.unreplied(after="2025-02-01",
-                         account="splaice@gmail.com")
+history = db.correspondence(address="scott@banister.com",
+                            after="2024-01-01")
 ```
 
-List all imported accounts:
+Keyword search without Ollama:
 
 ```python
-accounts = db.accounts()
-# [{"account": "sean@postmates.com", "email_count": 841930},
-#  {"account": "splaice@gmail.com", "email_count": 125000}]
+results = db.mention_search(text="quarterly review",
+                            sender_domain="acme.com")
+```
+
+Unreplied outbound messages to a specific recipient:
+
+```python
+awaiting = db.unreplied(direction="outbound",
+                        recipient="bob@corp.com")
+```
+
+Paginating through results:
+
+```python
+page1 = db.find(sender_domain="stripe.com", limit=50, offset=0)
+page2 = db.find(sender_domain="stripe.com", limit=50, offset=50)
+```
+
+Diverse topic clustering from a filtered subset:
+
+```python
+topics = db.cluster(
+    where={"and": [
+        {"field": "sender_domain", "eq": "stripe.com"},
+        {"field": "date", "gte": "2024-01-01"},
+    ]},
+    limit=5,
+)
+```
+
+DSL query — recipient domain distribution:
+
+```python
+results = db.query({
+    "from": "sent_to",
+    "select": [
+        {"field": "recipient_domain"},
+        {"count": "*", "as": "n"},
+    ],
+    "group_by": ["recipient_domain"],
+    "order_by": [{"field": "n", "dir": "desc"}],
+    "limit": 10,
+})
 ```
 
 ### 6.4 Hybrid Query Execution
 
 When `search()` is called with both a query string and structured filters, the execution strategy depends on the selectivity of the structured predicates. If the filters are highly selective (e.g., a specific sender address), the database first applies the structured filter via B-tree index to narrow the candidate set, then performs the vector similarity search within that subset. If the filters are broad, the vector search runs first with a larger candidate pool, and structured filters are applied as a post-filter. The MailDB class handles this optimization automatically based on query planning heuristics.
+
+### 6.5 DSL Query Engine
+
+The `query()` method exposes a JSON DSL for arbitrary structured queries that go beyond the fixed method signatures. This enables agents to answer ad-hoc analytical questions ("how many emails did I receive per month from stripe.com?") without requiring new Python methods for every query shape.
+
+**Specification format:**
+
+```json
+{
+  "from": "emails | sent_to | email_labels",
+  "select": [{"field": "col"}, {"count": "*", "as": "n"}, {"date_trunc": "month", "field": "date", "as": "period"}],
+  "where": {"field": "col", "eq": "value"} or {"and|or|not": [...]},
+  "group_by": ["col1", "col2"],
+  "having": {"field": "n", "gte": 10},
+  "order_by": [{"field": "col", "dir": "asc|desc"}],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Sources:** The `from` field selects the base relation. `"emails"` queries the table directly. `"sent_to"` expands recipients into one row per recipient address via a LATERAL join, adding `recipient_address`, `recipient_domain`, and `recipient_type` columns. `"email_labels"` unnests the labels array, adding a `label` column.
+
+**Safety:** All column names, operators, aggregate functions, and date-trunc precisions are validated against strict whitelists. All values are parameterized. A 5-second `statement_timeout` and 1,000-row hard cap are enforced server-side.
+
+**Operators:** `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `ilike`, `not_ilike`, `in`, `not_in`, `contains`, `is_null`. Boolean combinators: `and`, `or`, `not`.
+
+**Aggregates:** `count`, `count_distinct`, `min`, `max`, `sum`, `array_agg_distinct`.
+
+### 6.6 MCP Server Layer
+
+The MCP server (`server.py`) is the primary external interface, wrapping all MailDB methods as tools accessible to AI assistants via the Model Context Protocol.
+
+**Serialization:** All `Email` objects are converted to JSON-serializable dicts. The `embedding` vector and `body_html` fields are always stripped from responses to prevent context overflow. UUIDs and datetimes are serialized to strings.
+
+**Field selection:** All email-returning tools accept an optional `fields` parameter — a list of field names to include in the response. This allows agents to request only the columns they need, reducing response size. Valid fields: `id`, `message_id`, `thread_id`, `subject`, `sender_name`, `sender_address`, `sender_domain`, `recipients`, `date`, `body_text`, `has_attachment`, `attachments`, `labels`, `in_reply_to`, `references`, `created_at`.
+
+**Offset pagination:** All list-returning tools accept an `offset` parameter (default 0) for cursor-free pagination. Combined with `limit`, this enables agents to page through large result sets.
+
+**Observability:** The `@log_tool` decorator instruments every tool call, logging entry parameters and exit stats (row count, response bytes, elapsed time). Responses exceeding 50KB trigger a warning-level log entry.
 
 ---
 
@@ -293,7 +373,7 @@ The initial data source is one or more local .mbox files. The ingest pipeline is
 
 **Phase 2: Parse.** Multiple worker processes claim chunks via `SKIP LOCKED` and parse each message:
 
-- Parses all relevant headers (From, To, Cc, Bcc, Date, Subject, Message-ID, In-Reply-To, References). All header values are sanitized: `Header` objects are coerced to `str`, NUL bytes are stripped.
+- Parses all relevant headers (From, To, Cc, Bcc, Date, Subject, Message-ID, In-Reply-To, References). All header values are sanitized: `Header` objects are coerced to `str`, NUL bytes are stripped. If the `Date` header is missing or unparseable, the parser falls back to extracting the timestamp from the first `Received` header.
 - Extracts the best plain-text body: prefers text/plain parts; falls back to HTML-to-text conversion for HTML-only messages.
 - Cleans the body by removing quoted reply blocks (lines beginning with `>`) and common email signature delimiters ("-- ").
 - Extracts attachments and stores them to disk using content-addressed (SHA-256) deduplication.
@@ -323,7 +403,7 @@ python -m maildb.ingest status
 
 Cleaning the body text is critical for embedding quality. The following transformations are applied in order:
 
-- **HTML to text:** If only an HTML body part is available, it is converted to plain text using a library like html2text or beautifulsoup4, preserving paragraph structure but stripping tags.
+- **HTML to text:** If only an HTML body part is available, it is converted to plain text using BeautifulSoup4, preserving paragraph structure but stripping tags.
 - **Quoted reply removal:** Lines beginning with ">" (any depth of nesting) are removed. Outlook-style quoted blocks (delineated by "-----Original Message-----") are also stripped.
 - **Signature removal:** Content below the standard signature delimiter ("-- " on its own line) is removed.
 - **Whitespace normalization:** Excessive blank lines and trailing whitespace are collapsed.
@@ -353,7 +433,7 @@ Based on the first real import (49 GB mbox, 841,930 messages) on Apple M1 Max wi
 
 ## 9. Implementation Plan
 
-The project is structured in phases, each independently testable. Phases 1–5 are complete. Phase 6 adds multi-account support. Phase 7 (Gmail sync) is deferred.
+The project is structured in phases, each independently testable. Phases 1–5 are complete. Phase 6 adds multi-account query support. Phase 7 (Gmail sync) is deferred.
 
 | # | Phase | Deliverables | Status |
 |---|-------|-------------|--------|
@@ -361,37 +441,32 @@ The project is structured in phases, each independently testable. Phases 1–5 a
 | 2 | Mbox Ingestion | 4-phase parallel pipeline (split → parse → index → embed) with content-addressed attachment deduplication | Complete |
 | 3 | Embedding Generation | Ollama integration, nomic-embed-text inference, batch embedding with fallback | Complete |
 | 4 | Python Library (Core) | MailDB class with `find()`, `search()`, `get_thread()`, hybrid queries | Complete |
-| 5 | Python Library (Advanced) + MCP Server | `top_contacts()`, `topics_with()`, `unreplied()`, `long_threads()`, FastMCP server | Complete |
-| 6 | Multi-Account Support | `source_account` and `import_id` columns, `imports` table, `--account` CLI flag, account-scoped queries | Planned |
+| 5 | Python Library (Advanced) + MCP Server | See Section 9.1 for full scope | Complete |
+| 6 | Multi-Account Query Support | Account-scoped query parameters, `accounts()` and `import_history()` methods | Planned |
 | 7 | Gmail Sync (Future) | Gmail API integration, incremental sync, OAuth, label mapping | Deferred |
 
-### 9.1 Phase 6: Multi-Account Support
+### 9.1 Phase 5: Full Scope
 
-This phase adds the ability to import and query multiple email accounts within a single database.
+Phase 5 was delivered across three sprints, expanding well beyond the initial `top_contacts` / `unreplied` / `long_threads` scope:
 
-**Schema changes:**
-- Add `source_account TEXT` column to `emails` table
-- Add `import_id UUID` column to `emails` table
-- Create `imports` table for import session metadata
-- Add B-tree indexes on `source_account` and `import_id`
-- Migration must be backwards-compatible: populate existing rows with a default `source_account` derived from configuration or a migration flag
+**Sprint 1:** Core advanced methods — `top_contacts()` with direction/group_by/exclude_domains, `topics_with()` with farthest-point embedding selection, `unreplied()` with bidirectional support (inbound/outbound) and recipient filtering, `long_threads()` with participant filtering. FastMCP server with tool registration.
 
-**Pipeline changes:**
-- CLI accepts `--account <email>` as a required parameter for new imports
-- Pipeline generates a UUID `import_id` at startup and creates an `imports` row
-- `import_id` and `source_account` are passed through to all parsed email rows
-- `ingest_tasks` table gains an `import_id` column to associate tasks with their import session
-- `reset` command can target a specific import: `python -m maildb.ingest reset --import <id>`
+**Sprint 2:** Observability — dual-sink structured logging (stderr + debug file) with PII scrubbing, `@log_tool` decorator, SQL debug logging.
+
+**Sprint 3:** API surface expansion — `correspondence()`, `mention_search()`, `cluster()`, `query()` DSL engine, `sent_to` and `email_labels` virtual sources. MCP serialization improvements: `body_html`/`embedding` stripping, `fields` parameter, `offset` pagination, response size warnings. Bug fixes: Received header date fallback, null-date exclusion from unreplied, `limit` on long_threads.
+
+### 9.2 Phase 6: Multi-Account Query Support
+
+The schema already supports multi-account imports — `source_account` and `import_id` columns exist on the `emails` table, and the `imports` table records session metadata. This phase adds account-scoped querying.
 
 **Query changes:**
 - All query methods (`find`, `search`, `top_contacts`, `unreplied`, `long_threads`) accept an optional `account` parameter
 - `_build_filters()` adds a `source_account = %(account)s` condition when `account` is provided
-- `unreplied()` and `top_contacts()` support `user_email` as a list to recognize multiple accounts as "you"
 - New `accounts()` method returns list of imported accounts with email counts
 - New `import_history()` method returns import session metadata
 - MCP server tools expose the `account` parameter
 
-Each phase produces a working system that can be used immediately. Phase 6 is a non-breaking addition — existing single-account databases will continue to work, with `source_account` defaulting to NULL until the migration populates it.
+Phase 6 is a non-breaking addition — existing single-account databases will continue to work.
 
 ---
 
