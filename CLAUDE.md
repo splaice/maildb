@@ -34,8 +34,3 @@ uv run just db-downgrade        # Rollback one migration
 - Use SQLAlchemy 2.0 style (mapped_column, DeclarativeBase) — never legacy 1.x patterns.
 - Write a test for every new endpoint, service function, and model method.
 - Use `httpx.AsyncClient` with FastAPI's async test pattern — not the sync TestClient.
-
-## Detailed Standards
-
-- Python tooling, packages, and project structure: @docs/standards/python-tooling.md
-- Testing strategy and patterns: @docs/standards/testing.md
