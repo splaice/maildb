@@ -21,6 +21,6 @@ test-integration *ARGS:
     uv run pytest tests/integration/ -m integration {{ARGS}}
 
 test-cov:
-    uv run pytest --cov --cov-report=term-missing --cov-report=html
+    uv run pytest --cov --cov-report=term-missing
 
 check: fmt lint test

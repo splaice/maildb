@@ -10,6 +10,9 @@ wheels/
 .venv
 .env
 
+# Coverage
+htmlcov/
+
 # Ingest artifacts
 attachments/
 ingest_tmp/
