@@ -10,8 +10,14 @@ wheels/
 .venv
 .env
 
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
 # Coverage
 htmlcov/
+.coverage
 
 # Ingest artifacts
 attachments/
