@@ -2,7 +2,7 @@
 
 **Personal Email Database for Agent-Powered Retrieval**
 
-Architecture Document — Version 3.0 — March 2026
+Design Document — Version 3.0 — March 2026
 
 PostgreSQL · pgvector · Ollama · Python
 
