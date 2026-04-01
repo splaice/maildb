@@ -16,6 +16,10 @@ uv run just test                # Run pytest
 uv run just check               # fmt + lint + test (run before committing)
 ```
 
+## Design Document
+
+`docs/DESIGN.md` contains the full system design: schema, API, embedding strategy, ingestion pipeline, and implementation roadmap. Read it when planning or implementing changes to these areas.
+
 ## Critical Rules
 
 - ALWAYS use `uv` for dependency management. Never use pip directly.
