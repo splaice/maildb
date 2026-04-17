@@ -98,6 +98,14 @@ def ingest_run(
     mbox_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),  # noqa: B008
     account: str = typer.Option(..., "--account", help="Email address of the source account."),
     skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip the embedding phase."),
+    force_new_import: bool = typer.Option(
+        False,
+        "--force-new-import",
+        help=(
+            "Always allocate a new imports row. By default, an in-progress "
+            "import for the same account+file is resumed."
+        ),
+    ),
 ) -> None:
     """Run the full ingest pipeline for an mbox file."""
     _validate_account(account)
@@ -121,6 +129,7 @@ def ingest_run(
         embedding_dimensions=settings.embedding_dimensions,
         skip_embed=skip_embed,
         source_account=account,
+        force_new_import=force_new_import,
     )
     _print_status_dict(result)
 
