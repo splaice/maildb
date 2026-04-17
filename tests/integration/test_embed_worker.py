@@ -13,8 +13,10 @@ pytestmark = pytest.mark.integration
 def _insert_test_email(pool, message_id="test@example.com"):
     with pool.connection() as conn:
         conn.execute(
-            """INSERT INTO emails (id, message_id, thread_id, subject, sender_name, body_text, created_at)
-               VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender', 'Body text', now())""",
+            """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
+                   body_text, source_account, created_at)
+               VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
+                   'Body text', 'test@example.com', now())""",
             {"id": uuid4(), "message_id": message_id},
         )
         conn.commit()
@@ -47,9 +49,9 @@ def _insert_email_with_zero_vector(pool, message_id, dimensions=768):
     with pool.connection() as conn:
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
-                   body_text, embedding, created_at)
+                   body_text, embedding, source_account, created_at)
                VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
-                   'Body', %(embedding)s, now())""",
+                   'Body', %(embedding)s, 'test@example.com', now())""",
             {"id": uuid4(), "message_id": message_id, "embedding": zero_vector},
         )
         conn.commit()
@@ -60,9 +62,9 @@ def _insert_email_with_real_embedding(pool, message_id, dimensions=768):
     with pool.connection() as conn:
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
-                   body_text, embedding, created_at)
+                   body_text, embedding, source_account, created_at)
                VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
-                   'Body', %(embedding)s, now())""",
+                   'Body', %(embedding)s, 'test@example.com', now())""",
             {"id": uuid4(), "message_id": message_id, "embedding": embedding},
         )
         conn.commit()

@@ -15,9 +15,9 @@ def _insert_unembedded_email(pool, message_id):
     with pool.connection() as conn:
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, subject, sender_name,
-                   body_text, created_at)
+                   body_text, source_account, created_at)
                VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender',
-                   'Body text', now())""",
+                   'Body text', 'test@example.com', now())""",
             {"id": uuid4(), "message_id": message_id},
         )
         conn.commit()
@@ -110,8 +110,10 @@ def test_reset_embed_phase(test_pool):
     complete_task(test_pool, embed_task["id"])
     with test_pool.connection() as conn:
         conn.execute(
-            """INSERT INTO emails (id, message_id, thread_id, subject, embedding, created_at)
-               VALUES (%(id)s, 'reset-emb@example.com', 't1', 'Test', %(emb)s, now())""",
+            """INSERT INTO emails (id, message_id, thread_id, subject, embedding,
+                   source_account, created_at)
+               VALUES (%(id)s, 'reset-emb@example.com', 't1', 'Test', %(emb)s,
+                   'test@example.com', now())""",
             {"id": uuid4(), "emb": [0.1] * 768},
         )
         conn.commit()
