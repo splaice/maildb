@@ -72,3 +72,21 @@ def test_ingest_tasks_has_import_id(test_pool):
         )
         rows = cur.fetchall()
     assert len(rows) == 1
+
+
+def test_indexes_for_multi_account_columns(test_pool):
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename IN ('emails', 'imports') "
+            "AND indexname IN ("
+            "  'idx_email_source_account', 'idx_email_import_id',"
+            "  'idx_imports_source_account', 'idx_imports_started_at')"
+        )
+        names = {row[0] for row in cur.fetchall()}
+    assert names == {
+        "idx_email_source_account",
+        "idx_email_import_id",
+        "idx_imports_source_account",
+        "idx_imports_started_at",
+    }
