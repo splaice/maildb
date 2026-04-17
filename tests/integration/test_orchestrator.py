@@ -213,3 +213,27 @@ def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_setti
             "SELECT count(*) FROM emails WHERE source_account IS NULL OR import_id IS NULL"
         )
         assert cur.fetchone()[0] == 0
+
+
+def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_settings, tmp_path):
+    """Idempotent ingest: second run inserts zero emails but logs a new import row."""
+    common_kwargs = dict(  # noqa: C408
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="re-run@example.com",
+    )
+    run_pipeline(**common_kwargs)
+    # Wipe pipeline state so the second run replays without `split_complete` short-circuiting.
+    reset_pipeline(test_pool, phase="parse")
+    run_pipeline(**common_kwargs)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM imports WHERE source_account = 're-run@example.com'"
+        )
+        assert cur.fetchone()[0] == 2
