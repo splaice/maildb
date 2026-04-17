@@ -40,10 +40,23 @@ _SENT_TO_COLUMNS: set[str] = _EMAILS_COLUMNS | {
 
 _EMAIL_LABELS_COLUMNS: set[str] = _EMAILS_COLUMNS | {"label"}
 
+# emails_by_account exposes the email_accounts join: one row per
+# (email, account) pair. Use `account` (not `source_account`) for true
+# multi-account attribution and `account_import_id` / `first_seen_at`
+# for the per-account metadata. The scalar emails.source_account /
+# emails.import_id columns are still reachable but reflect only
+# first-seen attribution.
+_EMAILS_BY_ACCOUNT_COLUMNS: set[str] = _EMAILS_COLUMNS | {
+    "account",
+    "account_import_id",
+    "first_seen_at",
+}
+
 _SOURCE_COLUMNS: dict[str, set[str]] = {
     "emails": _EMAILS_COLUMNS,
     "sent_to": _SENT_TO_COLUMNS,
     "email_labels": _EMAIL_LABELS_COLUMNS,
+    "emails_by_account": _EMAILS_BY_ACCOUNT_COLUMNS,
 }
 
 # ---------------------------------------------------------------------------
@@ -136,9 +149,19 @@ WITH source AS (
     FROM emails e WHERE e.labels IS NOT NULL AND array_length(e.labels, 1) > 0
 )"""
 
+_EMAILS_BY_ACCOUNT_CTE = """\
+WITH source AS (
+    SELECT e.*, ea.source_account AS account,
+           ea.import_id AS account_import_id,
+           ea.first_seen_at
+    FROM emails e
+    JOIN email_accounts ea ON ea.email_id = e.id
+)"""
+
 _SOURCE_CTE: dict[str, str] = {
     "sent_to": _SENT_TO_CTE,
     "email_labels": _EMAIL_LABELS_CTE,
+    "emails_by_account": _EMAILS_BY_ACCOUNT_CTE,
 }
 
 
