@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-from maildb.__main__ import _configure_logging
+from maildb.cli import _configure_logging
 from maildb.config import Settings
 from maildb.server import log_tool
 

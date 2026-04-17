@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import structlog
 
-from maildb.__main__ import _configure_logging
+from maildb.cli import _configure_logging
 from maildb.config import Settings
 from maildb.maildb import _query_dicts
 
