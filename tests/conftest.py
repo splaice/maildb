@@ -34,6 +34,24 @@ def test_pool(test_settings: Settings):  # type: ignore[no-untyped-def]
 
 
 @pytest.fixture(autouse=True)
+def _ensure_source_account_nullable(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
+    """Before each integration test, ensure emails.source_account is nullable.
+
+    Tests in test_db.py tighten the constraint via init_db; other tests may
+    need to insert rows without source_account. Restoring to nullable keeps
+    each test deterministic regardless of ordering.
+    """
+    if "integration" not in [m.name for m in request.node.iter_markers()]:
+        yield
+        return
+    pool = request.getfixturevalue("test_pool")
+    with pool.connection() as conn:
+        conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
+        conn.commit()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
     """Delete all rows after each integration test to prevent test pollution."""
     if "integration" not in [m.name for m in request.node.iter_markers()]:
