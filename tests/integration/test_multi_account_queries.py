@@ -15,9 +15,7 @@ def _db(test_pool, test_settings) -> MailDB:
     return MailDB._from_pool(test_pool, config=config)
 
 
-def test_get_thread_returns_cross_account_messages(
-    test_pool, test_settings, multi_account_seed
-):
+def test_get_thread_returns_cross_account_messages(test_pool, test_settings, multi_account_seed):
     """get_thread(...) ignores account and returns the full cross-account thread."""
     db = _db(test_pool, test_settings)
     thread = db.get_thread("thread-cross")
@@ -58,9 +56,7 @@ def test_accounts_summary(test_pool, test_settings, multi_account_seed):
     assert by_acct["b@example.com"].email_count == 2
 
 
-def test_import_history_filters_by_account(
-    test_pool, test_settings, multi_account_seed
-):
+def test_import_history_filters_by_account(test_pool, test_settings, multi_account_seed):
     db = _db(test_pool, test_settings)
     a_records = db.import_history(account="a@example.com")
     assert len(a_records) == 1

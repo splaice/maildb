@@ -142,9 +142,7 @@ def test_reset_parse_phase(test_pool):
         assert cur.fetchone()[0] == 0
 
 
-def test_re_running_ingest_creates_new_import_but_zero_emails(
-    test_pool, test_settings, tmp_path
-):
+def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_settings, tmp_path):
     """Idempotent ingest: second run inserts zero emails but logs a new import row."""
     common_kwargs = dict(  # noqa: C408
         mbox_path=FIXTURES / "sample.mbox",
