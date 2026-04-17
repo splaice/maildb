@@ -31,6 +31,45 @@ def _get_pool(database_url: str) -> ConnectionPool:
     return ConnectionPool(conninfo=database_url, min_size=1, max_size=5, open=True)
 
 
+def _resume_or_create_import(
+    pool: ConnectionPool,
+    *,
+    source_account: str,
+    source_file: str,
+    force_new_import: bool,
+) -> Any:
+    """Return the import_id for this pipeline run.
+
+    Reuses the most recent status='running' row for the same
+    (source_account, source_file) unless force_new_import is True.
+    """
+    if not force_new_import:
+        with pool.connection() as conn:
+            cur = conn.execute(
+                """SELECT id FROM imports
+                   WHERE source_account = %(acct)s
+                     AND source_file = %(file)s
+                     AND status = 'running'
+                   ORDER BY started_at DESC
+                   LIMIT 1""",
+                {"acct": source_account, "file": source_file},
+            )
+            row = cur.fetchone()
+        if row is not None:
+            logger.info("resuming_import", import_id=str(row[0]))
+            return row[0]
+
+    import_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+            {"id": import_id, "account": source_account, "file": source_file},
+        )
+        conn.commit()
+    return import_id
+
+
 def run_pipeline(
     *,
     mbox_path: Path | str,
@@ -46,22 +85,27 @@ def run_pipeline(
     embedding_model: str = "nomic-embed-text",
     embedding_dimensions: int = 768,
     skip_embed: bool = False,
+    force_new_import: bool = False,
 ) -> dict[str, Any]:
-    """Run the full ingest pipeline. Restartable."""
+    """Run the full ingest pipeline. Restartable.
+
+    By default, a still-running imports row for the same
+    (source_account, source_file) is resumed instead of a new one being
+    created. Pass force_new_import=True to always start fresh.
+    """
     if parse_workers == -1:
         parse_workers = max(1, (os.cpu_count() or 2) - 1)
 
     pool = _get_pool(database_url)
-    import_id = uuid4()
+    source_file = str(mbox_path)
 
     try:
-        with pool.connection() as conn:
-            conn.execute(
-                """INSERT INTO imports (id, source_account, source_file, status)
-                   VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
-                {"id": import_id, "account": source_account, "file": str(mbox_path)},
-            )
-            conn.commit()
+        import_id = _resume_or_create_import(
+            pool,
+            source_account=source_account,
+            source_file=source_file,
+            force_new_import=force_new_import,
+        )
 
         # Phase 1: Split
         split_status = get_phase_status(pool, "split")
@@ -79,13 +123,11 @@ def run_pipeline(
             complete_task(pool, split_task["id"], messages_total=len(chunks))
             logger.info("phase_complete", phase="split", chunks=len(chunks))
         elif split_status["completed"] == 0:
-            logger.info("split_incomplete_restarting")
+            # Split started but never completed — wipe split/parse tasks and
+            # replay within the SAME import_id (no status change here).
+            logger.info("split_incomplete_restarting", import_id=str(import_id))
             with pool.connection() as conn:
                 conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
-                conn.execute(
-                    "UPDATE imports SET status='failed', completed_at=now() WHERE id=%(id)s",
-                    {"id": import_id},
-                )
                 conn.commit()
             pool.close()
             return run_pipeline(
@@ -102,6 +144,7 @@ def run_pipeline(
                 embedding_model=embedding_model,
                 embedding_dimensions=embedding_dimensions,
                 skip_embed=skip_embed,
+                force_new_import=False,
             )
 
         # Phase 2: Parse

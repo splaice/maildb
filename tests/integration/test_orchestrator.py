@@ -142,8 +142,12 @@ def test_reset_parse_phase(test_pool):
         assert cur.fetchone()[0] == 0
 
 
-def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_settings, tmp_path):
-    """Idempotent ingest: second run inserts zero emails but logs a new import row."""
+def test_re_running_completed_ingest_creates_second_import(test_pool, test_settings, tmp_path):
+    """Second ingest after the first *completes* creates a new import row.
+
+    Resume-by-(source_account, source_file) only reuses rows that are
+    still status='running'. A completed one is left alone.
+    """
     common_kwargs = dict(  # noqa: C408
         mbox_path=FIXTURES / "sample.mbox",
         database_url=test_settings.database_url,
@@ -155,7 +159,6 @@ def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_se
         source_account="re-run@example.com",
     )
     run_pipeline(**common_kwargs)
-    # Wipe pipeline state so the second run replays without short-circuiting.
     reset_pipeline(test_pool, phase="parse")
     run_pipeline(**common_kwargs)
 
@@ -164,3 +167,67 @@ def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_se
             "SELECT count(*) FROM imports WHERE source_account = 're-run@example.com'"
         )
         assert cur.fetchone()[0] == 2
+
+
+def test_run_pipeline_adopts_orphan_running_import(test_pool, test_settings, tmp_path):
+    """An orphaned status='running' row is resumed, not duplicated."""
+    mbox = FIXTURES / "sample.mbox"
+    orphan_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'resume@example.com', %(file)s, 'running')""",
+            {"id": orphan_id, "file": str(mbox)},
+        )
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="resume@example.com",
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT id, status FROM imports WHERE source_account = 'resume@example.com'"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1  # Orphan was adopted, not duplicated.
+        assert rows[0][0] == orphan_id
+        assert rows[0][1] == "completed"
+
+
+def test_run_pipeline_force_new_import(test_pool, test_settings, tmp_path):
+    """force_new_import=True bypasses resume and creates a fresh import row."""
+    mbox = FIXTURES / "sample.mbox"
+    orphan_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'force@example.com', %(file)s, 'running')""",
+            {"id": orphan_id, "file": str(mbox)},
+        )
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="force@example.com",
+        force_new_import=True,
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM imports WHERE source_account = 'force@example.com'"
+        )
+        assert cur.fetchone()[0] == 2  # Orphan left alone; new row created.
