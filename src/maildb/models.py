@@ -3,11 +3,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from datetime import datetime
-    from uuid import UUID
+from datetime import datetime  # noqa: TC003  (runtime import for dataclass fields)
+from typing import Any
+from uuid import UUID  # noqa: TC003  (runtime import for dataclass fields)
 
 
 @dataclass
@@ -118,3 +116,25 @@ class Email:
 class SearchResult:
     email: Email
     similarity: float
+
+
+@dataclass
+class AccountSummary:
+    source_account: str
+    email_count: int
+    first_date: datetime | None
+    last_date: datetime | None
+    import_count: int
+
+
+@dataclass
+class ImportRecord:
+    id: UUID
+    source_account: str
+    source_file: str | None
+    started_at: datetime
+    completed_at: datetime | None
+    messages_total: int
+    messages_inserted: int
+    messages_skipped: int
+    status: str

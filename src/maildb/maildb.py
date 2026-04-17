@@ -16,7 +16,7 @@ from maildb.config import Settings
 from maildb.db import create_pool, init_db
 from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
-from maildb.models import Email, SearchResult
+from maildb.models import AccountSummary, Email, ImportRecord, SearchResult
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -499,6 +499,69 @@ class MailDB:
         for row in rows:
             row.pop("_total", None)
         return rows, total
+
+    def accounts(self) -> list[AccountSummary]:
+        """Summarize email counts per source_account."""
+        sql = """
+            SELECT
+                source_account,
+                COUNT(*)                  AS email_count,
+                MIN(date)                 AS first_date,
+                MAX(date)                 AS last_date,
+                COUNT(DISTINCT import_id) AS import_count
+            FROM emails
+            WHERE source_account IS NOT NULL
+            GROUP BY source_account
+            ORDER BY email_count DESC
+        """
+        rows = _query_dicts(self._pool, sql)
+        return [
+            AccountSummary(
+                source_account=row["source_account"],
+                email_count=row["email_count"],
+                first_date=row["first_date"],
+                last_date=row["last_date"],
+                import_count=row["import_count"],
+            )
+            for row in rows
+        ]
+
+    def import_history(
+        self,
+        *,
+        account: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ImportRecord]:
+        """Return import session records, newest first."""
+        conditions: list[str] = []
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        sql = f"""
+            SELECT id, source_account, source_file, started_at, completed_at,
+                   messages_total, messages_inserted, messages_skipped, status
+            FROM imports{where}
+            ORDER BY started_at DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+        rows = _query_dicts(self._pool, sql, params)
+        return [
+            ImportRecord(
+                id=row["id"],
+                source_account=row["source_account"],
+                source_file=row["source_file"],
+                started_at=row["started_at"],
+                completed_at=row["completed_at"],
+                messages_total=row["messages_total"],
+                messages_inserted=row["messages_inserted"],
+                messages_skipped=row["messages_skipped"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
 
     def topics_with(
         self,

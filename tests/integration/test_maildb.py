@@ -1335,3 +1335,57 @@ def test_long_threads_scoped_by_account(test_pool, test_settings):
 
     b_threads, _ = db.long_threads(min_messages=5, account="b@example.com")
     assert b_threads == []
+
+
+def test_accounts_returns_summary(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (acct, iid) in enumerate(
+            [("a@example.com", iid_a)] * 3 + [("b@example.com", iid_b)] * 2
+        ):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, source_account,
+                       import_id, date, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', %(acct)s, %(iid)s, now(), now())""",
+                {"id": uuid4(), "mid": f"<acc-{n}@x>", "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    summaries = db.accounts()
+    by_acct = {s.source_account: s for s in summaries}
+    assert by_acct["a@example.com"].email_count == 3
+    assert by_acct["b@example.com"].email_count == 2
+    assert by_acct["a@example.com"].import_count == 1
+
+
+def test_import_history_returns_records(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    with test_pool.connection() as conn:
+        # Clean first to isolate from other tests.
+        conn.execute(
+            "DELETE FROM imports WHERE source_account IN ('a@example.com', 'b@example.com')"
+        )
+        conn.commit()
+        for acct in ["a@example.com", "b@example.com", "a@example.com"]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": uuid4(), "acct": acct},
+            )
+        conn.commit()
+
+    all_records = [
+        r for r in db.import_history() if r.source_account in ("a@example.com", "b@example.com")
+    ]
+    assert len(all_records) == 3
+
+    a_only = db.import_history(account="a@example.com")
+    assert len(a_only) == 2
+    assert all(r.source_account == "a@example.com" for r in a_only)
