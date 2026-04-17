@@ -394,9 +394,11 @@ Each invocation of the pipeline:
 **CLI usage:**
 
 ```bash
-python -m maildb.ingest --account you@work.com /path/to/work.mbox
-python -m maildb.ingest --account you@gmail.com /path/to/personal.mbox
-python -m maildb.ingest status
+maildb ingest run --account you@work.com /path/to/work.mbox
+maildb ingest run --account you@gmail.com /path/to/personal.mbox
+maildb ingest status
+maildb ingest status --account you@work.com
+maildb ingest migrate --account you@work.com
 ```
 
 ### 7.2 Body Text Cleaning
