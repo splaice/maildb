@@ -1,9 +1,24 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
+CREATE TABLE IF NOT EXISTS imports (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_account    TEXT NOT NULL,
+    source_file       TEXT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at      TIMESTAMPTZ,
+    messages_total    INT NOT NULL DEFAULT 0,
+    messages_inserted INT NOT NULL DEFAULT 0,
+    messages_skipped  INT NOT NULL DEFAULT 0,
+    status            TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed'))
+);
+
 CREATE TABLE IF NOT EXISTS emails (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     message_id      TEXT UNIQUE NOT NULL,
     thread_id       TEXT NOT NULL,
+    source_account  TEXT,
+    import_id       UUID REFERENCES imports(id),
     subject         TEXT,
     sender_name     TEXT,
     sender_address  TEXT,
@@ -21,6 +36,10 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
+-- For databases created before multi-account support, add the columns idempotently.
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS source_account TEXT;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS import_id UUID REFERENCES imports(id);
+
 CREATE TABLE IF NOT EXISTS ingest_tasks (
     id                    SERIAL PRIMARY KEY,
     phase                 TEXT NOT NULL,
@@ -35,8 +54,11 @@ CREATE TABLE IF NOT EXISTS ingest_tasks (
     messages_inserted     INT DEFAULT 0,
     messages_skipped      INT DEFAULT 0,
     attachments_extracted INT DEFAULT 0,
+    import_id             UUID REFERENCES imports(id),
     created_at            TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE ingest_tasks ADD COLUMN IF NOT EXISTS import_id UUID REFERENCES imports(id);
 
 CREATE TABLE IF NOT EXISTS attachments (
     id              SERIAL PRIMARY KEY,
