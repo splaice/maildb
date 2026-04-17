@@ -352,11 +352,19 @@ class MailDB:
 
     # --- Advanced query methods ---
 
-    def _require_user_email(self) -> str:
-        if not self._config.user_email:
-            msg = "user_email must be set in config for this method"
-            raise ValueError(msg)
-        return self._config.user_email
+    def _identity_addresses(self, account: str | None) -> list[str]:
+        """Return the addresses that represent 'you' for identity-aware queries.
+
+        If `account` is provided, returns just that single address.
+        Otherwise returns the configured user_emails list.
+        Raises if neither is available.
+        """
+        if account is not None:
+            return [account]
+        if self._config.user_emails:
+            return list(self._config.user_emails)
+        msg = "user_emails must be configured (or pass account=...) for this method"
+        raise ValueError(msg)
 
     def top_contacts(
         self,
@@ -367,6 +375,7 @@ class MailDB:
         direction: str = "both",
         group_by: str = "address",
         exclude_domains: list[str] | None = None,
+        account: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Most frequent correspondents via GROUP BY aggregation.
 
@@ -376,13 +385,18 @@ class MailDB:
             direction: 'inbound', 'outbound', or 'both'.
             group_by: 'address' (default) or 'domain' to aggregate by domain.
             exclude_domains: List of domains to exclude from results.
+            account: Scope to a single source_account.
         """
         if group_by not in ("address", "domain"):
             msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
             raise ValueError(msg)
 
-        user_email = self._require_user_email()
-        params: dict[str, Any] = {"user_email": user_email, "limit": limit, "offset": offset}
+        identities = self._identity_addresses(account)
+        params: dict[str, Any] = {
+            "user_emails": identities,
+            "limit": limit,
+            "offset": offset,
+        }
 
         if period:
             period_cond = "AND date >= %(period_start)s"
@@ -398,6 +412,12 @@ class MailDB:
             exclude_inbound = ""
             exclude_outbound = ""
 
+        if account is not None:
+            account_cond = "AND source_account = %(account)s"
+            params["account"] = account
+        else:
+            account_cond = ""
+
         # Column aliases depend on group_by mode
         label = group_by  # "address" or "domain"
 
@@ -412,9 +432,10 @@ class MailDB:
             sql = f"""
                 SELECT {inbound_col} AS {label}, count(*) AS count, COUNT(*) OVER() AS _total
                 FROM emails
-                WHERE sender_address != %(user_email)s
+                WHERE sender_address != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_inbound}
+                  {account_cond}
                 GROUP BY {inbound_col}
                 ORDER BY count DESC
                 LIMIT %(limit)s OFFSET %(offset)s
@@ -436,10 +457,11 @@ class MailDB:
                          UNION ALL
                          SELECT jsonb_array_elements_text(recipients->'bcc')
                      ) AS r(addr)
-                WHERE sender_address = %(user_email)s
-                  AND r.addr != %(user_email)s
+                WHERE sender_address = ANY(%(user_emails)s)
+                  AND r.addr != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_outbound}
+                  {account_cond}
                 GROUP BY {outbound_col}
                 ORDER BY count DESC
                 LIMIT %(limit)s OFFSET %(offset)s
@@ -455,9 +477,10 @@ class MailDB:
             FROM (
                 SELECT {inbound_col} AS {label}, count(*) AS count
                 FROM emails
-                WHERE sender_address != %(user_email)s
+                WHERE sender_address != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_inbound}
+                  {account_cond}
                 GROUP BY {inbound_col}
 
                 UNION ALL
@@ -471,10 +494,11 @@ class MailDB:
                          UNION ALL
                          SELECT jsonb_array_elements_text(recipients->'bcc')
                      ) AS r(addr)
-                WHERE sender_address = %(user_email)s
-                  AND r.addr != %(user_email)s
+                WHERE sender_address = ANY(%(user_emails)s)
+                  AND r.addr != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_outbound}
+                  {account_cond}
                 GROUP BY {outbound_col}
             ) AS combined
             GROUP BY {label}
@@ -623,6 +647,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Messages with no reply in the same thread.
 
@@ -647,8 +672,8 @@ class MailDB:
         if direction == "outbound" and (sender is not None or sender_domain is not None):
             raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
 
-        user_email = self._require_user_email()
-        params: dict[str, Any] = {"user_email": user_email}
+        identities = self._identity_addresses(account)
+        params: dict[str, Any] = {"user_emails": identities}
 
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
@@ -659,7 +684,7 @@ class MailDB:
 
         if direction == "inbound":
             conditions: list[str] = [
-                "e.sender_address != %(user_email)s",
+                "e.sender_address != ALL(%(user_emails)s)",
                 "e.date IS NOT NULL",
             ]
             if after:
@@ -674,6 +699,9 @@ class MailDB:
             if sender_domain:
                 conditions.append("e.sender_domain = %(sender_domain)s")
                 params["sender_domain"] = sender_domain
+            if account is not None:
+                conditions.append("e.source_account = %(account)s")
+                params["account"] = account
 
             where = " AND ".join(conditions)
             params["limit"] = limit
@@ -685,7 +713,7 @@ class MailDB:
                   AND NOT EXISTS (
                       SELECT 1 FROM emails reply
                       WHERE reply.thread_id = e.thread_id
-                        AND reply.sender_address = %(user_email)s
+                        AND reply.sender_address = ANY(%(user_emails)s)
                         AND reply.date > e.date
                   )
                 ORDER BY e.date DESC
@@ -694,7 +722,7 @@ class MailDB:
         else:
             # Outbound: messages FROM user where recipients never replied
             conditions = [
-                "e.sender_address = %(user_email)s",
+                "e.sender_address = ANY(%(user_emails)s)",
                 "e.date IS NOT NULL",
             ]
             if after:
@@ -703,6 +731,9 @@ class MailDB:
             if before:
                 conditions.append("e.date < %(before)s")
                 params["before"] = before
+            if account is not None:
+                conditions.append("e.source_account = %(account)s")
+                params["account"] = account
 
             if recipient:
                 recipient_json = json.dumps([recipient])
@@ -726,7 +757,7 @@ class MailDB:
                     AND NOT EXISTS (
                         SELECT 1 FROM emails reply
                         WHERE reply.thread_id = e.thread_id
-                          AND reply.sender_address != %(user_email)s
+                          AND reply.sender_address != ALL(%(user_emails)s)
                           AND reply.date > e.date
                     )
                 """
