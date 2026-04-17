@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -86,7 +87,21 @@ def test_ingest_status_invokes_get_status():
         patch("maildb.cli.create_pool") as mock_pool,
         patch("maildb.cli.init_db"),
     ):
-        mock_pool.return_value = MagicMock()
+        # Arrange: pool.connection() → cursor → execute() → fetchall returns a row.
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            (
+                datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+                "you@example.com",
+                "completed",
+                42,
+                3,
+            )
+        ]
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
+
         mock_status.return_value = {
             "split": {},
             "parse": {},
@@ -95,19 +110,59 @@ def test_ingest_status_invokes_get_status():
             "total_emails": 0,
         }
         result = runner.invoke(app, ["ingest", "status"])
+
     assert result.exit_code == 0, result.output
     mock_status.assert_called_once()
+    # Confirms _print_imports_summary actually ran the loop body.
+    assert "Imports" in result.output
+    assert "you@example.com" in result.output
+    assert "completed" in result.output
+    assert "42" in result.output
+
+
+def test_ingest_status_filters_by_account():
+    """--account adds source_account filter to the imports query."""
+    with (
+        patch("maildb.cli.get_status") as mock_status,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        execute_mock = pool_instance.connection.return_value.__enter__.return_value.execute
+        execute_mock.return_value = cursor
+        mock_pool.return_value = pool_instance
+
+        mock_status.return_value = {
+            "split": {},
+            "parse": {},
+            "index": {},
+            "embed": {},
+            "total_emails": 0,
+        }
+        result = runner.invoke(app, ["ingest", "status", "--account", "you@example.com"])
+
+    assert result.exit_code == 0, result.output
+    # Verify the account filter was applied in the SQL params.
+    calls = execute_mock.call_args_list
+    assert any(
+        len(call.args) >= 2 and call.args[1].get("account") == "you@example.com" for call in calls
+    )
 
 
 def test_ingest_reset_requires_yes_or_aborts():
+    """Declining the confirm prompt aborts with exit code 1 and 'Aborted.' message."""
     with (
         patch("maildb.cli.reset_pipeline") as mock_reset,
         patch("maildb.cli.create_pool") as mock_pool,
         patch("maildb.cli.init_db"),
     ):
         mock_pool.return_value = MagicMock()
-        # Without --yes, prompt is auto-aborted by CliRunner with no input.
-        _ = runner.invoke(app, ["ingest", "reset"], input="n\n")
+        result = runner.invoke(app, ["ingest", "reset"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Aborted." in result.output
     assert mock_reset.call_count == 0
 
 
