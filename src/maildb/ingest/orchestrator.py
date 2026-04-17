@@ -245,6 +245,39 @@ def reset_pipeline(pool: ConnectionPool, *, phase: str | None) -> None:
     logger.info("pipeline_reset", phase=phase or "all")
 
 
+def backfill_source_account(pool: ConnectionPool, *, account: str) -> dict[str, Any]:
+    """Tag all emails with NULL source_account using the given account.
+
+    Idempotent: re-running it inserts another (empty) imports row but
+    updates zero email rows. Never overwrites previously-tagged emails.
+    """
+    migration_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status,
+                                    started_at, completed_at)
+               VALUES (%(id)s, %(acct)s, 'migration', 'running', now(), NULL)""",
+            {"id": migration_id, "acct": account},
+        )
+        cur = conn.execute(
+            """UPDATE emails
+               SET source_account = %(acct)s, import_id = %(id)s
+               WHERE source_account IS NULL""",
+            {"id": migration_id, "acct": account},
+        )
+        rows_updated = cur.rowcount
+        conn.execute(
+            """UPDATE imports
+               SET status = 'completed', completed_at = now(),
+                   messages_total = %(n)s, messages_inserted = %(n)s
+               WHERE id = %(id)s""",
+            {"id": migration_id, "n": rows_updated},
+        )
+        conn.commit()
+    logger.info("backfill_complete", account=account, rows_updated=rows_updated)
+    return {"rows_updated": rows_updated, "import_id": migration_id}
+
+
 def get_status(pool: ConnectionPool) -> dict[str, Any]:
     """Get status for all phases."""
     result: dict[str, Any] = {}

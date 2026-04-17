@@ -12,7 +12,12 @@ import typer
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
-from maildb.ingest.orchestrator import get_status, reset_pipeline, run_pipeline
+from maildb.ingest.orchestrator import (
+    backfill_source_account,
+    get_status,
+    reset_pipeline,
+    run_pipeline,
+)
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -220,6 +225,28 @@ def ingest_reset(
     finally:
         pool.close()
     typer.echo(f"Reset complete ({phase or 'full'}).")
+
+
+@ingest_app.command("migrate")
+def ingest_migrate(
+    account: str = typer.Option(
+        ...,
+        "--account",
+        help="Email address to tag legacy rows with.",
+    ),
+) -> None:
+    """Backfill source_account/import_id on rows that lack them."""
+    _validate_account(account)
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        result = backfill_source_account(pool, account=account)
+    finally:
+        pool.close()
+    typer.echo(
+        f"Backfilled {result['rows_updated']} rows with source_account={account}"
+    )
 
 
 if __name__ == "__main__":
