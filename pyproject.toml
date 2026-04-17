@@ -92,7 +92,8 @@ max-complexity = 12
 ]
 "src/maildb/maildb.py" = ["S608", "C901"]  # SQL construction is safe (parameterized); complexity from filter params
 "src/maildb/dsl.py" = ["S608"]  # SQL construction is safe (parameterized, whitelisted)
-"src/maildb/ingest/orchestrator.py" = ["C901"]  # pipeline orchestration is inherently sequential
+"src/maildb/ingest/orchestrator.py" = ["C901", "TRY301"]  # pipeline orchestration is inherently sequential; inline raise for error-phase summary
+"src/maildb/cli.py" = ["B008"]  # typer.Argument/Option in defaults is the standard Typer pattern
 "tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
 
 [tool.ruff.lint.isort]

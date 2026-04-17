@@ -6,9 +6,13 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 import typer
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
@@ -125,7 +129,7 @@ def serve() -> None:
     mcp.run()
 
 
-def _print_imports_summary(pool, account: str | None) -> None:
+def _print_imports_summary(pool: ConnectionPool, account: str | None) -> None:
     """Print a per-import breakdown to stdout."""
     sql = (
         "SELECT started_at, source_account, status, messages_inserted, messages_skipped "
@@ -244,9 +248,7 @@ def ingest_migrate(
         result = backfill_source_account(pool, account=account)
     finally:
         pool.close()
-    typer.echo(
-        f"Backfilled {result['rows_updated']} rows with source_account={account}"
-    )
+    typer.echo(f"Backfilled {result['rows_updated']} rows with source_account={account}")
 
 
 if __name__ == "__main__":

@@ -55,9 +55,7 @@ def test_backfill_is_idempotent(test_pool):
     assert second["rows_updated"] == 0
     # Second call still creates an imports row, but with messages_inserted=0
     with test_pool.connection() as conn:
-        cur = conn.execute(
-            "SELECT count(*) FROM imports WHERE source_file = 'migration'"
-        )
+        cur = conn.execute("SELECT count(*) FROM imports WHERE source_file = 'migration'")
         assert cur.fetchone()[0] == 2
 
 
@@ -69,9 +67,7 @@ def test_backfill_does_not_overwrite_tagged_rows(test_pool):
             "VALUES (%(id)s, %(acct)s, 'preexisting', 'completed')",
             {"id": uuid4(), "acct": "other@example.com"},
         )
-        cur = conn.execute(
-            "SELECT id FROM imports WHERE source_account = 'other@example.com'"
-        )
+        cur = conn.execute("SELECT id FROM imports WHERE source_account = 'other@example.com'")
         existing_iid = cur.fetchone()[0]
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, subject,

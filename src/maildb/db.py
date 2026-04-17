@@ -30,9 +30,7 @@ def init_db(pool: ConnectionPool) -> None:
         null_rows = cur.fetchone()[0]  # type: ignore[index]
         if null_rows == 0:
             try:
-                conn.execute(
-                    "ALTER TABLE emails ALTER COLUMN source_account SET NOT NULL"
-                )
+                conn.execute("ALTER TABLE emails ALTER COLUMN source_account SET NOT NULL")
             except Exception:
                 logger.warning("source_account_not_null_constraint_skipped", exc_info=True)
         else:

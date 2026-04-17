@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
 from maildb.cli import app
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 runner = CliRunner()
 
@@ -50,9 +53,7 @@ def test_ingest_run_passes_account_through(tmp_path: Path) -> None:
     ):
         mock_pool.return_value = MagicMock()
         mock_pipeline.return_value = {}
-        result = runner.invoke(
-            app, ["ingest", "run", str(mbox), "--account", "you@example.com"]
-        )
+        result = runner.invoke(app, ["ingest", "run", str(mbox), "--account", "you@example.com"])
     assert result.exit_code == 0, result.output
     mock_pipeline.assert_called_once()
     kwargs = mock_pipeline.call_args[1]

@@ -41,9 +41,7 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
         assert cur.fetchone()[0] > 0
 
 
-def test_run_pipeline_writes_imports_row_and_stamps_emails(
-    test_pool, test_settings, tmp_path
-):
+def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_settings, tmp_path):
     run_pipeline(
         mbox_path=FIXTURES / "sample.mbox",
         database_url=test_settings.database_url,
@@ -55,9 +53,7 @@ def test_run_pipeline_writes_imports_row_and_stamps_emails(
         source_account="you@example.com",
     )
     with test_pool.connection() as conn:
-        cur = conn.execute(
-            "SELECT source_account, status, messages_inserted FROM imports"
-        )
+        cur = conn.execute("SELECT source_account, status, messages_inserted FROM imports")
         rows = cur.fetchall()
         assert len(rows) == 1
         assert rows[0][0] == "you@example.com"
@@ -65,8 +61,7 @@ def test_run_pipeline_writes_imports_row_and_stamps_emails(
         assert rows[0][2] > 0
 
         cur = conn.execute(
-            "SELECT count(*) FROM emails "
-            "WHERE source_account IS NULL OR import_id IS NULL"
+            "SELECT count(*) FROM emails WHERE source_account IS NULL OR import_id IS NULL"
         )
         assert cur.fetchone()[0] == 0
 

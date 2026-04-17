@@ -1,6 +1,8 @@
 # tests/integration/test_db.py
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from maildb.db import init_db
@@ -93,8 +95,6 @@ def test_indexes_for_multi_account_columns(test_pool) -> None:  # type: ignore[n
 
 
 def test_init_db_tightens_source_account_when_no_nulls(test_pool) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     with test_pool.connection() as conn:
         conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
         conn.execute("DELETE FROM email_attachments")
@@ -127,8 +127,6 @@ def test_init_db_tightens_source_account_when_no_nulls(test_pool) -> None:  # ty
 
 
 def test_init_db_leaves_nullable_when_some_nulls(test_pool) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     with test_pool.connection() as conn:
         conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
         conn.execute("DELETE FROM email_attachments")
