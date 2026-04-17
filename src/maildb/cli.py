@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import structlog
 import typer
 
 from maildb.config import Settings
+from maildb.db import create_pool, init_db
+from maildb.ingest.orchestrator import run_pipeline
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -73,11 +76,80 @@ def _configure_logging(settings: Settings | None = None) -> None:
     )
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_account(account: str) -> str:
+    if not _EMAIL_RE.match(account):
+        msg = f"--account {account!r} is not a valid email address"
+        raise typer.BadParameter(msg)
+    return account
+
+
+def _print_status_dict(status: dict) -> None:
+    """Format and print pipeline status summary to stdout."""
+    lines = [
+        f"{'Phase':<10} {'Total':>6} {'Done':>6} {'Failed':>7} {'In Progress':>12}",
+    ]
+    for phase in ("split", "parse", "index", "embed"):
+        s = status.get(phase, {})
+        lines.append(
+            f"{phase:<10} {s.get('total', 0):>6} {s.get('completed', 0):>6} "
+            f"{s.get('failed', 0):>7} {s.get('in_progress', 0):>12}"
+        )
+    lines.append("")
+    lines.append(f"Messages: {status.get('total_emails', 0):,}")
+    real = status.get("total_embedded_real", status.get("total_embedded", 0))
+    skipped = status.get("total_embedded_skipped", 0)
+    total = status.get("total_emails", 0)
+    if skipped > 0:
+        lines.append(f"Embeddings: {real:,} real + {skipped:,} skipped / {total:,}")
+    else:
+        lines.append(f"Embeddings: {real:,} / {total:,}")
+    lines.append(
+        f"Attachments: {status.get('total_attachments', 0):,} "
+        f"({status.get('total_attachments_unique', 0):,} unique)"
+    )
+    typer.echo("\n".join(lines))
+
+
 @app.command()
 def serve() -> None:
     """Run the MailDB MCP server (stdio transport)."""
     _configure_logging()
     mcp.run()
+
+
+@ingest_app.command("run")
+def ingest_run(
+    mbox_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    account: str = typer.Option(..., "--account", help="Email address of the source account."),
+    skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip the embedding phase."),
+) -> None:
+    """Run the full ingest pipeline for an mbox file."""
+    _validate_account(account)
+    settings = Settings()
+
+    pool = create_pool(settings)
+    init_db(pool)
+    pool.close()
+
+    result = run_pipeline(
+        mbox_path=mbox_path,
+        database_url=settings.database_url,
+        attachment_dir=settings.attachment_dir,
+        tmp_dir=settings.ingest_tmp_dir,
+        chunk_size_bytes=settings.ingest_chunk_size_mb * 1024 * 1024,
+        parse_workers=settings.ingest_workers,
+        embed_workers=settings.embed_workers,
+        embed_batch_size=settings.embed_batch_size,
+        ollama_url=settings.ollama_url,
+        embedding_model=settings.embedding_model,
+        embedding_dimensions=settings.embedding_dimensions,
+        skip_embed=skip_embed,
+        source_account=account,
+    )
+    _print_status_dict(result)
 
 
 if __name__ == "__main__":
