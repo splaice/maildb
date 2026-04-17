@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-
 from typing import Annotated
 
 from pydantic import field_validator, model_validator
@@ -22,7 +21,7 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
     user_email: str | None = None
-    user_emails: Annotated[list[str], NoDecode] = []  # noqa: RUF012
+    user_emails: Annotated[list[str], NoDecode] = []
     attachment_dir: str = "~/maildb/attachments"
     ingest_chunk_size_mb: int = 50
     ingest_tmp_dir: str = "/tmp/maildb-ingest-tmp-dir"  # noqa: S108

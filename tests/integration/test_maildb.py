@@ -5,6 +5,7 @@ import json
 import json as json_mod
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -1193,8 +1194,6 @@ def test_cluster_rejects_both_where_and_ids(test_pool, seed_advanced) -> None:  
 
 
 def test_find_filters_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     db = MailDB._from_pool(test_pool, config=test_settings)
     iid_a = uuid4()
     iid_b = uuid4()
@@ -1231,8 +1230,6 @@ def test_find_filters_by_account(test_pool, test_settings) -> None:  # type: ign
 
 
 def test_top_contacts_scoped_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     config = test_settings.model_copy()
     config.user_emails = ["a@example.com", "b@example.com"]
     db = MailDB._from_pool(test_pool, config=config)
@@ -1276,8 +1273,6 @@ def test_top_contacts_scoped_by_account(test_pool, test_settings) -> None:  # ty
 
 
 def test_long_threads_scoped_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     db = MailDB._from_pool(test_pool, config=test_settings)
     iid_a, iid_b = uuid4(), uuid4()
     with test_pool.connection() as conn:
@@ -1314,8 +1309,6 @@ def test_long_threads_scoped_by_account(test_pool, test_settings) -> None:  # ty
 
 
 def test_accounts_returns_summary(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     db = MailDB._from_pool(test_pool, config=test_settings)
     iid_a, iid_b = uuid4(), uuid4()
     with test_pool.connection() as conn:
@@ -1344,8 +1337,6 @@ def test_accounts_returns_summary(test_pool, test_settings) -> None:  # type: ig
 
 
 def test_import_history_returns_records(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
-    from uuid import uuid4
-
     db = MailDB._from_pool(test_pool, config=test_settings)
     with test_pool.connection() as conn:
         for acct in ["a@example.com", "b@example.com", "a@example.com"]:

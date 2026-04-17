@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from maildb.models import Attachment, Email, Recipients, SearchResult
+from maildb.models import AccountSummary, Attachment, Email, ImportRecord, Recipients, SearchResult
 
 
 def test_recipients_from_dict() -> None:
@@ -101,8 +101,6 @@ def test_email_defaults_when_columns_missing() -> None:
 
 
 def test_account_summary_dataclass_shape() -> None:
-    from maildb.models import AccountSummary
-
     s = AccountSummary(
         source_account="you@example.com",
         email_count=10,
@@ -115,15 +113,11 @@ def test_account_summary_dataclass_shape() -> None:
 
 
 def test_import_record_dataclass_shape() -> None:
-    from datetime import datetime, timezone
-
-    from maildb.models import ImportRecord
-
     r = ImportRecord(
         id=uuid4(),
         source_account="you@example.com",
         source_file="x.mbox",
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         completed_at=None,
         messages_total=0,
         messages_inserted=0,
