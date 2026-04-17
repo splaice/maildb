@@ -77,10 +77,10 @@ def backfill_source_account(pool: ConnectionPool, *, account: str) -> dict[str, 
 
     Idempotent: re-running it inserts another (empty) imports row but
     updates zero email rows. Never overwrites previously-tagged emails.
+    Also mirrors the tagging into the email_accounts join table.
     """
     migration_id = uuid4()
     with pool.connection() as conn:
-        # Insert the synthetic import row so we can FK rows to it.
         conn.execute(
             """INSERT INTO imports (id, source_account, source_file, status,
                                     started_at, completed_at)
@@ -94,6 +94,15 @@ def backfill_source_account(pool: ConnectionPool, *, account: str) -> dict[str, 
             {"id": migration_id, "acct": account},
         )
         rows_updated = cur.rowcount
+        # Mirror into the join table so account-scoped queries see the
+        # backfilled rows without waiting for the next init_db.
+        conn.execute(
+            """INSERT INTO email_accounts (email_id, source_account, import_id)
+               SELECT id, source_account, import_id FROM emails
+               WHERE source_account = %(acct)s AND import_id = %(id)s
+               ON CONFLICT DO NOTHING""",
+            {"id": migration_id, "acct": account},
+        )
         conn.execute(
             """UPDATE imports
                SET status = 'completed', completed_at = now(),

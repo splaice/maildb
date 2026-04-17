@@ -282,6 +282,39 @@ def test_run_pipeline_adopts_orphan_running_import(test_pool, test_settings, tmp
     assert rows[0][1] == "completed"
 
 
+def test_run_pipeline_same_mbox_two_accounts_creates_join_rows(test_pool, test_settings, tmp_path):
+    """Ingesting the same mbox under two different accounts produces one
+    emails row per message but two email_accounts rows per message.
+    """
+    mbox = FIXTURES / "sample.mbox"
+    common = dict(  # noqa: C408
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+    )
+    run_pipeline(source_account="a@example.com", **common)
+    # Wipe parse tasks so the second account reprocesses every chunk.
+    reset_pipeline(test_pool, phase="parse")
+    run_pipeline(source_account="b@example.com", **common)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*) FROM emails")
+        email_count = cur.fetchone()[0]
+        cur = conn.execute("SELECT count(*) FROM email_accounts")
+        ea_count = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT count(DISTINCT email_id) FROM email_accounts "
+            "WHERE source_account = 'b@example.com'"
+        )
+        b_tagged = cur.fetchone()[0]
+    assert ea_count == email_count * 2  # Every email tagged under both.
+    assert b_tagged == email_count
+
+
 def test_run_pipeline_force_new_import(test_pool, test_settings, tmp_path):
     """force_new_import=True bypasses resume and creates a fresh import row."""
     mbox = FIXTURES / "sample.mbox"

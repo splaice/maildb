@@ -196,7 +196,10 @@ class MailDB:
             )
             params["max_recipients"] = max_recipients
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
 
         return conditions, params
@@ -438,7 +441,10 @@ class MailDB:
             exclude_outbound = ""
 
         if account is not None:
-            account_cond = "AND source_account = %(account)s"
+            account_cond = (
+                "AND EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         else:
             account_cond = ""
@@ -525,17 +531,21 @@ class MailDB:
         return rows, total
 
     def accounts(self) -> list[AccountSummary]:
-        """Summarize email counts per source_account."""
+        """Summarize email counts per source_account.
+
+        Sourced from the email_accounts join table, so a message that was
+        ingested under multiple accounts counts for each.
+        """
         sql = """
             SELECT
-                source_account,
-                COUNT(*)                  AS email_count,
-                MIN(date)                 AS first_date,
-                MAX(date)                 AS last_date,
-                COUNT(DISTINCT import_id) AS import_count
-            FROM emails
-            WHERE source_account IS NOT NULL
-            GROUP BY source_account
+                ea.source_account,
+                COUNT(DISTINCT ea.email_id) AS email_count,
+                MIN(e.date)                 AS first_date,
+                MAX(e.date)                 AS last_date,
+                COUNT(DISTINCT ea.import_id) AS import_count
+            FROM email_accounts ea
+            JOIN emails e ON e.id = ea.email_id
+            GROUP BY ea.source_account
             ORDER BY email_count DESC
         """
         rows = _query_dicts(self._pool, sql)
@@ -778,7 +788,10 @@ class MailDB:
                 conditions.append("e.sender_domain = %(sender_domain)s")
                 params["sender_domain"] = sender_domain
             if account is not None:
-                conditions.append("e.source_account = %(account)s")
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM email_accounts ea "
+                    "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
+                )
                 params["account"] = account
 
             where = " AND ".join(conditions)
@@ -810,7 +823,10 @@ class MailDB:
                 conditions.append("e.date < %(before)s")
                 params["before"] = before
             if account is not None:
-                conditions.append("e.source_account = %(account)s")
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM email_accounts ea "
+                    "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
+                )
                 params["account"] = account
 
             if recipient:
@@ -943,7 +959,10 @@ class MailDB:
             conditions.append("date < %(before)s")
             params["before"] = before
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         # Recipient count filters
         rcpt_conditions, rcpt_params = self._build_filters(
@@ -1011,7 +1030,10 @@ class MailDB:
             conditions.append("date >= %(after)s")
             params["after"] = after
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         where = " AND ".join(conditions) if conditions else "TRUE"
         having_participant = ""

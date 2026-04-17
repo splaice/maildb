@@ -64,6 +64,7 @@ def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
         conn.execute("DELETE FROM email_attachments")
         conn.execute("DELETE FROM attachments")
         conn.execute("DELETE FROM ingest_tasks")
+        conn.execute("DELETE FROM email_accounts")
         conn.execute("DELETE FROM emails")
         conn.execute("DELETE FROM imports")
         conn.commit()
@@ -98,13 +99,14 @@ def multi_account_seed(test_pool):  # type: ignore[no-untyped-def]
             ("<cross-2@example.com>", "thread-cross", "carol@example.com", "b@example.com", iid_b),
         ]
         for mid, tid, sender, acct, iid in rows:
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, sender_address,
                        sender_domain, date, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, %(tid)s, %(sender)s, %(domain)s,
                        now(), %(acct)s, %(iid)s, now())""",
                 {
-                    "id": uuid4(),
+                    "id": eid,
                     "mid": mid,
                     "tid": tid,
                     "sender": sender,
@@ -113,24 +115,32 @@ def multi_account_seed(test_pool):  # type: ignore[no-untyped-def]
                     "iid": iid,
                 },
             )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
+            )
 
-        # Duplicate message_id — second insert no-ops via ON CONFLICT.
-        # Insert in A first so A wins.
+        # Same message_id ingested by both accounts — emails row is de-duped,
+        # but email_accounts gets one row per account (true multi-account).
+        dup_eid = uuid4()
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, sender_address,
                    date, source_account, import_id, created_at)
                VALUES (%(id)s, '<dup@example.com>', 't-dup', 'x@example.com',
                    now(), 'a@example.com', %(iid)s, now())
-               ON CONFLICT (message_id) DO NOTHING""",
-            {"id": uuid4(), "iid": iid_a},
+               ON CONFLICT (message_id) DO UPDATE SET thread_id = emails.thread_id
+               RETURNING id""",
+            {"id": dup_eid, "iid": iid_a},
         )
-        conn.execute(
-            """INSERT INTO emails (id, message_id, thread_id, sender_address,
-                   date, source_account, import_id, created_at)
-               VALUES (%(id)s, '<dup@example.com>', 't-dup', 'x@example.com',
-                   now(), 'b@example.com', %(iid)s, now())
-               ON CONFLICT (message_id) DO NOTHING""",
-            {"id": uuid4(), "iid": iid_b},
-        )
+        dup_eid = conn.execute(
+            "SELECT id FROM emails WHERE message_id = '<dup@example.com>'"
+        ).fetchone()[0]
+        for acct, iid in [("a@example.com", iid_a), ("b@example.com", iid_b)]:
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s) ON CONFLICT DO NOTHING",
+                {"eid": dup_eid, "acct": acct, "iid": iid},
+            )
         conn.commit()
     return {"iid_a": iid_a, "iid_b": iid_b}
