@@ -55,6 +55,8 @@ class Email:
     in_reply_to: str | None
     references: list[str]
     embedding: list[float] | None
+    source_account: str | None
+    import_id: UUID | None
     created_at: datetime
 
     @classmethod
@@ -106,6 +108,8 @@ class Email:
             in_reply_to=row.get("in_reply_to"),
             references=row.get("references") or [],
             embedding=_parse_embedding(row.get("embedding")),
+            source_account=row.get("source_account"),
+            import_id=row.get("import_id"),
             created_at=row["created_at"],
         )
 

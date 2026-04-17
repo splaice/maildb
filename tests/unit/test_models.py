@@ -80,3 +80,21 @@ def test_search_result() -> None:
     sr = SearchResult(email=email, similarity=0.95)
     assert sr.similarity == 0.95
     assert sr.email.subject == "Test"
+
+
+def test_email_includes_source_account_and_import_id() -> None:
+    iid = uuid4()
+    row = _make_row()
+    row["source_account"] = "you@example.com"
+    row["import_id"] = iid
+    email = Email.from_row(row)
+    assert email.source_account == "you@example.com"
+    assert email.import_id == iid
+
+
+def test_email_defaults_when_columns_missing() -> None:
+    """Backwards compat: from_row with no source_account/import_id keys."""
+    row = _make_row()
+    email = Email.from_row(row)
+    assert email.source_account is None
+    assert email.import_id is None

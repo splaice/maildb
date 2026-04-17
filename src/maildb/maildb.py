@@ -33,7 +33,8 @@ VALID_ORDERS = {
 SELECT_COLS = """
     id, message_id, thread_id, subject, sender_name, sender_address,
     sender_domain, recipients, date, body_text, body_html, has_attachment,
-    attachments, labels, in_reply_to, "references", embedding, created_at
+    attachments, labels, in_reply_to, "references", embedding,
+    source_account, import_id, created_at
 """
 
 
@@ -644,7 +645,8 @@ class MailDB:
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
             e.sender_domain, e.recipients, e.date, e.body_text, e.body_html, e.has_attachment,
-            e.attachments, e.labels, e.in_reply_to, e."references", e.embedding, e.created_at
+            e.attachments, e.labels, e.in_reply_to, e."references", e.embedding,
+            e.source_account, e.import_id, e.created_at
         """
 
         if direction == "inbound":
