@@ -130,6 +130,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
         """Build WHERE-clause conditions and params from common filter kwargs."""
         if direct_only and (max_to is not None or max_cc is not None):
@@ -192,6 +193,9 @@ class MailDB:
                 ") <= %(max_recipients)s"
             )
             params["max_recipients"] = max_recipients
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
 
         return conditions, params
 
@@ -227,6 +231,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Structured query with dynamic WHERE clauses. Returns (emails, total_count)."""
         if order not in VALID_ORDERS:
@@ -246,6 +251,7 @@ class MailDB:
             max_cc=max_cc,
             max_recipients=max_recipients,
             direct_only=direct_only,
+            account=account,
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
@@ -277,6 +283,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[SearchResult], int]:
         """Semantic search with optional structured filters. Returns (results, total_count)."""
         query_embedding = self._embedding_client.embed(query)
@@ -294,6 +301,7 @@ class MailDB:
             max_cc=max_cc,
             max_recipients=max_recipients,
             direct_only=direct_only,
+            account=account,
         )
         conditions.insert(0, "embedding IS NOT NULL AND vector_norm(embedding) > 0")
         params["query_embedding"] = str(query_embedding)
@@ -802,6 +810,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Case-insensitive keyword search in body_text and subject. Returns (emails, total_count).
         Unlike search(), uses ILIKE (substring match) and does not require Ollama.
@@ -824,6 +833,9 @@ class MailDB:
         if before:
             conditions.append("date < %(before)s")
             params["before"] = before
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
         # Recipient count filters
         rcpt_conditions, rcpt_params = self._build_filters(
             max_to=max_to,

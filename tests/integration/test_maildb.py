@@ -1190,3 +1190,41 @@ def test_cluster_rejects_both_where_and_ids(test_pool, seed_advanced) -> None:  
             where={"field": "sender_domain", "eq": "corp.com"},
             message_ids=["adv-1@example.com"],
         )
+
+
+def test_find_filters_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    from uuid import uuid4
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a = uuid4()
+    iid_b = uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 'test', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (iid, acct) in enumerate(
+            [(iid_a, "a@example.com"), (iid_a, "a@example.com"), (iid_b, "b@example.com")]
+        ):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', 'T', 'x@example.com',
+                       now(), %(acct)s, %(iid)s, now())""",
+                {
+                    "id": uuid4(),
+                    "mid": f"<find-acct-{n}@example.com>",
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+        conn.commit()
+
+    a_only, _ = db.find(account="a@example.com")
+    assert len(a_only) == 2
+    assert all(e.source_account == "a@example.com" for e in a_only)
+
+    all_emails, _ = db.find()
+    assert len(all_emails) == 3
