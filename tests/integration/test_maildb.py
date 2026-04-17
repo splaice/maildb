@@ -1256,3 +1256,46 @@ def test_mention_search_filters_by_account(test_pool, test_settings):
 
     all_emails, _ = db.mention_search(text="budget")
     assert len(all_emails) == 3
+
+
+def test_top_contacts_scoped_by_account(test_pool, test_settings):
+    config = test_settings.model_copy()
+    config.user_emails = ["a@example.com", "b@example.com"]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        # Inbound to A from alice; inbound to B from bob.
+        for sender, acct, iid in [
+            ("alice@x.com", "a@example.com", iid_a),
+            ("alice@x.com", "a@example.com", iid_a),
+            ("bob@y.com", "b@example.com", iid_b),
+        ]:
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', %(sender)s,
+                       now(), %(acct)s, %(iid)s, now())""",
+                {
+                    "id": uuid4(),
+                    "mid": f"<topc-{uuid4()}@x>",
+                    "sender": sender,
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+        conn.commit()
+
+    a_results, _ = db.top_contacts(account="a@example.com", direction="inbound")
+    addrs = {r["address"] for r in a_results}
+    assert addrs == {"alice@x.com"}
+
+    all_results, _ = db.top_contacts(direction="inbound")
+    addrs = {r["address"] for r in all_results}
+    assert addrs == {"alice@x.com", "bob@y.com"}
