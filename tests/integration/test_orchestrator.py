@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from maildb.ingest import orchestrator
 from maildb.ingest.orchestrator import count_unembedded, get_status, reset_pipeline, run_pipeline
 from maildb.ingest.tasks import complete_task, create_task
 
@@ -113,6 +114,74 @@ def test_reset_parse_phase(test_pool):
         assert cur.fetchone()[0] == 0
         cur = conn.execute("SELECT count(*) FROM emails")
         assert cur.fetchone()[0] == 0
+
+
+def test_run_pipeline_does_not_orphan_import_row_on_restart(test_pool, test_settings, tmp_path):
+    """Regression: the restart path (split_status total > 0, completed == 0)
+    must not leak an orphaned 'running' imports row.
+    """
+    # Simulate stale split state to trigger the restart branch.
+    create_task(test_pool, phase="split")
+    create_task(test_pool, phase="parse", chunk_path="/tmp/fake.chunk")
+    # Clean imports table before our run.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="restart@example.com",
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*), max(status) FROM imports")
+        count, status = cur.fetchone()
+        assert count == 1, f"Expected 1 imports row after restart, got {count}"
+        assert status == "completed"
+
+
+def test_run_pipeline_marks_import_failed_on_exception(
+    test_pool, test_settings, tmp_path, monkeypatch
+):
+    """On exception during the pipeline, the imports row should end up
+    status='failed' with completed_at set, and the exception should re-raise.
+    """
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated index failure")
+
+    monkeypatch.setattr(orchestrator, "run_index_phase", _boom)
+
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="simulated index failure"):
+        run_pipeline(
+            mbox_path=FIXTURES / "sample.mbox",
+            database_url=test_settings.database_url,
+            attachment_dir=tmp_path / "attachments",
+            tmp_dir=tmp_path / "chunks",
+            chunk_size_bytes=50 * 1024 * 1024,
+            parse_workers=2,
+            skip_embed=True,
+            source_account="failed@example.com",
+        )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status, completed_at FROM imports WHERE source_account = 'failed@example.com'"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "failed"
+        assert rows[0][1] is not None
 
 
 def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_settings, tmp_path):

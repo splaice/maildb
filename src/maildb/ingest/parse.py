@@ -51,6 +51,9 @@ def process_chunk(
     pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=1, open=True)
     worker_id = str(os.getpid())
     chunks_processed = 0
+    # Cache source_account lookups per import_id to avoid redundant SELECTs
+    # on the imports table: every chunk from one import shares the same account.
+    account_cache: dict[Any, str] = {}
 
     try:
         while True:
@@ -60,7 +63,9 @@ def process_chunk(
             task_id = claimed["id"]
             chunk_path = claimed["chunk_path"]
             import_id = claimed["import_id"]
-            source_account = _lookup_source_account(pool, import_id)
+            if import_id not in account_cache:
+                account_cache[import_id] = _lookup_source_account(pool, import_id)
+            source_account = account_cache[import_id]
             try:
                 _process_single_chunk(
                     pool,

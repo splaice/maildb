@@ -53,35 +53,16 @@ def run_pipeline(
 
     pool = _get_pool(database_url)
     import_id: UUID = uuid4()
+    import_row_created = False
 
     try:
-        with pool.connection() as conn:
-            conn.execute(
-                """INSERT INTO imports (id, source_account, source_file, status)
-                   VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
-                {"id": import_id, "account": source_account, "file": str(mbox_path)},
-            )
-            conn.commit()
-
         try:
-            # Phase 1: Split
+            # Phase 1: Split — may early-return via recursive restart.
+            # The imports row is NOT inserted yet: on restart, the recursive
+            # call will own its own row. This prevents orphaning the outer
+            # row in status='running' forever.
             split_status = get_phase_status(pool, "split")
-            if split_status["total"] == 0:
-                logger.info("phase_start", phase="split")
-                split_task = create_task(pool, phase="split", import_id=import_id)
-                chunks = split_mbox(
-                    mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes
-                )
-                for chunk_path in chunks:
-                    create_task(
-                        pool,
-                        phase="parse",
-                        chunk_path=str(chunk_path),
-                        import_id=import_id,
-                    )
-                complete_task(pool, split_task["id"], messages_total=len(chunks))
-                logger.info("phase_complete", phase="split", chunks=len(chunks))
-            elif split_status["completed"] == 0:
+            if split_status["total"] > 0 and split_status["completed"] == 0:
                 logger.info("split_incomplete_restarting")
                 with pool.connection() as conn:
                     conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
@@ -102,6 +83,32 @@ def run_pipeline(
                     embedding_dimensions=embedding_dimensions,
                     skip_embed=skip_embed,
                 )
+
+            # Restart check passed — now safe to claim the imports row.
+            with pool.connection() as conn:
+                conn.execute(
+                    """INSERT INTO imports (id, source_account, source_file, status)
+                       VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+                    {"id": import_id, "account": source_account, "file": str(mbox_path)},
+                )
+                conn.commit()
+            import_row_created = True
+
+            if split_status["total"] == 0:
+                logger.info("phase_start", phase="split")
+                split_task = create_task(pool, phase="split", import_id=import_id)
+                chunks = split_mbox(
+                    mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes
+                )
+                for chunk_path in chunks:
+                    create_task(
+                        pool,
+                        phase="parse",
+                        chunk_path=str(chunk_path),
+                        import_id=import_id,
+                    )
+                complete_task(pool, split_task["id"], messages_total=len(chunks))
+                logger.info("phase_complete", phase="split", chunks=len(chunks))
 
             # Phase 2: Parse
             reset_failed_tasks(pool, phase="parse")
@@ -194,15 +201,18 @@ def run_pipeline(
                 )
                 conn.commit()
         except Exception:
-            # On failure, mark imports row as failed
-            with pool.connection() as conn:
-                conn.execute(
-                    """UPDATE imports
-                       SET status='failed', completed_at=now()
-                       WHERE id=%(id)s""",
-                    {"id": import_id},
-                )
-                conn.commit()
+            # On failure, mark imports row as failed — but only if we got
+            # far enough to insert it. An exception during the split/restart
+            # branch fires before the row exists.
+            if import_row_created:
+                with pool.connection() as conn:
+                    conn.execute(
+                        """UPDATE imports
+                           SET status='failed', completed_at=now()
+                           WHERE id=%(id)s""",
+                        {"id": import_id},
+                    )
+                    conn.commit()
             raise
     finally:
         pool.close()
