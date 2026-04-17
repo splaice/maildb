@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import model_validator
-from pydantic_settings import BaseSettings
+from typing import Annotated
+
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
@@ -20,6 +22,7 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768
     user_email: str | None = None
+    user_emails: Annotated[list[str], NoDecode] = []  # noqa: RUF012
     attachment_dir: str = "~/maildb/attachments"
     ingest_chunk_size_mb: int = 50
     ingest_tmp_dir: str = "/tmp/maildb-ingest-tmp-dir"  # noqa: S108
@@ -32,10 +35,25 @@ class Settings(BaseSettings):
     debug_log_level: str = "DEBUG"
     debug_log_max_bytes: int = 10_485_760  # 10MB
 
+    @field_validator("user_emails", mode="before")
+    @classmethod
+    def _split_user_emails(cls, v: object) -> object:
+        """Accept a comma-separated string for MAILDB_USER_EMAILS."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
     @model_validator(mode="after")
     def _expand_paths(self) -> Settings:
         """Expand ~ and resolve relative paths for directory settings."""
         self.attachment_dir = str(Path(self.attachment_dir).expanduser())
         self.ingest_tmp_dir = str(Path(self.ingest_tmp_dir).expanduser())
         self.debug_log = str(Path(self.debug_log).expanduser())
+        return self
+
+    @model_validator(mode="after")
+    def _merge_legacy_user_email(self) -> Settings:
+        """Merge legacy singular user_email into user_emails list."""
+        if self.user_email and self.user_email not in self.user_emails:
+            self.user_emails = [self.user_email, *self.user_emails]
         return self
