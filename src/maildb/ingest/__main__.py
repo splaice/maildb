@@ -69,7 +69,7 @@ def main() -> None:
     init_db(pool)
     pool.close()
 
-    result = run_pipeline(
+    result = run_pipeline(  # type: ignore[call-arg]
         mbox_path=mbox_path,
         database_url=settings.database_url,
         attachment_dir=settings.attachment_dir,

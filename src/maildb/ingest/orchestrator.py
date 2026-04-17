@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
 
 import structlog
 from psycopg_pool import ConnectionPool
@@ -36,6 +37,7 @@ def run_pipeline(
     database_url: str,
     attachment_dir: Path | str,
     tmp_dir: Path | str,
+    source_account: str,
     chunk_size_bytes: int = 50 * 1024 * 1024,
     parse_workers: int = -1,
     embed_workers: int = 4,
@@ -50,114 +52,158 @@ def run_pipeline(
         parse_workers = max(1, (os.cpu_count() or 2) - 1)
 
     pool = _get_pool(database_url)
+    import_id: UUID = uuid4()
 
     try:
-        # Phase 1: Split
-        split_status = get_phase_status(pool, "split")
-        if split_status["total"] == 0:
-            logger.info("phase_start", phase="split")
-            split_task = create_task(pool, phase="split")
-            chunks = split_mbox(mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes)
-            for chunk_path in chunks:
-                create_task(pool, phase="parse", chunk_path=str(chunk_path))
-            complete_task(pool, split_task["id"], messages_total=len(chunks))
-            logger.info("phase_complete", phase="split", chunks=len(chunks))
-        elif split_status["completed"] == 0:
-            logger.info("split_incomplete_restarting")
-            with pool.connection() as conn:
-                conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
-                conn.commit()
-            pool.close()
-            return run_pipeline(
-                mbox_path=mbox_path,
-                database_url=database_url,
-                attachment_dir=attachment_dir,
-                tmp_dir=tmp_dir,
-                chunk_size_bytes=chunk_size_bytes,
-                parse_workers=parse_workers,
-                embed_workers=embed_workers,
-                embed_batch_size=embed_batch_size,
-                ollama_url=ollama_url,
-                embedding_model=embedding_model,
-                embedding_dimensions=embedding_dimensions,
-                skip_embed=skip_embed,
+        with pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO imports (id, source_account, source_file, status)
+                   VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+                {"id": import_id, "account": source_account, "file": str(mbox_path)},
             )
+            conn.commit()
 
-        # Phase 2: Parse
-        reset_failed_tasks(pool, phase="parse")
-        parse_status = get_phase_status(pool, "parse")
-        if parse_status["pending"] > 0 or parse_status["in_progress"] > 0:
-            logger.info("phase_start", phase="parse", pending=parse_status["pending"])
-            drop_non_unique_indexes(pool)
-
-            with ProcessPoolExecutor(max_workers=parse_workers) as executor:
-                futures = [
-                    executor.submit(
-                        process_chunk,
-                        database_url=database_url,
-                        attachment_dir=attachment_dir,
+        try:
+            # Phase 1: Split
+            split_status = get_phase_status(pool, "split")
+            if split_status["total"] == 0:
+                logger.info("phase_start", phase="split")
+                split_task = create_task(pool, phase="split", import_id=import_id)
+                chunks = split_mbox(
+                    mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes
+                )
+                for chunk_path in chunks:
+                    create_task(
+                        pool,
+                        phase="parse",
+                        chunk_path=str(chunk_path),
+                        import_id=import_id,
                     )
-                    for _ in range(parse_workers)
-                ]
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception:
-                        logger.exception("parse_worker_crashed")
+                complete_task(pool, split_task["id"], messages_total=len(chunks))
+                logger.info("phase_complete", phase="split", chunks=len(chunks))
+            elif split_status["completed"] == 0:
+                logger.info("split_incomplete_restarting")
+                with pool.connection() as conn:
+                    conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
+                    conn.commit()
+                pool.close()
+                return run_pipeline(
+                    mbox_path=mbox_path,
+                    database_url=database_url,
+                    attachment_dir=attachment_dir,
+                    tmp_dir=tmp_dir,
+                    source_account=source_account,
+                    chunk_size_bytes=chunk_size_bytes,
+                    parse_workers=parse_workers,
+                    embed_workers=embed_workers,
+                    embed_batch_size=embed_batch_size,
+                    ollama_url=ollama_url,
+                    embedding_model=embedding_model,
+                    embedding_dimensions=embedding_dimensions,
+                    skip_embed=skip_embed,
+                )
 
-            logger.info("phase_complete", phase="parse")
+            # Phase 2: Parse
+            reset_failed_tasks(pool, phase="parse")
+            parse_status = get_phase_status(pool, "parse")
+            if parse_status["pending"] > 0 or parse_status["in_progress"] > 0:
+                logger.info("phase_start", phase="parse", pending=parse_status["pending"])
+                drop_non_unique_indexes(pool)
 
-        parse_status = get_phase_status(pool, "parse")
-        if parse_status["failed"] > 0:
-            logger.error("parse_phase_has_permanent_failures", failed=parse_status["failed"])
-            msg = (
-                f"Parse phase has {parse_status['failed']} permanently failed tasks. "
-                "Fix errors and retry."
-            )
-            raise RuntimeError(msg)
-
-        # Phase 3: Index
-        index_status = get_phase_status(pool, "index")
-        if index_status["completed"] == 0:
-            logger.info("phase_start", phase="index")
-            index_task = create_task(pool, phase="index")
-            run_index_phase(pool, include_hnsw=False)
-            complete_task(pool, index_task["id"])
-            logger.info("phase_complete", phase="index")
-
-        # Phase 4: Embed
-        if not skip_embed:
-            unembedded = count_unembedded(pool)
-            if unembedded > 0:
-                logger.info("phase_start", phase="embed", unembedded=unembedded)
-
-                embed_status = get_phase_status(pool, "embed")
-                if embed_status["in_progress"] == 0:
-                    embed_task = create_task(pool, phase="embed")
-                    task_id = embed_task["id"]
-                else:
-                    task_id = None
-
-                with ProcessPoolExecutor(max_workers=embed_workers) as executor:
+                with ProcessPoolExecutor(max_workers=parse_workers) as executor:
                     futures = [
                         executor.submit(
-                            embed_worker,
+                            process_chunk,
                             database_url=database_url,
-                            ollama_url=ollama_url,
-                            embedding_model=embedding_model,
-                            embedding_dimensions=embedding_dimensions,
-                            batch_size=embed_batch_size,
-                            _progress_total=unembedded,
+                            attachment_dir=attachment_dir,
                         )
-                        for _ in range(embed_workers)
+                        for _ in range(parse_workers)
                     ]
-                    total_embedded = sum(f.result() for f in futures)
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception:
+                            logger.exception("parse_worker_crashed")
 
-                if task_id is not None:
-                    complete_task(pool, task_id, messages_total=total_embedded)
-                create_hnsw_index(pool)
-                logger.info("phase_complete", phase="embed", total=total_embedded)
+                logger.info("phase_complete", phase="parse")
 
+            parse_status = get_phase_status(pool, "parse")
+            if parse_status["failed"] > 0:
+                logger.error("parse_phase_has_permanent_failures", failed=parse_status["failed"])
+                msg = (
+                    f"Parse phase has {parse_status['failed']} permanently failed tasks. "
+                    "Fix errors and retry."
+                )
+                raise RuntimeError(msg)  # noqa: TRY301
+
+            # Phase 3: Index
+            index_status = get_phase_status(pool, "index")
+            if index_status["completed"] == 0:
+                logger.info("phase_start", phase="index")
+                index_task = create_task(pool, phase="index", import_id=import_id)
+                run_index_phase(pool, include_hnsw=False)
+                complete_task(pool, index_task["id"])
+                logger.info("phase_complete", phase="index")
+
+            # Phase 4: Embed
+            if not skip_embed:
+                unembedded = count_unembedded(pool)
+                if unembedded > 0:
+                    logger.info("phase_start", phase="embed", unembedded=unembedded)
+
+                    embed_status = get_phase_status(pool, "embed")
+                    if embed_status["in_progress"] == 0:
+                        embed_task = create_task(pool, phase="embed", import_id=import_id)
+                        task_id = embed_task["id"]
+                    else:
+                        task_id = None
+
+                    with ProcessPoolExecutor(max_workers=embed_workers) as executor:
+                        futures = [
+                            executor.submit(
+                                embed_worker,
+                                database_url=database_url,
+                                ollama_url=ollama_url,
+                                embedding_model=embedding_model,
+                                embedding_dimensions=embedding_dimensions,
+                                batch_size=embed_batch_size,
+                                _progress_total=unembedded,
+                            )
+                            for _ in range(embed_workers)
+                        ]
+                        total_embedded = sum(f.result() for f in futures)
+
+                    if task_id is not None:
+                        complete_task(pool, task_id, messages_total=total_embedded)
+                    create_hnsw_index(pool)
+                    logger.info("phase_complete", phase="embed", total=total_embedded)
+
+            # On success, finalize the imports row.
+            with pool.connection() as conn:
+                cur = conn.execute(
+                    "SELECT count(*) FROM emails WHERE import_id = %(id)s",
+                    {"id": import_id},
+                )
+                inserted = cur.fetchone()[0]  # type: ignore[index]
+                conn.execute(
+                    """UPDATE imports
+                       SET status='completed', completed_at=now(),
+                           messages_total=%(t)s, messages_inserted=%(t)s
+                       WHERE id=%(id)s""",
+                    {"id": import_id, "t": inserted},
+                )
+                conn.commit()
+        except Exception:
+            # On failure, mark imports row as failed
+            with pool.connection() as conn:
+                conn.execute(
+                    """UPDATE imports
+                       SET status='failed', completed_at=now()
+                       WHERE id=%(id)s""",
+                    {"id": import_id},
+                )
+                conn.commit()
+            raise
     finally:
         pool.close()
 

@@ -13,14 +13,15 @@ def create_task(
     *,
     phase: str,
     chunk_path: str | None = None,
+    import_id: Any = None,
 ) -> dict[str, Any]:
     """Insert a new task row and return it."""
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """INSERT INTO ingest_tasks (phase, chunk_path)
-               VALUES (%(phase)s, %(chunk_path)s)
+            """INSERT INTO ingest_tasks (phase, chunk_path, import_id)
+               VALUES (%(phase)s, %(chunk_path)s, %(import_id)s)
                RETURNING *""",
-            {"phase": phase, "chunk_path": chunk_path},
+            {"phase": phase, "chunk_path": chunk_path, "import_id": import_id},
         )
         row = cur.fetchone()
         conn.commit()

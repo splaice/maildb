@@ -33,6 +33,7 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
         chunk_size_bytes=50 * 1024 * 1024,
         parse_workers=2,
         skip_embed=True,
+        source_account="test@example.com",
     )
     assert result["parse"]["completed"] > 0
     with test_pool.connection() as conn:
@@ -111,4 +112,35 @@ def test_reset_parse_phase(test_pool):
         )
         assert cur.fetchone()[0] == 0
         cur = conn.execute("SELECT count(*) FROM emails")
+        assert cur.fetchone()[0] == 0
+
+
+def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_settings, tmp_path):
+    # Clear any imports rows left over from prior tests — conftest's _clean_emails
+    # fixture doesn't touch the imports table.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="you@example.com",
+    )
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT source_account, status, messages_inserted FROM imports")
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "you@example.com"
+        assert rows[0][1] == "completed"
+        assert rows[0][2] > 0
+
+        cur = conn.execute(
+            "SELECT count(*) FROM emails WHERE source_account IS NULL OR import_id IS NULL"
+        )
         assert cur.fetchone()[0] == 0

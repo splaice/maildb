@@ -102,7 +102,7 @@ def ingest_run(
     init_db(pool)
     pool.close()
 
-    result = run_pipeline(  # type: ignore[call-arg]
+    result = run_pipeline(
         mbox_path=mbox_path,
         database_url=settings.database_url,
         attachment_dir=settings.attachment_dir,
@@ -115,7 +115,7 @@ def ingest_run(
         embedding_model=settings.embedding_model,
         embedding_dimensions=settings.embedding_dimensions,
         skip_embed=skip_embed,
-        source_account=account,  # added to run_pipeline signature in Task 2.4
+        source_account=account,
     )
     _print_status_dict(result)
 
