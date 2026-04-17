@@ -228,12 +228,18 @@ def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_se
         source_account="re-run@example.com",
     )
     run_pipeline(**common_kwargs)
-    # Wipe pipeline state so the second run replays without `split_complete` short-circuiting.
-    reset_pipeline(test_pool, phase="parse")
+    # Wipe ingest_tasks (but keep emails) so the second run replays the parse
+    # phase and exercises the ON CONFLICT dedup path.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM ingest_tasks")
+        conn.commit()
     run_pipeline(**common_kwargs)
 
     with test_pool.connection() as conn:
         cur = conn.execute(
-            "SELECT count(*) FROM imports WHERE source_account = 're-run@example.com'"
+            """SELECT count(*), sum(messages_skipped)
+               FROM imports WHERE source_account = 're-run@example.com'"""
         )
-        assert cur.fetchone()[0] == 2
+        count, total_skipped = cur.fetchone()
+        assert count == 2
+        assert total_skipped > 0, "Second import should have recorded skipped duplicates"

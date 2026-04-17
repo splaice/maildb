@@ -226,12 +226,19 @@ def run_pipeline(
                     {"id": import_id},
                 )
                 inserted = cur.fetchone()[0]  # type: ignore[index]
+                cur = conn.execute(
+                    "SELECT COALESCE(SUM(messages_skipped), 0) FROM ingest_tasks "
+                    "WHERE import_id = %(id)s AND phase = 'parse'",
+                    {"id": import_id},
+                )
+                skipped = cur.fetchone()[0]  # type: ignore[index]
                 conn.execute(
                     """UPDATE imports
                        SET status='completed', completed_at=now(),
-                           messages_total=%(t)s, messages_inserted=%(t)s
+                           messages_total=%(t)s, messages_inserted=%(t)s,
+                           messages_skipped=%(s)s
                        WHERE id=%(id)s""",
-                    {"id": import_id, "t": inserted},
+                    {"id": import_id, "t": inserted, "s": skipped},
                 )
                 conn.commit()
         except Exception:

@@ -20,7 +20,7 @@ uv sync
 
 # Copy and edit environment config
 cp .env.example .env
-# Edit .env — set MAILDB_DATABASE_URL and MAILDB_USER_EMAIL at minimum
+# Edit .env — set MAILDB_DATABASE_URL and MAILDB_USER_EMAILS at minimum
 ```
 
 ### Database setup
@@ -85,7 +85,8 @@ All settings are controlled via environment variables (prefixed `MAILDB_`) or a 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAILDB_DATABASE_URL` | `postgresql://maildb@localhost:5432/maildb` | PostgreSQL connection string |
-| `MAILDB_USER_EMAIL` | (none) | Your email address — required for `unreplied()` and `top_contacts()` |
+| `MAILDB_USER_EMAILS` | (none) | Comma-separated list of your email addresses — required for `unreplied()` and `top_contacts()`. Supports multiple accounts (e.g. `you@example.com,you@work.com`). |
+| `MAILDB_USER_EMAIL` | (none) | Backwards-compat alias for `MAILDB_USER_EMAILS`. Accepts a single address; prefer `MAILDB_USER_EMAILS` for new setups. |
 | `MAILDB_OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `MAILDB_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model for embeddings |
 
