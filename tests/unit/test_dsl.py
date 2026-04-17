@@ -339,6 +339,65 @@ class TestSources:
                 }
             )
 
+    def test_emails_by_account_has_cte(self) -> None:
+        sql, _ = parse_query({"from": "emails_by_account"})
+        assert "WITH source AS" in sql
+        assert "JOIN email_accounts" in sql
+        assert "FROM source" in sql
+
+    def test_emails_by_account_allows_account_column(self) -> None:
+        sql, params = parse_query(
+            {
+                "from": "emails_by_account",
+                "where": {"field": "account", "op": "eq", "value": "you@example.com"},
+            }
+        )
+        assert "account = %(__p0)s" in sql
+        assert params["__p0"] == "you@example.com"
+
+    def test_emails_by_account_allows_first_seen_at(self) -> None:
+        sql, _ = parse_query(
+            {
+                "from": "emails_by_account",
+                "where": {"field": "first_seen_at", "op": "gte", "value": "2025-01-01"},
+            }
+        )
+        assert "first_seen_at >= %(__p0)s" in sql
+
+    def test_emails_by_account_allows_account_import_id(self) -> None:
+        sql, _ = parse_query(
+            {
+                "from": "emails_by_account",
+                "where": {"field": "account_import_id", "op": "is_null", "value": False},
+            }
+        )
+        assert "account_import_id IS NOT NULL" in sql
+
+    def test_emails_by_account_exposes_email_columns(self) -> None:
+        """Every email column is still usable alongside the account columns."""
+        sql, _ = parse_query(
+            {
+                "from": "emails_by_account",
+                "where": {
+                    "and": [
+                        {"field": "account", "op": "eq", "value": "a@example.com"},
+                        {"field": "sender_domain", "op": "eq", "value": "stripe.com"},
+                    ]
+                },
+            }
+        )
+        assert "account = %(__p0)s" in sql
+        assert "sender_domain = %(__p1)s" in sql
+
+    def test_emails_source_rejects_account_column(self) -> None:
+        """'account' is only valid on emails_by_account, not on emails."""
+        with pytest.raises(ValueError, match="Unknown column"):
+            parse_query(
+                {
+                    "where": {"field": "account", "op": "eq", "value": "a@example.com"},
+                }
+            )
+
 
 # ---------------------------------------------------------------------------
 # build_where_clause public API

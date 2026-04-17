@@ -356,7 +356,7 @@ The `query()` method exposes a JSON DSL for arbitrary structured queries that go
 }
 ```
 
-**Sources.** `from = "emails"` queries the table directly. `"sent_to"` expands recipients into one row per recipient address via a LATERAL join (adding `recipient_address`, `recipient_domain`, `recipient_type`). `"email_labels"` unnests the labels array (adding `label`).
+**Sources.** `from = "emails"` queries the table directly. `"sent_to"` expands recipients into one row per recipient address via a LATERAL join (adding `recipient_address`, `recipient_domain`, `recipient_type`). `"email_labels"` unnests the labels array (adding `label`). `"emails_by_account"` joins `emails` to `email_accounts`, producing one row per `(email, account)` pair and adding `account` (the source account address), `account_import_id` (the per-account import row), and `first_seen_at`. Use `emails_by_account` whenever true multi-account attribution matters — e.g., finding messages that exist in account B whether or not B was the first importer.
 
 **Safety.** All column names, operators, aggregate functions, and date-trunc precisions are validated against strict whitelists. All values are parameterized. A 5-second `statement_timeout` and 1,000-row hard cap are enforced server-side.
 
@@ -364,7 +364,7 @@ The `query()` method exposes a JSON DSL for arbitrary structured queries that go
 
 **Aggregates.** `count`, `count_distinct`, `min`, `max`, `sum`, `array_agg_distinct`.
 
-**Column whitelist on `emails`** includes `source_account` and `import_id`, so DSL queries can filter by the scalar "first seen" attribution. (True multi-account attribution via `email_accounts` is not yet exposed in the DSL — see §10.)
+**Column whitelist on `emails`** includes `source_account` and `import_id`, reflecting the scalar "first seen" attribution stored directly on the emails row. For true multi-account attribution (the same message appearing under every account that ingested it), use the `emails_by_account` source and filter on `account`.
 
 ### 6.6 MCP Server Layer
 
@@ -521,7 +521,6 @@ Delivered across the original multi-account implementation plus three follow-ups
 - **Multi-user support:** The current design is single-user (one person's email accounts). Multi-user support would require a `user_id` column and row-level security.
 - **Incremental embedding:** New messages ingested after the initial load should be embedded immediately at insert time, avoiding the need for batch backfills.
 - **Account auto-detection:** For Gmail Takeout mbox files, the source account could potentially be inferred from the file metadata or message headers, reducing the need to specify `--account` manually.
-- **DSL support for `email_accounts`:** The Tier 2 DSL currently exposes the scalar `emails.source_account` and `emails.import_id` columns, reflecting the "first seen" attribution. A follow-up could add `accounts` (a `jsonb` or array aggregate from `email_accounts`) or a new virtual source `emails_by_account` so DSL queries can filter by true multi-account attribution.
 - **Deprecating `emails.source_account` / `emails.import_id`:** Once all writers and readers use `email_accounts`, these columns and their indexes can be dropped. The current version keeps them for one release as a compatibility surface and a self-tightening invariant.
 - **Hybrid query planning:** `search()` currently runs structured filters and vector similarity in the same SQL statement, relying on PostgreSQL's planner to order them. A future enhancement could add explicit query planning based on selectivity statistics.
 - **Orphan-running-import reaper:** A process that crashes without reaching its exception handler leaves a `status='running'` imports row. The resume-by-key logic will adopt it on the next matching invocation, but a `maildb ingest reap --older-than 24h` command could close out long-idle rows explicitly.
