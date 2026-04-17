@@ -1,46 +1,23 @@
 from __future__ import annotations
 
-import sys
-from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from maildb.ingest.__main__ import main
+from typer.testing import CliRunner
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from maildb.cli import app
 
-
-def test_skip_embed_flag_parsed(tmp_path: Path) -> None:
-    mbox = tmp_path / "test.mbox"
-    mbox.touch()
-    with (
-        patch("maildb.ingest.__main__.run_pipeline") as mock_pipeline,
-        patch("maildb.ingest.__main__.create_pool") as mock_pool,
-        patch("maildb.ingest.__main__.init_db"),
-        patch.object(sys, "argv", ["prog", str(mbox), "--skip-embed"]),
-    ):
-        mock_pool.return_value = MagicMock()
-        mock_pipeline.return_value = {}
-
-        main()
-        mock_pipeline.assert_called_once()
-        call_kwargs = mock_pipeline.call_args[1]
-        assert call_kwargs["skip_embed"] is True
+runner = CliRunner()
 
 
-def test_no_skip_embed_by_default(tmp_path: Path) -> None:
-    mbox = tmp_path / "test.mbox"
-    mbox.touch()
-    with (
-        patch("maildb.ingest.__main__.run_pipeline") as mock_pipeline,
-        patch("maildb.ingest.__main__.create_pool") as mock_pool,
-        patch("maildb.ingest.__main__.init_db"),
-        patch.object(sys, "argv", ["prog", str(mbox)]),
-    ):
-        mock_pool.return_value = MagicMock()
-        mock_pipeline.return_value = {}
+def test_serve_invokes_mcp_run() -> None:
+    with patch("maildb.cli._configure_logging"), patch("maildb.cli.mcp.run") as mock_run:
+        result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
 
-        main()
-        mock_pipeline.assert_called_once()
-        call_kwargs = mock_pipeline.call_args[1]
-        assert call_kwargs.get("skip_embed", False) is False
+
+def test_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "serve" in result.output
+    assert "ingest" in result.output
