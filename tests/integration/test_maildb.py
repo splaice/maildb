@@ -1273,3 +1273,41 @@ def test_top_contacts_scoped_by_account(test_pool, test_settings) -> None:  # ty
     all_results, _ = db.top_contacts(direction="inbound")
     addrs = {r["address"] for r in all_results}
     assert addrs == {"alice@x.com", "bob@y.com"}
+
+
+def test_long_threads_scoped_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    from uuid import uuid4
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        # Account A has a thread of 6 messages; B has a thread of 2.
+        for n in range(6):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'long-A', 'x@example.com',
+                       now(), 'a@example.com', %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<lt-A-{n}@x>", "iid": iid_a},
+            )
+        for n in range(2):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'long-B', 'y@example.com',
+                       now(), 'b@example.com', %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<lt-B-{n}@x>", "iid": iid_b},
+            )
+        conn.commit()
+
+    a_threads, _ = db.long_threads(min_messages=5, account="a@example.com")
+    assert {t["thread_id"] for t in a_threads} == {"long-A"}
+
+    b_threads, _ = db.long_threads(min_messages=5, account="b@example.com")
+    assert b_threads == []
