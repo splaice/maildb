@@ -74,7 +74,7 @@ Use the just targets to run test, run linter, etc.
 
 ## Design Document
 
-`docs/DESIGN.md` contains the full system design: schema, API, embedding strategy, ingestion pipeline, and implementation roadmap. Read it when planning or implementing changes to these areas.
+`docs/DESIGN.md` is a high-level design overview — load-bearing decisions, architecture map, and intent. For current implementation details (schema columns, indexes, method signatures, DSL operators, pipeline code paths), read the code. Update DESIGN.md only when a decision changes, not when an implementation detail moves.
 
 ## Critical Rules
 
