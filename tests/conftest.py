@@ -46,4 +46,5 @@ def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
         conn.execute("DELETE FROM attachments")
         conn.execute("DELETE FROM ingest_tasks")
         conn.execute("DELETE FROM emails")
+        conn.execute("DELETE FROM imports")
         conn.commit()

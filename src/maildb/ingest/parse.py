@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -18,11 +19,12 @@ INSERT_EMAIL_SQL = """
 INSERT INTO emails (
     id, message_id, thread_id, subject, sender_name, sender_address, sender_domain,
     recipients, date, body_text, body_html, has_attachment, attachments,
-    labels, in_reply_to, "references"
+    labels, in_reply_to, "references", source_account, import_id
 ) VALUES (
     %(id)s, %(message_id)s, %(thread_id)s, %(subject)s, %(sender_name)s, %(sender_address)s,
     %(sender_domain)s, %(recipients)s, %(date)s, %(body_text)s, %(body_html)s,
-    %(has_attachment)s, %(attachments)s, %(labels)s, %(in_reply_to)s, %(references)s
+    %(has_attachment)s, %(attachments)s, %(labels)s, %(in_reply_to)s, %(references)s,
+    %(source_account)s, %(import_id)s
 ) ON CONFLICT (message_id) DO NOTHING
 """
 
@@ -57,8 +59,17 @@ def process_chunk(
                 break
             task_id = claimed["id"]
             chunk_path = claimed["chunk_path"]
+            import_id = claimed["import_id"]
+            source_account = _lookup_source_account(pool, import_id)
             try:
-                _process_single_chunk(pool, task_id, chunk_path, attachment_dir)
+                _process_single_chunk(
+                    pool,
+                    task_id,
+                    chunk_path,
+                    attachment_dir,
+                    import_id=import_id,
+                    source_account=source_account,
+                )
                 chunks_processed += 1
             except Exception as exc:
                 logger.exception("chunk_failed", task_id=task_id)
@@ -72,11 +83,30 @@ def process_chunk(
     return chunks_processed
 
 
+def _lookup_source_account(pool: ConnectionPool, import_id: Any) -> str | None:
+    """Look up source_account for the given import_id, or None if import_id is None."""
+    if import_id is None:
+        return None
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT source_account FROM imports WHERE id = %(id)s",
+            {"id": import_id},
+        )
+        row = cur.fetchone()
+        if row is None:
+            msg = f"No imports row for id {import_id}"
+            raise RuntimeError(msg)
+        return row[0]  # type: ignore[no-any-return]
+
+
 def _process_single_chunk(
     pool: ConnectionPool,
     task_id: int,
     chunk_path: str,
     attachment_dir: Path,
+    *,
+    import_id: Any = None,
+    source_account: str | None = None,
 ) -> None:
     """Process a single chunk file: parse, extract attachments, insert into DB."""
     messages = list(parse_mbox(chunk_path))
@@ -105,6 +135,8 @@ def _process_single_chunk(
                 "labels": msg["labels"] or None,
                 "in_reply_to": msg["in_reply_to"],
                 "references": msg["references"] or None,
+                "source_account": source_account,
+                "import_id": import_id,
             }
         )
 

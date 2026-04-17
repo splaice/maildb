@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import structlog
 from psycopg_pool import ConnectionPool
@@ -36,6 +37,7 @@ def run_pipeline(
     database_url: str,
     attachment_dir: Path | str,
     tmp_dir: Path | str,
+    source_account: str,
     chunk_size_bytes: int = 50 * 1024 * 1024,
     parse_workers: int = -1,
     embed_workers: int = 4,
@@ -50,22 +52,40 @@ def run_pipeline(
         parse_workers = max(1, (os.cpu_count() or 2) - 1)
 
     pool = _get_pool(database_url)
+    import_id = uuid4()
 
     try:
+        with pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO imports (id, source_account, source_file, status)
+                   VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+                {"id": import_id, "account": source_account, "file": str(mbox_path)},
+            )
+            conn.commit()
+
         # Phase 1: Split
         split_status = get_phase_status(pool, "split")
         if split_status["total"] == 0:
             logger.info("phase_start", phase="split")
-            split_task = create_task(pool, phase="split")
+            split_task = create_task(pool, phase="split", import_id=import_id)
             chunks = split_mbox(mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes)
             for chunk_path in chunks:
-                create_task(pool, phase="parse", chunk_path=str(chunk_path))
+                create_task(
+                    pool,
+                    phase="parse",
+                    chunk_path=str(chunk_path),
+                    import_id=import_id,
+                )
             complete_task(pool, split_task["id"], messages_total=len(chunks))
             logger.info("phase_complete", phase="split", chunks=len(chunks))
         elif split_status["completed"] == 0:
             logger.info("split_incomplete_restarting")
             with pool.connection() as conn:
                 conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
+                conn.execute(
+                    "UPDATE imports SET status='failed', completed_at=now() WHERE id=%(id)s",
+                    {"id": import_id},
+                )
                 conn.commit()
             pool.close()
             return run_pipeline(
@@ -73,6 +93,7 @@ def run_pipeline(
                 database_url=database_url,
                 attachment_dir=attachment_dir,
                 tmp_dir=tmp_dir,
+                source_account=source_account,
                 chunk_size_bytes=chunk_size_bytes,
                 parse_workers=parse_workers,
                 embed_workers=embed_workers,
@@ -120,7 +141,7 @@ def run_pipeline(
         index_status = get_phase_status(pool, "index")
         if index_status["completed"] == 0:
             logger.info("phase_start", phase="index")
-            index_task = create_task(pool, phase="index")
+            index_task = create_task(pool, phase="index", import_id=import_id)
             run_index_phase(pool, include_hnsw=False)
             complete_task(pool, index_task["id"])
             logger.info("phase_complete", phase="index")
@@ -133,7 +154,7 @@ def run_pipeline(
 
                 embed_status = get_phase_status(pool, "embed")
                 if embed_status["in_progress"] == 0:
-                    embed_task = create_task(pool, phase="embed")
+                    embed_task = create_task(pool, phase="embed", import_id=import_id)
                     task_id = embed_task["id"]
                 else:
                     task_id = None
@@ -158,6 +179,28 @@ def run_pipeline(
                 create_hnsw_index(pool)
                 logger.info("phase_complete", phase="embed", total=total_embedded)
 
+        with pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT count(*) FROM emails WHERE import_id = %(id)s",
+                {"id": import_id},
+            )
+            inserted = cur.fetchone()[0]  # type: ignore[index]
+            conn.execute(
+                """UPDATE imports
+                   SET status='completed', completed_at=now(),
+                       messages_total=%(t)s, messages_inserted=%(t)s
+                   WHERE id=%(id)s""",
+                {"id": import_id, "t": inserted},
+            )
+            conn.commit()
+    except Exception:
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE imports SET status='failed', completed_at=now() WHERE id=%(id)s",
+                {"id": import_id},
+            )
+            conn.commit()
+        raise
     finally:
         pool.close()
 
