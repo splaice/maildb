@@ -33,6 +33,8 @@ def _make_email() -> Email:
         in_reply_to=None,
         references=[],
         embedding=[0.1] * 768,
+        source_account=None,
+        import_id=None,
         created_at=datetime(2025, 1, 15, 10, 0, tzinfo=UTC),
     )
 
