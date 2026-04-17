@@ -78,3 +78,46 @@ def test_ingest_run_skip_embed_flag(tmp_path: Path):
     assert result.exit_code == 0, result.output
     kwargs = mock_pipeline.call_args[1]
     assert kwargs["skip_embed"] is True
+
+
+def test_ingest_status_invokes_get_status():
+    with (
+        patch("maildb.cli.get_status") as mock_status,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        mock_pool.return_value = MagicMock()
+        mock_status.return_value = {
+            "split": {},
+            "parse": {},
+            "index": {},
+            "embed": {},
+            "total_emails": 0,
+        }
+        result = runner.invoke(app, ["ingest", "status"])
+    assert result.exit_code == 0, result.output
+    mock_status.assert_called_once()
+
+
+def test_ingest_reset_requires_yes_or_aborts():
+    with (
+        patch("maildb.cli.reset_pipeline") as mock_reset,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        mock_pool.return_value = MagicMock()
+        # Without --yes, prompt is auto-aborted by CliRunner with no input.
+        _ = runner.invoke(app, ["ingest", "reset"], input="n\n")
+    assert mock_reset.call_count == 0
+
+
+def test_ingest_reset_with_yes_calls_reset():
+    with (
+        patch("maildb.cli.reset_pipeline") as mock_reset,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["ingest", "reset", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_reset.assert_called_once()

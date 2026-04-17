@@ -12,7 +12,7 @@ import typer
 
 from maildb.config import Settings
 from maildb.db import create_pool, init_db
-from maildb.ingest.orchestrator import run_pipeline
+from maildb.ingest.orchestrator import get_status, reset_pipeline, run_pipeline
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -145,6 +145,76 @@ def _print_status_dict(status: dict) -> None:  # type: ignore[type-arg]
         f"({status.get('total_attachments_unique', 0):,} unique)"
     )
     typer.echo("\n".join(lines))
+
+
+@ingest_app.command("status")
+def ingest_status(
+    account: str | None = typer.Option(
+        None,
+        "--account",
+        help="Filter to one source account.",
+    ),
+) -> None:
+    """Print pipeline phase counts and per-import breakdown."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        status = get_status(pool)
+        _print_status_dict(status)
+        _print_imports_summary(pool, account)
+    finally:
+        pool.close()
+
+
+def _print_imports_summary(pool, account: str | None) -> None:  # type: ignore[no-untyped-def]
+    """Print a per-import breakdown to stdout."""
+    sql = (
+        "SELECT started_at, source_account, status, messages_inserted, messages_skipped "
+        "FROM imports "
+    )
+    params: dict = {}
+    if account is not None:
+        sql += "WHERE source_account = %(account)s "
+        params["account"] = account
+    sql += "ORDER BY started_at DESC LIMIT 20"
+    with pool.connection() as conn:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+    if not rows:
+        return
+    typer.echo("\nImports")
+    for started, acct, status, inserted, skipped in rows:
+        ts = started.strftime("%Y-%m-%d %H:%M") if started else "?"
+        typer.echo(
+            f"  {ts}  {acct:<24} {status:<10} "
+            f"{inserted or 0:>10,} inserted   {skipped or 0:>4} skipped"
+        )
+
+
+@ingest_app.command("reset")
+def ingest_reset(
+    phase: str | None = typer.Option(
+        None,
+        "--phase",
+        help="Reset only one phase: parse, index, or embed.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Delete pipeline state. Without --phase, performs a full reset."""
+    settings = Settings()
+    target = phase or "all phases"
+    if not yes and not typer.confirm(f"This will reset {target}. Continue?", default=False):
+        typer.echo("Aborted.")
+        raise typer.Exit(code=1)
+
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        reset_pipeline(pool, phase=phase)
+    finally:
+        pool.close()
+    typer.echo(f"Reset complete ({phase or 'full'}).")
 
 
 if __name__ == "__main__":
