@@ -1353,3 +1353,88 @@ def test_import_history_returns_records(test_pool, test_settings) -> None:  # ty
     a_only = db.import_history(account="a@example.com")
     assert len(a_only) == 2
     assert all(r.source_account == "a@example.com" for r in a_only)
+
+
+def test_effective_user_emails_merges_config_and_imports(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """user_emails auto-derived from imports table when env is unset.
+
+    Config-configured identities win ordering; ingested accounts fill in
+    anything the env missed. Explicit account= calls still narrow to one.
+    """
+    config = test_settings.model_copy()
+    config.user_emails = []  # Pretend no env config.
+    db = MailDB._from_pool(test_pool, config=config)
+
+    # No ingested accounts yet → unreplied should raise.
+    with pytest.raises(ValueError, match="user_emails must be configured"):
+        db.unreplied()
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'b@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    # Fresh MailDB picks up ingested accounts without any config.
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    assert set(identities) == {"a@example.com", "b@example.com"}
+
+
+def test_effective_user_emails_config_takes_priority_in_order(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Configured identities appear first, ingested ones fill in the rest."""
+    config = test_settings.model_copy()
+    config.user_emails = ["alias@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    # Configured alias first, ingested appended.
+    assert identities == ["alias@example.com", "a@example.com"]
+
+
+def test_effective_user_emails_explicit_account_ignores_derived(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Passing account= narrows to that address regardless of env/imports."""
+    config = test_settings.model_copy()
+    config.user_emails = ["alias@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses("only@example.com")
+    assert identities == ["only@example.com"]
+
+
+def test_effective_user_emails_dedupes_overlap(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Address present in both config and imports is returned once."""
+    config = test_settings.model_copy()
+    config.user_emails = ["a@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    assert identities == ["a@example.com"]
