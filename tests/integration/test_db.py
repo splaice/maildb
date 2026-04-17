@@ -1,6 +1,8 @@
 # tests/integration/test_db.py
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from maildb.db import init_db
@@ -90,3 +92,53 @@ def test_indexes_for_multi_account_columns(test_pool):
         "idx_imports_source_account",
         "idx_imports_started_at",
     }
+
+
+def test_init_db_tightens_source_account_when_no_nulls(test_pool):
+    # Drop the constraint if it's already there (re-runnable test).
+    with test_pool.connection() as conn:
+        conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
+        conn.execute("DELETE FROM emails")
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'you@example.com', 'test', 'completed')",
+            {"id": uuid4()},
+        )
+        cur = conn.execute("SELECT id FROM imports LIMIT 1")
+        iid = cur.fetchone()[0]
+        conn.execute(
+            "INSERT INTO emails (id, message_id, thread_id, source_account, import_id) "
+            "VALUES (%(id)s, '<x@example.com>', 't', 'you@example.com', %(iid)s)",
+            {"id": uuid4(), "iid": iid},
+        )
+        conn.commit()
+
+    init_db(test_pool)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'emails' AND column_name = 'source_account'"
+        )
+        assert cur.fetchone()[0] == "NO"
+
+
+def test_init_db_leaves_nullable_when_some_nulls(test_pool):
+    with test_pool.connection() as conn:
+        conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
+        conn.execute("DELETE FROM emails")
+        conn.execute(
+            "INSERT INTO emails (id, message_id, thread_id) "
+            "VALUES (%(id)s, '<y@example.com>', 't')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    init_db(test_pool)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'emails' AND column_name = 'source_account'"
+        )
+        assert cur.fetchone()[0] == "YES"
