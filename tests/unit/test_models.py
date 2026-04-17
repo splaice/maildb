@@ -98,3 +98,36 @@ def test_email_defaults_when_columns_missing() -> None:
     email = Email.from_row(row)
     assert email.source_account is None
     assert email.import_id is None
+
+
+def test_account_summary_dataclass_shape() -> None:
+    from maildb.models import AccountSummary
+
+    s = AccountSummary(
+        source_account="you@example.com",
+        email_count=10,
+        first_date=None,
+        last_date=None,
+        import_count=2,
+    )
+    assert s.source_account == "you@example.com"
+    assert s.email_count == 10
+
+
+def test_import_record_dataclass_shape() -> None:
+    from datetime import datetime, timezone
+
+    from maildb.models import ImportRecord
+
+    r = ImportRecord(
+        id=uuid4(),
+        source_account="you@example.com",
+        source_file="x.mbox",
+        started_at=datetime.now(timezone.utc),
+        completed_at=None,
+        messages_total=0,
+        messages_inserted=0,
+        messages_skipped=0,
+        status="running",
+    )
+    assert r.status == "running"
