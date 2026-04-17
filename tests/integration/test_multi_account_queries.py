@@ -25,16 +25,36 @@ def test_get_thread_returns_cross_account_messages(test_pool, test_settings, mul
     assert {e.source_account for e in thread} == {"a@example.com", "b@example.com"}
 
 
-def test_deduplication_first_import_wins(test_pool, test_settings, multi_account_seed):
-    """Duplicate message_id keeps the first import's source_account."""
+def test_duplicate_emails_surface_under_both_accounts(
+    test_pool, test_settings, multi_account_seed
+):
+    """Same message_id ingested by A then B is visible in both account-scoped queries.
+
+    The emails row is de-duplicated on message_id (ON CONFLICT DO UPDATE
+    no-op), but email_accounts carries one row per (email_id, source_account)
+    so account-scoped finds return the message from either side.
+    """
     with test_pool.connection() as conn:
+        # emails table de-duplicates.
+        cur = conn.execute("SELECT count(*) FROM emails WHERE message_id = '<dup@example.com>'")
+        assert cur.fetchone()[0] == 1
+        # email_accounts has one row per account.
         cur = conn.execute(
-            "SELECT count(*), array_agg(source_account) FROM emails "
-            "WHERE message_id = '<dup@example.com>'"
+            """SELECT ea.source_account
+               FROM email_accounts ea
+               JOIN emails e ON e.id = ea.email_id
+               WHERE e.message_id = '<dup@example.com>'
+               ORDER BY ea.source_account"""
         )
-        count, accounts = cur.fetchone()
-    assert count == 1
-    assert accounts == ["a@example.com"]
+        accounts = [r[0] for r in cur.fetchall()]
+    assert accounts == ["a@example.com", "b@example.com"]
+
+    # And the query surface reflects that: find(account=B) returns the dup.
+    db = _db(test_pool, test_settings)
+    b_results, _ = db.find(account="b@example.com", limit=100)
+    assert "<dup@example.com>" in {e.message_id for e in b_results}
+    a_results, _ = db.find(account="a@example.com", limit=100)
+    assert "<dup@example.com>" in {e.message_id for e in a_results}
 
 
 def test_find_no_account_returns_all(test_pool, test_settings, multi_account_seed):
@@ -50,9 +70,10 @@ def test_accounts_summary(test_pool, test_settings, multi_account_seed):
     summaries = db.accounts()
     by_acct = {s.source_account: s for s in summaries}
     assert set(by_acct) == {"a@example.com", "b@example.com"}
-    # A has 4 emails (a-1, a-2, cross-1, dup), B has 2 (b-1, cross-2)
+    # A has 4 emails (a-1, a-2, cross-1, dup), B has 3 (b-1, cross-2, dup
+    # — the duplicate is attributed to both accounts via email_accounts).
     assert by_acct["a@example.com"].email_count == 4
-    assert by_acct["b@example.com"].email_count == 2
+    assert by_acct["b@example.com"].email_count == 3
 
 
 def test_import_history_filters_by_account(test_pool, test_settings, multi_account_seed):
@@ -77,20 +98,32 @@ def test_unreplied_scoped_by_account(test_pool, test_settings):
                 {"id": iid, "acct": acct},
             )
         # Inbound to A: one unreplied from alice.
+        eid_a = uuid4()
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, sender_address,
                    date, source_account, import_id, created_at)
                VALUES (%(id)s, '<u-A@ex.com>', 'unrep-A', 'alice@ex.com',
                    now(), 'a@example.com', %(iid)s, now())""",
-            {"id": uuid4(), "iid": iid_a},
+            {"id": eid_a, "iid": iid_a},
+        )
+        conn.execute(
+            "INSERT INTO email_accounts (email_id, source_account, import_id) "
+            "VALUES (%(eid)s, 'a@example.com', %(iid)s)",
+            {"eid": eid_a, "iid": iid_a},
         )
         # Inbound to B: one unreplied from bob.
+        eid_b = uuid4()
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, sender_address,
                    date, source_account, import_id, created_at)
                VALUES (%(id)s, '<u-B@ex.com>', 'unrep-B', 'bob@ex.com',
                    now(), 'b@example.com', %(iid)s, now())""",
-            {"id": uuid4(), "iid": iid_b},
+            {"id": eid_b, "iid": iid_b},
+        )
+        conn.execute(
+            "INSERT INTO email_accounts (email_id, source_account, import_id) "
+            "VALUES (%(eid)s, 'b@example.com', %(iid)s)",
+            {"eid": eid_b, "iid": iid_b},
         )
         conn.commit()
 

@@ -77,3 +77,11 @@ CREATE TABLE IF NOT EXISTS email_attachments (
     filename        TEXT NOT NULL,
     PRIMARY KEY (email_id, attachment_id)
 );
+
+CREATE TABLE IF NOT EXISTS email_accounts (
+    email_id       UUID NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+    source_account TEXT NOT NULL,
+    import_id      UUID NOT NULL REFERENCES imports(id),
+    first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (email_id, source_account)
+);

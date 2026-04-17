@@ -21,11 +21,22 @@ def create_pool(config: Settings) -> ConnectionPool:
 def init_db(pool: ConnectionPool) -> None:
     """Apply idempotent table DDL from schema_tables.sql.
 
-    Self-tightens emails.source_account to NOT NULL once every row is tagged.
+    - Backfills email_accounts from legacy emails.source_account/import_id rows.
+    - Self-tightens emails.source_account to NOT NULL once every row is tagged.
     """
     schema_sql = importlib.resources.files("maildb").joinpath("schema_tables.sql").read_text()
     with pool.connection() as conn:
         conn.execute(schema_sql)
+
+        # Mirror any legacy (emails.source_account, emails.import_id) pairs
+        # into email_accounts. Safe to re-run — ON CONFLICT DO NOTHING.
+        conn.execute(
+            """INSERT INTO email_accounts (email_id, source_account, import_id)
+               SELECT id, source_account, import_id FROM emails
+               WHERE source_account IS NOT NULL AND import_id IS NOT NULL
+               ON CONFLICT DO NOTHING"""
+        )
+
         cur = conn.execute("SELECT count(*) FROM emails WHERE source_account IS NULL")
         null_rows = cur.fetchone()[0]  # type: ignore[index]
         if null_rows == 0:

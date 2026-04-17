@@ -13,5 +13,7 @@ CREATE INDEX IF NOT EXISTS idx_email_source_account ON emails (source_account);
 CREATE INDEX IF NOT EXISTS idx_email_import_id ON emails (import_id);
 CREATE INDEX IF NOT EXISTS idx_imports_source_account ON imports (source_account);
 CREATE INDEX IF NOT EXISTS idx_imports_started_at ON imports (started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_accounts_source_account ON email_accounts (source_account);
+CREATE INDEX IF NOT EXISTS idx_email_accounts_import_id ON email_accounts (import_id);
 -- HNSW index created separately after embed phase:
 -- CREATE INDEX IF NOT EXISTS idx_email_embedding ON emails USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);

@@ -1208,12 +1208,23 @@ def test_find_filters_by_account(test_pool, test_settings):
         for n, (iid, acct) in enumerate(
             [(iid_a, "a@example.com"), (iid_a, "a@example.com"), (iid_b, "b@example.com")]
         ):
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
                        date, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, 't', 'T', 'x@example.com',
                        now(), %(acct)s, %(iid)s, now())""",
-                {"id": uuid4(), "mid": f"<find-acct-{n}@example.com>", "acct": acct, "iid": iid},
+                {
+                    "id": eid,
+                    "mid": f"<find-acct-{n}@example.com>",
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
             )
         conn.commit()
 
@@ -1240,13 +1251,19 @@ def test_mention_search_filters_by_account(test_pool, test_settings):
         for n, (iid, acct) in enumerate(
             [(iid_a, "a@example.com"), (iid_a, "a@example.com"), (iid_b, "b@example.com")]
         ):
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
                        date, body_text, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, 't', 'T', 'x@example.com',
                        now(), 'budget meeting next quarter',
                        %(acct)s, %(iid)s, now())""",
-                {"id": uuid4(), "mid": f"<ms-acct-{n}@example.com>", "acct": acct, "iid": iid},
+                {"id": eid, "mid": f"<ms-acct-{n}@example.com>", "acct": acct, "iid": iid},
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
             )
         conn.commit()
 
@@ -1277,18 +1294,24 @@ def test_top_contacts_scoped_by_account(test_pool, test_settings):
             ("alice@x.com", "a@example.com", iid_a),
             ("bob@y.com", "b@example.com", iid_b),
         ]:
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, sender_address,
                        date, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, 't', %(sender)s,
                        now(), %(acct)s, %(iid)s, now())""",
                 {
-                    "id": uuid4(),
+                    "id": eid,
                     "mid": f"<topc-{uuid4()}@x>",
                     "sender": sender,
                     "acct": acct,
                     "iid": iid,
                 },
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
             )
         conn.commit()
 
@@ -1313,20 +1336,32 @@ def test_long_threads_scoped_by_account(test_pool, test_settings):
             )
         # Account A has a thread of 6 messages; B has a thread of 2.
         for n in range(6):
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, sender_address,
                        date, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, 'long-A', 'x@example.com',
                        now(), 'a@example.com', %(iid)s, now())""",
-                {"id": uuid4(), "mid": f"<lt-A-{n}@x>", "iid": iid_a},
+                {"id": eid, "mid": f"<lt-A-{n}@x>", "iid": iid_a},
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, 'a@example.com', %(iid)s)",
+                {"eid": eid, "iid": iid_a},
             )
         for n in range(2):
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, sender_address,
                        date, source_account, import_id, created_at)
                    VALUES (%(id)s, %(mid)s, 'long-B', 'y@example.com',
                        now(), 'b@example.com', %(iid)s, now())""",
-                {"id": uuid4(), "mid": f"<lt-B-{n}@x>", "iid": iid_b},
+                {"id": eid, "mid": f"<lt-B-{n}@x>", "iid": iid_b},
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, 'b@example.com', %(iid)s)",
+                {"eid": eid, "iid": iid_b},
             )
         conn.commit()
 
@@ -1350,11 +1385,17 @@ def test_accounts_returns_summary(test_pool, test_settings):
         for n, (acct, iid) in enumerate(
             [("a@example.com", iid_a)] * 3 + [("b@example.com", iid_b)] * 2
         ):
+            eid = uuid4()
             conn.execute(
                 """INSERT INTO emails (id, message_id, thread_id, source_account,
                        import_id, date, created_at)
                    VALUES (%(id)s, %(mid)s, 't', %(acct)s, %(iid)s, now(), now())""",
-                {"id": uuid4(), "mid": f"<acc-{n}@x>", "acct": acct, "iid": iid},
+                {"id": eid, "mid": f"<acc-{n}@x>", "acct": acct, "iid": iid},
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
             )
         conn.commit()
 
@@ -1389,3 +1430,88 @@ def test_import_history_returns_records(test_pool, test_settings):
     a_only = db.import_history(account="a@example.com")
     assert len(a_only) == 2
     assert all(r.source_account == "a@example.com" for r in a_only)
+
+
+def test_effective_user_emails_merges_config_and_imports(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """user_emails auto-derived from imports table when env is unset.
+
+    Config-configured identities win ordering; ingested accounts fill in
+    anything the env missed. Explicit account= calls still narrow to one.
+    """
+    config = test_settings.model_copy()
+    config.user_emails = []  # Pretend no env config.
+    db = MailDB._from_pool(test_pool, config=config)
+
+    # No ingested accounts yet → unreplied should raise.
+    with pytest.raises(ValueError, match="user_emails must be configured"):
+        db.unreplied()
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'b@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    # Fresh MailDB picks up ingested accounts without any config.
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    assert set(identities) == {"a@example.com", "b@example.com"}
+
+
+def test_effective_user_emails_config_takes_priority_in_order(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Configured identities appear first, ingested ones fill in the rest."""
+    config = test_settings.model_copy()
+    config.user_emails = ["alias@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    # Configured alias first, ingested appended.
+    assert identities == ["alias@example.com", "a@example.com"]
+
+
+def test_effective_user_emails_explicit_account_ignores_derived(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Passing account= narrows to that address regardless of env/imports."""
+    config = test_settings.model_copy()
+    config.user_emails = ["alias@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses("only@example.com")
+    assert identities == ["only@example.com"]
+
+
+def test_effective_user_emails_dedupes_overlap(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    """Address present in both config and imports is returned once."""
+    config = test_settings.model_copy()
+    config.user_emails = ["a@example.com"]
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=config)
+    identities = db._identity_addresses(None)
+    assert identities == ["a@example.com"]

@@ -31,15 +31,56 @@ def _get_pool(database_url: str) -> ConnectionPool:
     return ConnectionPool(conninfo=database_url, min_size=1, max_size=5, open=True)
 
 
+def _resume_or_create_import(
+    pool: ConnectionPool,
+    *,
+    source_account: str,
+    source_file: str,
+    force_new_import: bool,
+) -> tuple[UUID, bool]:
+    """Return (import_id, created_new) for this pipeline run.
+
+    Reuses the most recent status='running' row for the same
+    (source_account, source_file) unless force_new_import is True.
+    Returns whether the row was newly created so the caller knows
+    whether a failure should mark it failed.
+    """
+    if not force_new_import:
+        with pool.connection() as conn:
+            cur = conn.execute(
+                """SELECT id FROM imports
+                   WHERE source_account = %(acct)s
+                     AND source_file = %(file)s
+                     AND status = 'running'
+                   ORDER BY started_at DESC
+                   LIMIT 1""",
+                {"acct": source_account, "file": source_file},
+            )
+            row = cur.fetchone()
+        if row is not None:
+            logger.info("resuming_import", import_id=str(row[0]))
+            return row[0], False
+
+    import_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+            {"id": import_id, "account": source_account, "file": source_file},
+        )
+        conn.commit()
+    return import_id, True
+
+
 def backfill_source_account(pool: ConnectionPool, *, account: str) -> dict[str, Any]:
     """Tag all emails with NULL source_account using the given account.
 
     Idempotent: re-running it inserts another (empty) imports row but
     updates zero email rows. Never overwrites previously-tagged emails.
+    Also mirrors the tagging into the email_accounts join table.
     """
     migration_id = uuid4()
     with pool.connection() as conn:
-        # Insert the synthetic import row so we can FK rows to it.
         conn.execute(
             """INSERT INTO imports (id, source_account, source_file, status,
                                     started_at, completed_at)
@@ -53,6 +94,15 @@ def backfill_source_account(pool: ConnectionPool, *, account: str) -> dict[str, 
             {"id": migration_id, "acct": account},
         )
         rows_updated = cur.rowcount
+        # Mirror into the join table so account-scoped queries see the
+        # backfilled rows without waiting for the next init_db.
+        conn.execute(
+            """INSERT INTO email_accounts (email_id, source_account, import_id)
+               SELECT id, source_account, import_id FROM emails
+               WHERE source_account = %(acct)s AND import_id = %(id)s
+               ON CONFLICT DO NOTHING""",
+            {"id": migration_id, "acct": account},
+        )
         conn.execute(
             """UPDATE imports
                SET status = 'completed', completed_at = now(),
@@ -80,13 +130,19 @@ def run_pipeline(
     embedding_model: str = "nomic-embed-text",
     embedding_dimensions: int = 768,
     skip_embed: bool = False,
+    force_new_import: bool = False,
 ) -> dict[str, Any]:
-    """Run the full ingest pipeline. Restartable."""
+    """Run the full ingest pipeline. Restartable.
+
+    By default, a still-running imports row for the same
+    (source_account, source_file) is resumed instead of a new one being
+    created. Pass force_new_import=True to always start fresh.
+    """
     if parse_workers == -1:
         parse_workers = max(1, (os.cpu_count() or 2) - 1)
 
     pool = _get_pool(database_url)
-    import_id: UUID = uuid4()
+    import_id: UUID
     import_row_created = False
 
     try:
@@ -116,16 +172,18 @@ def run_pipeline(
                     embedding_model=embedding_model,
                     embedding_dimensions=embedding_dimensions,
                     skip_embed=skip_embed,
+                    force_new_import=False,
                 )
 
-            # Restart check passed — now safe to claim the imports row.
-            with pool.connection() as conn:
-                conn.execute(
-                    """INSERT INTO imports (id, source_account, source_file, status)
-                       VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
-                    {"id": import_id, "account": source_account, "file": str(mbox_path)},
-                )
-                conn.commit()
+            # Restart check passed — adopt a still-running row or create one.
+            # Once we have the import_id, we "own" it for this run, so
+            # any failure below should mark it failed.
+            import_id, _was_created = _resume_or_create_import(
+                pool,
+                source_account=source_account,
+                source_file=str(mbox_path),
+                force_new_import=force_new_import,
+            )
             import_row_created = True
 
             if split_status["total"] == 0:

@@ -25,7 +25,14 @@ INSERT INTO emails (
     %(sender_domain)s, %(recipients)s, %(date)s, %(body_text)s, %(body_html)s,
     %(has_attachment)s, %(attachments)s, %(labels)s, %(in_reply_to)s, %(references)s,
     %(source_account)s, %(import_id)s
-) ON CONFLICT (message_id) DO NOTHING
+) ON CONFLICT (message_id) DO UPDATE SET thread_id = emails.thread_id
+RETURNING id
+"""
+
+INSERT_EMAIL_ACCOUNT_SQL = """
+INSERT INTO email_accounts (email_id, source_account, import_id)
+VALUES (%(email_id)s, %(source_account)s, %(import_id)s)
+ON CONFLICT (email_id, source_account) DO NOTHING
 """
 
 INSERT_ATTACHMENT_SQL = """
@@ -177,12 +184,27 @@ def _process_single_chunk(
             try:
                 conn.execute("SAVEPOINT row_insert")
                 cur = conn.execute(INSERT_EMAIL_SQL, row)
-                conn.execute("RELEASE SAVEPOINT row_insert")
-                if cur.rowcount > 0:
+                result = cur.fetchone()
+                # ON CONFLICT DO UPDATE is a no-op write that always returns
+                # the id — the existing row's id on conflict, or the newly
+                # inserted id otherwise.
+                existing_id = result[0] if result else row["id"]
+                if existing_id == row["id"]:
                     inserted += 1
                     inserted_email_ids.add(row["id"])
                 else:
                     skipped += 1
+                # Tag with this ingest's account, idempotent per (email, account).
+                if source_account is not None and import_id is not None:
+                    conn.execute(
+                        INSERT_EMAIL_ACCOUNT_SQL,
+                        {
+                            "email_id": existing_id,
+                            "source_account": source_account,
+                            "import_id": import_id,
+                        },
+                    )
+                conn.execute("RELEASE SAVEPOINT row_insert")
             except Exception:
                 conn.execute("ROLLBACK TO SAVEPOINT row_insert")
                 logger.warning(

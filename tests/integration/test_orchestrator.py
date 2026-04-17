@@ -216,7 +216,11 @@ def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_setti
 
 
 def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_settings, tmp_path):
-    """Idempotent ingest: second run inserts zero emails but logs a new import row."""
+    """Idempotent ingest: second run inserts zero emails but logs a new import row.
+
+    The first run completes, so the resume-by-key lookup finds no
+    'running' row for the second invocation — it creates a new one.
+    """
     common_kwargs = dict(  # noqa: C408
         mbox_path=FIXTURES / "sample.mbox",
         database_url=test_settings.database_url,
@@ -243,3 +247,100 @@ def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_se
         count, total_skipped = cur.fetchone()
         assert count == 2
         assert total_skipped > 0, "Second import should have recorded skipped duplicates"
+
+
+def test_run_pipeline_adopts_orphan_running_import(test_pool, test_settings, tmp_path):
+    """An orphaned status='running' row is resumed, not duplicated."""
+    mbox = FIXTURES / "sample.mbox"
+    orphan_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'resume@example.com', %(file)s, 'running')""",
+            {"id": orphan_id, "file": str(mbox)},
+        )
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="resume@example.com",
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT id, status FROM imports WHERE source_account = 'resume@example.com'"
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1  # Orphan adopted, not duplicated.
+    assert rows[0][0] == orphan_id
+    assert rows[0][1] == "completed"
+
+
+def test_run_pipeline_same_mbox_two_accounts_creates_join_rows(test_pool, test_settings, tmp_path):
+    """Ingesting the same mbox under two different accounts produces one
+    emails row per message but two email_accounts rows per message.
+    """
+    mbox = FIXTURES / "sample.mbox"
+    common = dict(  # noqa: C408
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+    )
+    run_pipeline(source_account="a@example.com", **common)
+    # Wipe parse tasks so the second account reprocesses every chunk.
+    reset_pipeline(test_pool, phase="parse")
+    run_pipeline(source_account="b@example.com", **common)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*) FROM emails")
+        email_count = cur.fetchone()[0]
+        cur = conn.execute("SELECT count(*) FROM email_accounts")
+        ea_count = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT count(DISTINCT email_id) FROM email_accounts "
+            "WHERE source_account = 'b@example.com'"
+        )
+        b_tagged = cur.fetchone()[0]
+    assert ea_count == email_count * 2  # Every email tagged under both.
+    assert b_tagged == email_count
+
+
+def test_run_pipeline_force_new_import(test_pool, test_settings, tmp_path):
+    """force_new_import=True bypasses resume and creates a fresh import row."""
+    mbox = FIXTURES / "sample.mbox"
+    orphan_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'force@example.com', %(file)s, 'running')""",
+            {"id": orphan_id, "file": str(mbox)},
+        )
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="force@example.com",
+        force_new_import=True,
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM imports WHERE source_account = 'force@example.com'"
+        )
+        assert cur.fetchone()[0] == 2  # Orphan left alone; new row created.

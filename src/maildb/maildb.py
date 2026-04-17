@@ -82,6 +82,7 @@ class MailDB:
             model_name=self._config.embedding_model,
             dimensions=self._config.embedding_dimensions,
         )
+        self._effective_user_emails_cache: list[str] | None = None
 
     @classmethod
     def _from_pool(
@@ -99,6 +100,7 @@ class MailDB:
             model_name=instance._config.embedding_model,
             dimensions=instance._config.embedding_dimensions,
         )
+        instance._effective_user_emails_cache = None
         return instance
 
     def init_db(self) -> None:
@@ -194,7 +196,10 @@ class MailDB:
             )
             params["max_recipients"] = max_recipients
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
 
         return conditions, params
@@ -352,17 +357,39 @@ class MailDB:
 
     # --- Advanced query methods ---
 
+    def _effective_user_emails(self) -> list[str]:
+        """Merge configured user_emails with every account we've ingested.
+
+        Configured addresses keep their relative order (env-first).
+        Ingested accounts from `imports` fill in anything the config missed.
+        Deduplicated.
+        """
+        if self._effective_user_emails_cache is not None:
+            return self._effective_user_emails_cache
+        with self._pool.connection() as conn:
+            cur = conn.execute("SELECT DISTINCT source_account FROM imports")
+            ingested = [r[0] for r in cur.fetchall() if r[0]]
+        seen: set[str] = set()
+        merged: list[str] = []
+        for addr in (*self._config.user_emails, *ingested):
+            if addr and addr not in seen:
+                seen.add(addr)
+                merged.append(addr)
+        self._effective_user_emails_cache = merged
+        return merged
+
     def _identity_addresses(self, account: str | None) -> list[str]:
         """Return the addresses that represent 'you' for identity-aware queries.
 
         If `account` is provided, returns just that single address.
-        Otherwise returns the configured user_emails list.
-        Raises if neither is available.
+        Otherwise returns the effective user_emails list (config + imports).
+        Raises if neither config nor imports yields anything.
         """
         if account is not None:
             return [account]
-        if self._config.user_emails:
-            return list(self._config.user_emails)
+        identities = self._effective_user_emails()
+        if identities:
+            return identities
         msg = "user_emails must be configured (or pass account=...) for this method"
         raise ValueError(msg)
 
@@ -414,7 +441,10 @@ class MailDB:
             exclude_outbound = ""
 
         if account is not None:
-            account_cond = "AND source_account = %(account)s"
+            account_cond = (
+                "AND EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         else:
             account_cond = ""
@@ -501,17 +531,21 @@ class MailDB:
         return rows, total
 
     def accounts(self) -> list[AccountSummary]:
-        """Summarize email counts per source_account."""
+        """Summarize email counts per source_account.
+
+        Sourced from the email_accounts join table, so a message that was
+        ingested under multiple accounts counts for each.
+        """
         sql = """
             SELECT
-                source_account,
-                COUNT(*)                  AS email_count,
-                MIN(date)                 AS first_date,
-                MAX(date)                 AS last_date,
-                COUNT(DISTINCT import_id) AS import_count
-            FROM emails
-            WHERE source_account IS NOT NULL
-            GROUP BY source_account
+                ea.source_account,
+                COUNT(DISTINCT ea.email_id) AS email_count,
+                MIN(e.date)                 AS first_date,
+                MAX(e.date)                 AS last_date,
+                COUNT(DISTINCT ea.import_id) AS import_count
+            FROM email_accounts ea
+            JOIN emails e ON e.id = ea.email_id
+            GROUP BY ea.source_account
             ORDER BY email_count DESC
         """
         rows = _query_dicts(self._pool, sql)
@@ -754,7 +788,10 @@ class MailDB:
                 conditions.append("e.sender_domain = %(sender_domain)s")
                 params["sender_domain"] = sender_domain
             if account is not None:
-                conditions.append("e.source_account = %(account)s")
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM email_accounts ea "
+                    "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
+                )
                 params["account"] = account
 
             where = " AND ".join(conditions)
@@ -786,7 +823,10 @@ class MailDB:
                 conditions.append("e.date < %(before)s")
                 params["before"] = before
             if account is not None:
-                conditions.append("e.source_account = %(account)s")
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM email_accounts ea "
+                    "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
+                )
                 params["account"] = account
 
             if recipient:
@@ -919,7 +959,10 @@ class MailDB:
             conditions.append("date < %(before)s")
             params["before"] = before
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         # Recipient count filters
         rcpt_conditions, rcpt_params = self._build_filters(
@@ -987,7 +1030,10 @@ class MailDB:
             conditions.append("date >= %(after)s")
             params["after"] = after
         if account is not None:
-            conditions.append("source_account = %(account)s")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea "
+                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+            )
             params["account"] = account
         where = " AND ".join(conditions) if conditions else "TRUE"
         having_participant = ""
