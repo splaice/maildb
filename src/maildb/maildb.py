@@ -912,15 +912,20 @@ class MailDB:
         after: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        account: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Threads exceeding a message count threshold. Returns (threads, total_count).
         participant: only threads where this address appears as sender.
+        account: scope to a single source_account.
         """
         conditions: list[str] = []
         params: dict[str, Any] = {"min_messages": min_messages, "limit": limit, "offset": offset}
         if after:
             conditions.append("date >= %(after)s")
             params["after"] = after
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
         where = " AND ".join(conditions) if conditions else "TRUE"
         having_participant = ""
         if participant:
