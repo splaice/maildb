@@ -80,3 +80,60 @@ def test_search_result() -> None:
     sr = SearchResult(email=email, similarity=0.95)
     assert sr.similarity == 0.95
     assert sr.email.subject == "Test"
+
+
+def test_email_includes_source_account_and_import_id():
+    eid = uuid4()
+    iid = uuid4()
+    row = {
+        "id": eid,
+        "message_id": "<msg-1@example.com>",
+        "thread_id": "thread-1",
+        "subject": "Hello",
+        "sender_name": "Alice",
+        "sender_address": "alice@example.com",
+        "sender_domain": "example.com",
+        "recipients": None,
+        "date": datetime(2026, 4, 16, tzinfo=UTC),
+        "body_text": "hi",
+        "body_html": None,
+        "has_attachment": False,
+        "attachments": None,
+        "labels": None,
+        "in_reply_to": None,
+        "references": None,
+        "embedding": None,
+        "created_at": datetime(2026, 4, 16, tzinfo=UTC),
+        "source_account": "you@example.com",
+        "import_id": iid,
+    }
+    email = Email.from_row(row)
+    assert email.source_account == "you@example.com"
+    assert email.import_id == iid
+
+
+def test_email_defaults_when_columns_missing():
+    """Backwards compat: from_row with no source_account/import_id keys."""
+    row = {
+        "id": uuid4(),
+        "message_id": "<msg-2@example.com>",
+        "thread_id": "thread-2",
+        "subject": None,
+        "sender_name": None,
+        "sender_address": None,
+        "sender_domain": None,
+        "recipients": None,
+        "date": None,
+        "body_text": None,
+        "body_html": None,
+        "has_attachment": False,
+        "attachments": None,
+        "labels": None,
+        "in_reply_to": None,
+        "references": None,
+        "embedding": None,
+        "created_at": datetime(2026, 4, 16, tzinfo=UTC),
+    }
+    email = Email.from_row(row)
+    assert email.source_account is None
+    assert email.import_id is None
