@@ -1,6 +1,7 @@
 import mailbox as mb
 from email.mime.text import MIMEText
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -12,8 +13,28 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 pytestmark = pytest.mark.integration
 
 
+def _insert_import(pool, account: str = "test@example.com"):
+    """Insert an imports row and return its id. Workers look up source_account
+    from the imports row keyed by ingest_tasks.import_id."""
+    import_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, %(account)s, %(file)s, 'running')""",
+            {"id": import_id, "account": account, "file": "test"},
+        )
+        conn.commit()
+    return import_id
+
+
 def test_process_chunk_inserts_emails(test_pool, test_settings, tmp_path):
-    create_task(test_pool, phase="parse", chunk_path=str(FIXTURES / "sample.mbox"))
+    import_id = _insert_import(test_pool)
+    create_task(
+        test_pool,
+        phase="parse",
+        chunk_path=str(FIXTURES / "sample.mbox"),
+        import_id=import_id,
+    )
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",
@@ -60,8 +81,9 @@ def _create_mbox_with_bad_message(tmp_path):
 
 
 def test_process_chunk_skips_bad_rows(test_pool, test_settings, tmp_path):
+    import_id = _insert_import(test_pool)
     mbox_path = _create_mbox_with_bad_message(tmp_path)
-    create_task(test_pool, phase="parse", chunk_path=str(mbox_path))
+    create_task(test_pool, phase="parse", chunk_path=str(mbox_path), import_id=import_id)
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",
@@ -75,7 +97,13 @@ def test_process_chunk_skips_bad_rows(test_pool, test_settings, tmp_path):
 
 
 def test_process_chunk_handles_failure(test_pool, test_settings, tmp_path):
-    create_task(test_pool, phase="parse", chunk_path="/nonexistent/path.mbox")
+    import_id = _insert_import(test_pool)
+    create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/nonexistent/path.mbox",
+        import_id=import_id,
+    )
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",

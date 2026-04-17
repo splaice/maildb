@@ -408,3 +408,28 @@ class TestSecurityValidation:
                 }
             )
             assert f"date_trunc('{precision}', date)" in sql
+
+
+def test_source_account_is_filterable():
+    sql, params = parse_query(
+        {
+            "from": "emails",
+            "select": [{"field": "id"}],
+            "where": {"field": "source_account", "eq": "you@example.com"},
+            "limit": 10,
+        }
+    )
+    assert "source_account = %(__p0)s" in sql
+    assert params["__p0"] == "you@example.com"
+
+
+def test_import_id_is_filterable():
+    sql, _params = parse_query(
+        {
+            "from": "emails",
+            "select": [{"field": "id"}],
+            "where": {"field": "import_id", "is_null": False},
+            "limit": 10,
+        }
+    )
+    assert "import_id IS NOT NULL" in sql

@@ -16,7 +16,7 @@ from maildb.config import Settings
 from maildb.db import create_pool, init_db
 from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
-from maildb.models import Email, SearchResult
+from maildb.models import AccountSummary, Email, ImportRecord, SearchResult
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -33,7 +33,8 @@ VALID_ORDERS = {
 SELECT_COLS = """
     id, message_id, thread_id, subject, sender_name, sender_address,
     sender_domain, recipients, date, body_text, body_html, has_attachment,
-    attachments, labels, in_reply_to, "references", embedding, created_at
+    attachments, labels, in_reply_to, "references", embedding,
+    source_account, import_id, created_at
 """
 
 
@@ -129,6 +130,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
         """Build WHERE-clause conditions and params from common filter kwargs."""
         if direct_only and (max_to is not None or max_cc is not None):
@@ -191,6 +193,9 @@ class MailDB:
                 ") <= %(max_recipients)s"
             )
             params["max_recipients"] = max_recipients
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
 
         return conditions, params
 
@@ -226,6 +231,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Structured query with dynamic WHERE clauses. Returns (emails, total_count)."""
         if order not in VALID_ORDERS:
@@ -245,6 +251,7 @@ class MailDB:
             max_cc=max_cc,
             max_recipients=max_recipients,
             direct_only=direct_only,
+            account=account,
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
@@ -276,6 +283,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[SearchResult], int]:
         """Semantic search with optional structured filters. Returns (results, total_count)."""
         query_embedding = self._embedding_client.embed(query)
@@ -293,6 +301,7 @@ class MailDB:
             max_cc=max_cc,
             max_recipients=max_recipients,
             direct_only=direct_only,
+            account=account,
         )
         conditions.insert(0, "embedding IS NOT NULL AND vector_norm(embedding) > 0")
         params["query_embedding"] = str(query_embedding)
@@ -343,11 +352,19 @@ class MailDB:
 
     # --- Advanced query methods ---
 
-    def _require_user_email(self) -> str:
-        if not self._config.user_email:
-            msg = "user_email must be set in config for this method"
-            raise ValueError(msg)
-        return self._config.user_email
+    def _identity_addresses(self, account: str | None) -> list[str]:
+        """Return the addresses that represent 'you' for identity-aware queries.
+
+        If `account` is provided, returns just that single address.
+        Otherwise returns the configured user_emails list.
+        Raises if neither is available.
+        """
+        if account is not None:
+            return [account]
+        if self._config.user_emails:
+            return list(self._config.user_emails)
+        msg = "user_emails must be configured (or pass account=...) for this method"
+        raise ValueError(msg)
 
     def top_contacts(
         self,
@@ -358,6 +375,7 @@ class MailDB:
         direction: str = "both",
         group_by: str = "address",
         exclude_domains: list[str] | None = None,
+        account: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Most frequent correspondents via GROUP BY aggregation.
 
@@ -367,13 +385,19 @@ class MailDB:
             direction: 'inbound', 'outbound', or 'both'.
             group_by: 'address' (default) or 'domain' to aggregate by domain.
             exclude_domains: List of domains to exclude from results.
+            account: Scope to a single source_account. When provided,
+                "you" = that account. When omitted, "you" = any configured user_emails.
         """
         if group_by not in ("address", "domain"):
             msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
             raise ValueError(msg)
 
-        user_email = self._require_user_email()
-        params: dict[str, Any] = {"user_email": user_email, "limit": limit, "offset": offset}
+        identities = self._identity_addresses(account)
+        params: dict[str, Any] = {
+            "user_emails": identities,
+            "limit": limit,
+            "offset": offset,
+        }
 
         if period:
             period_cond = "AND date >= %(period_start)s"
@@ -389,9 +413,13 @@ class MailDB:
             exclude_inbound = ""
             exclude_outbound = ""
 
-        # Column aliases depend on group_by mode
-        label = group_by  # "address" or "domain"
+        if account is not None:
+            account_cond = "AND source_account = %(account)s"
+            params["account"] = account
+        else:
+            account_cond = ""
 
+        label = group_by
         if group_by == "domain":
             inbound_col = "sender_domain"
             outbound_col = "split_part(r.addr, '@', 2)"
@@ -403,20 +431,15 @@ class MailDB:
             sql = f"""
                 SELECT {inbound_col} AS {label}, count(*) AS count, COUNT(*) OVER() AS _total
                 FROM emails
-                WHERE sender_address != %(user_email)s
+                WHERE sender_address != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_inbound}
+                  {account_cond}
                 GROUP BY {inbound_col}
                 ORDER BY count DESC
                 LIMIT %(limit)s OFFSET %(offset)s
             """
-            rows = _query_dicts(self._pool, sql, params)
-            total = rows[0]["_total"] if rows else 0
-            for row in rows:
-                row.pop("_total", None)
-            return rows, total
-
-        if direction == "outbound":
+        elif direction == "outbound":
             sql = f"""
                 SELECT {outbound_col} AS {label}, count(*) AS count, COUNT(*) OVER() AS _total
                 FROM emails,
@@ -427,56 +450,118 @@ class MailDB:
                          UNION ALL
                          SELECT jsonb_array_elements_text(recipients->'bcc')
                      ) AS r(addr)
-                WHERE sender_address = %(user_email)s
-                  AND r.addr != %(user_email)s
+                WHERE sender_address = ANY(%(user_emails)s)
+                  AND r.addr != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_outbound}
+                  {account_cond}
                 GROUP BY {outbound_col}
                 ORDER BY count DESC
                 LIMIT %(limit)s OFFSET %(offset)s
             """
-            rows = _query_dicts(self._pool, sql, params)
-            total = rows[0]["_total"] if rows else 0
-            for row in rows:
-                row.pop("_total", None)
-            return rows, total
+        else:  # both
+            sql = f"""
+                SELECT {label}, sum(count) AS count, COUNT(*) OVER() AS _total
+                FROM (
+                    SELECT {inbound_col} AS {label}, count(*) AS count
+                    FROM emails
+                    WHERE sender_address != ALL(%(user_emails)s)
+                      {period_cond}
+                      {exclude_inbound}
+                      {account_cond}
+                    GROUP BY {inbound_col}
 
-        sql = f"""
-            SELECT {label}, sum(count) AS count, COUNT(*) OVER() AS _total
-            FROM (
-                SELECT {inbound_col} AS {label}, count(*) AS count
-                FROM emails
-                WHERE sender_address != %(user_email)s
-                  {period_cond}
-                  {exclude_inbound}
-                GROUP BY {inbound_col}
+                    UNION ALL
 
-                UNION ALL
+                    SELECT {outbound_col} AS {label}, count(*) AS count
+                    FROM emails,
+                         LATERAL (
+                             SELECT jsonb_array_elements_text(recipients->'to') AS addr
+                             UNION ALL
+                             SELECT jsonb_array_elements_text(recipients->'cc')
+                             UNION ALL
+                             SELECT jsonb_array_elements_text(recipients->'bcc')
+                         ) AS r(addr)
+                    WHERE sender_address = ANY(%(user_emails)s)
+                      AND r.addr != ALL(%(user_emails)s)
+                      {period_cond}
+                      {exclude_outbound}
+                      {account_cond}
+                    GROUP BY {outbound_col}
+                ) AS combined
+                GROUP BY {label}
+                ORDER BY count DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+            """
 
-                SELECT {outbound_col} AS {label}, count(*) AS count
-                FROM emails,
-                     LATERAL (
-                         SELECT jsonb_array_elements_text(recipients->'to') AS addr
-                         UNION ALL
-                         SELECT jsonb_array_elements_text(recipients->'cc')
-                         UNION ALL
-                         SELECT jsonb_array_elements_text(recipients->'bcc')
-                     ) AS r(addr)
-                WHERE sender_address = %(user_email)s
-                  AND r.addr != %(user_email)s
-                  {period_cond}
-                  {exclude_outbound}
-                GROUP BY {outbound_col}
-            ) AS combined
-            GROUP BY {label}
-            ORDER BY count DESC
-            LIMIT %(limit)s OFFSET %(offset)s
-        """
         rows = _query_dicts(self._pool, sql, params)
         total = rows[0]["_total"] if rows else 0
         for row in rows:
             row.pop("_total", None)
         return rows, total
+
+    def accounts(self) -> list[AccountSummary]:
+        """Summarize email counts per source_account."""
+        sql = """
+            SELECT
+                source_account,
+                COUNT(*)                  AS email_count,
+                MIN(date)                 AS first_date,
+                MAX(date)                 AS last_date,
+                COUNT(DISTINCT import_id) AS import_count
+            FROM emails
+            WHERE source_account IS NOT NULL
+            GROUP BY source_account
+            ORDER BY email_count DESC
+        """
+        rows = _query_dicts(self._pool, sql)
+        return [
+            AccountSummary(
+                source_account=row["source_account"],
+                email_count=row["email_count"],
+                first_date=row["first_date"],
+                last_date=row["last_date"],
+                import_count=row["import_count"],
+            )
+            for row in rows
+        ]
+
+    def import_history(
+        self,
+        *,
+        account: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ImportRecord]:
+        """Return import session records, newest first."""
+        conditions: list[str] = []
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        sql = f"""
+            SELECT id, source_account, source_file, started_at, completed_at,
+                   messages_total, messages_inserted, messages_skipped, status
+            FROM imports{where}
+            ORDER BY started_at DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+        rows = _query_dicts(self._pool, sql, params)
+        return [
+            ImportRecord(
+                id=row["id"],
+                source_account=row["source_account"],
+                source_file=row["source_file"],
+                started_at=row["started_at"],
+                completed_at=row["completed_at"],
+                messages_total=row["messages_total"],
+                messages_inserted=row["messages_inserted"],
+                messages_skipped=row["messages_skipped"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
 
     def topics_with(
         self,
@@ -614,6 +699,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Messages with no reply in the same thread.
 
@@ -628,6 +714,8 @@ class MailDB:
             sender: For inbound — filter to messages from this sender.
             sender_domain: For inbound — filter to messages from this domain.
             limit: Maximum number of results (default 100).
+            account: Scope to a single source_account. When provided,
+                "you" = that account. When omitted, "you" = any configured user_emails.
         """
         if direction not in ("inbound", "outbound"):
             msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
@@ -638,18 +726,19 @@ class MailDB:
         if direction == "outbound" and (sender is not None or sender_domain is not None):
             raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
 
-        user_email = self._require_user_email()
-        params: dict[str, Any] = {"user_email": user_email}
+        identities = self._identity_addresses(account)
+        params: dict[str, Any] = {"user_emails": identities}
 
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
             e.sender_domain, e.recipients, e.date, e.body_text, e.body_html, e.has_attachment,
-            e.attachments, e.labels, e.in_reply_to, e."references", e.embedding, e.created_at
+            e.attachments, e.labels, e.in_reply_to, e."references", e.embedding,
+            e.source_account, e.import_id, e.created_at
         """
 
         if direction == "inbound":
             conditions: list[str] = [
-                "e.sender_address != %(user_email)s",
+                "e.sender_address != ALL(%(user_emails)s)",
                 "e.date IS NOT NULL",
             ]
             if after:
@@ -664,6 +753,9 @@ class MailDB:
             if sender_domain:
                 conditions.append("e.sender_domain = %(sender_domain)s")
                 params["sender_domain"] = sender_domain
+            if account is not None:
+                conditions.append("e.source_account = %(account)s")
+                params["account"] = account
 
             where = " AND ".join(conditions)
             params["limit"] = limit
@@ -675,7 +767,7 @@ class MailDB:
                   AND NOT EXISTS (
                       SELECT 1 FROM emails reply
                       WHERE reply.thread_id = e.thread_id
-                        AND reply.sender_address = %(user_email)s
+                        AND reply.sender_address = ANY(%(user_emails)s)
                         AND reply.date > e.date
                   )
                 ORDER BY e.date DESC
@@ -684,7 +776,7 @@ class MailDB:
         else:
             # Outbound: messages FROM user where recipients never replied
             conditions = [
-                "e.sender_address = %(user_email)s",
+                "e.sender_address = ANY(%(user_emails)s)",
                 "e.date IS NOT NULL",
             ]
             if after:
@@ -693,6 +785,9 @@ class MailDB:
             if before:
                 conditions.append("e.date < %(before)s")
                 params["before"] = before
+            if account is not None:
+                conditions.append("e.source_account = %(account)s")
+                params["account"] = account
 
             if recipient:
                 recipient_json = json.dumps([recipient])
@@ -716,7 +811,7 @@ class MailDB:
                     AND NOT EXISTS (
                         SELECT 1 FROM emails reply
                         WHERE reply.thread_id = e.thread_id
-                          AND reply.sender_address != %(user_email)s
+                          AND reply.sender_address != ALL(%(user_emails)s)
                           AND reply.date > e.date
                     )
                 """
@@ -800,6 +895,7 @@ class MailDB:
         max_cc: int | None = None,
         max_recipients: int | None = None,
         direct_only: bool = False,
+        account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Case-insensitive keyword search in body_text and subject. Returns (emails, total_count).
         Unlike search(), uses ILIKE (substring match) and does not require Ollama.
@@ -822,6 +918,9 @@ class MailDB:
         if before:
             conditions.append("date < %(before)s")
             params["before"] = before
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
         # Recipient count filters
         rcpt_conditions, rcpt_params = self._build_filters(
             max_to=max_to,
@@ -876,15 +975,20 @@ class MailDB:
         after: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        account: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Threads exceeding a message count threshold. Returns (threads, total_count).
         participant: only threads where this address appears as sender.
+        account: scope to a single source_account.
         """
         conditions: list[str] = []
         params: dict[str, Any] = {"min_messages": min_messages, "limit": limit, "offset": offset}
         if after:
             conditions.append("date >= %(after)s")
             params["after"] = after
+        if account is not None:
+            conditions.append("source_account = %(account)s")
+            params["account"] = account
         where = " AND ".join(conditions) if conditions else "TRUE"
         having_participant = ""
         if participant:

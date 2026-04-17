@@ -201,14 +201,15 @@ def find(
     has_attachment: bool | None = None,
     subject_contains: str | None = None,
     labels: list[str] | None = None,
-    limit: int = 50,
-    offset: int = 0,
-    order: str = "date DESC",
-    fields: list[str] | None = None,
     max_to: int | None = None,
     max_cc: int | None = None,
     max_recipients: int | None = None,
     direct_only: bool = False,
+    account: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    order: str = "date DESC",
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search emails by structured attribute filters.
 
@@ -225,6 +226,8 @@ def find(
       max_cc: max number of CC recipients (e.g. 0 for no-CC messages)
       max_recipients: max total recipients across To + CC + BCC
       direct_only: shorthand for max_to=1, max_cc=0 (cannot combine with max_to/max_cc)
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
       order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
@@ -252,6 +255,7 @@ def find(
         max_cc=max_cc,
         max_recipients=max_recipients,
         direct_only=direct_only,
+        account=account,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     serialized = [_serialize_email(e, valid) for e in results]
@@ -271,13 +275,14 @@ def search(
     has_attachment: bool | None = None,
     subject_contains: str | None = None,
     labels: list[str] | None = None,
-    limit: int = 20,
-    offset: int = 0,
-    fields: list[str] | None = None,
     max_to: int | None = None,
     max_cc: int | None = None,
     max_recipients: int | None = None,
     direct_only: bool = False,
+    account: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Semantic search for emails by natural language query. Requires Ollama running.
 
@@ -286,6 +291,8 @@ def search(
       sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels:
         same filters as find() — applied on top of semantic ranking
       max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 20)
       offset: skip first N results for pagination (default 0)
       fields: list of field names to return. Default returns headers + body_length (no body_text).
@@ -311,6 +318,7 @@ def search(
         max_cc=max_cc,
         max_recipients=max_recipients,
         direct_only=direct_only,
+        account=account,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     serialized = [_serialize_search_result(sr, valid) for sr in results]
@@ -368,11 +376,12 @@ def get_thread_for(
 def top_contacts(
     ctx: Context,
     period: str | None = None,
-    limit: int = 10,
-    offset: int = 0,
     direction: str = "both",
     group_by: str = "address",
     exclude_domains: list[str] | None = None,
+    account: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Find most frequent email correspondents by message count.
 
@@ -380,9 +389,11 @@ def top_contacts(
       group_by: "address" (default) for individual addresses, "domain" for domain aggregation
       exclude_domains: list of domains to filter out (e.g. ["mycompany.com"])
       period: ISO date string — only count messages after this date
+      direction: "inbound" | "outbound" | "both" (default "both")
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 10)
       offset: skip first N results for pagination (default 0)
-      direction: "inbound" | "outbound" | "both" (default "both")
 
     Returns list of {address: str, count: int} (or {domain: str, count: int} when group_by="domain").
 
@@ -396,6 +407,7 @@ def top_contacts(
         direction=direction,
         group_by=group_by,
         exclude_domains=exclude_domains,
+        account=account,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
@@ -444,13 +456,14 @@ def unreplied(
     before: str | None = None,
     sender: str | None = None,
     sender_domain: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-    fields: list[str] | None = None,
     max_to: int | None = None,
     max_cc: int | None = None,
     max_recipients: int | None = None,
     direct_only: bool = False,
+    account: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Find emails with no reply in the same thread.
 
@@ -461,6 +474,8 @@ def unreplied(
       after, before: ISO date range filters
       sender, sender_domain: for inbound — filter by original sender
       max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 100)
       offset: skip first N results for pagination (default 0)
       fields: list of field names to return. Default returns headers + body_length (no body_text).
@@ -479,6 +494,7 @@ def unreplied(
         sender_domain=sender_domain,
         limit=limit,
         offset=offset,
+        account=account,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     serialized = [_serialize_email(e, valid) for e in results]
@@ -529,13 +545,14 @@ def mention_search(
     sender_domain: str | None = None,
     after: str | None = None,
     before: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
-    fields: list[str] | None = None,
     max_to: int | None = None,
     max_cc: int | None = None,
     max_recipients: int | None = None,
     direct_only: bool = False,
+    account: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search for emails containing specific text in body or subject (case-insensitive).
 
@@ -546,6 +563,8 @@ def mention_search(
       sender, sender_domain: optional sender filters
       after, before: ISO date range filters
       max_to, max_cc, max_recipients, direct_only: recipient count filters (same as find)
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
       fields: list of field names to return. Default returns headers + body_length (no body_text).
@@ -567,6 +586,7 @@ def mention_search(
         max_cc=max_cc,
         max_recipients=max_recipients,
         direct_only=direct_only,
+        account=account,
     )
     valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
     serialized = [_serialize_email(e, valid) for e in results]
@@ -612,6 +632,7 @@ def long_threads(
     min_messages: int = 5,
     after: str | None = None,
     participant: str | None = None,
+    account: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -621,6 +642,8 @@ def long_threads(
       min_messages: minimum message count threshold (default 5)
       after: ISO date string — only count messages after this date
       participant: only threads where this address appears as sender
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: maximum number of threads to return (default 50)
       offset: skip first N results for pagination (default 0)
 
@@ -635,6 +658,7 @@ def long_threads(
         participant=participant,
         limit=limit,
         offset=offset,
+        account=account,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
@@ -699,3 +723,61 @@ def get_emails(
         for e in results
     ]
     return _wrap_response(serialized, total=len(serialized), offset=0, limit=len(ids))
+
+
+@mcp.tool()
+@log_tool
+def accounts(ctx: Context) -> list[dict[str, Any]]:
+    """List the email accounts present in the database with email counts.
+
+    Returns list of {source_account, email_count, first_date, last_date, import_count}.
+    Use this to discover which accounts are available before scoping queries with `account=...`.
+    """
+    db = _get_db(ctx)
+    summaries = db.accounts()
+    return [
+        {
+            "source_account": s.source_account,
+            "email_count": s.email_count,
+            "first_date": s.first_date.isoformat() if s.first_date else None,
+            "last_date": s.last_date.isoformat() if s.last_date else None,
+            "import_count": s.import_count,
+        }
+        for s in summaries
+    ]
+
+
+@mcp.tool()
+@log_tool
+def import_history(
+    ctx: Context,
+    account: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List ingest sessions, newest first.
+
+    Parameters:
+      account: filter to one source account (optional)
+      limit: max rows (default 50)
+      offset: pagination offset
+
+    Returns list of {id, source_account, source_file, started_at, completed_at,
+    messages_total, messages_inserted, messages_skipped, status}.
+    """
+    db = _get_db(ctx)
+    records = db.import_history(account=account, limit=limit, offset=offset)
+    return [
+        {
+            "id": str(r.id),
+            "source_account": r.source_account,
+            "source_file": r.source_file,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "messages_total": r.messages_total,
+            "messages_inserted": r.messages_inserted,
+            "messages_skipped": r.messages_skipped,
+            "status": r.status,
+        }
+        for r in records
+    ]

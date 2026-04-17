@@ -5,6 +5,7 @@ import json
 import json as json_mod
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -1190,3 +1191,201 @@ def test_cluster_rejects_both_where_and_ids(test_pool, seed_advanced) -> None:  
             where={"field": "sender_domain", "eq": "corp.com"},
             message_ids=["adv-1@example.com"],
         )
+
+
+def test_find_filters_by_account(test_pool, test_settings):
+    """find(account=...) returns only emails tagged with that account."""
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a = uuid4()
+    iid_b = uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 'test', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (iid, acct) in enumerate(
+            [(iid_a, "a@example.com"), (iid_a, "a@example.com"), (iid_b, "b@example.com")]
+        ):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', 'T', 'x@example.com',
+                       now(), %(acct)s, %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<find-acct-{n}@example.com>", "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    a_only, _ = db.find(account="a@example.com")
+    assert len(a_only) == 2
+    assert all(e.source_account == "a@example.com" for e in a_only)
+
+    all_emails, _ = db.find()
+    assert len(all_emails) == 3
+
+
+def test_mention_search_filters_by_account(test_pool, test_settings):
+    """mention_search(account=...) returns only emails tagged with that account."""
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a = uuid4()
+    iid_b = uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 'test', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (iid, acct) in enumerate(
+            [(iid_a, "a@example.com"), (iid_a, "a@example.com"), (iid_b, "b@example.com")]
+        ):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                       date, body_text, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', 'T', 'x@example.com',
+                       now(), 'budget meeting next quarter',
+                       %(acct)s, %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<ms-acct-{n}@example.com>", "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    a_only, _ = db.mention_search(text="budget", account="a@example.com")
+    assert len(a_only) == 2
+    assert all(e.source_account == "a@example.com" for e in a_only)
+
+    all_emails, _ = db.mention_search(text="budget")
+    assert len(all_emails) == 3
+
+
+def test_top_contacts_scoped_by_account(test_pool, test_settings):
+    config = test_settings.model_copy()
+    config.user_emails = ["a@example.com", "b@example.com"]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        # Inbound to A from alice; inbound to B from bob.
+        for sender, acct, iid in [
+            ("alice@x.com", "a@example.com", iid_a),
+            ("alice@x.com", "a@example.com", iid_a),
+            ("bob@y.com", "b@example.com", iid_b),
+        ]:
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', %(sender)s,
+                       now(), %(acct)s, %(iid)s, now())""",
+                {
+                    "id": uuid4(),
+                    "mid": f"<topc-{uuid4()}@x>",
+                    "sender": sender,
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+        conn.commit()
+
+    a_results, _ = db.top_contacts(account="a@example.com", direction="inbound")
+    addrs = {r["address"] for r in a_results}
+    assert addrs == {"alice@x.com"}
+
+    all_results, _ = db.top_contacts(direction="inbound")
+    addrs = {r["address"] for r in all_results}
+    assert addrs == {"alice@x.com", "bob@y.com"}
+
+
+def test_long_threads_scoped_by_account(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        # Account A has a thread of 6 messages; B has a thread of 2.
+        for n in range(6):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'long-A', 'x@example.com',
+                       now(), 'a@example.com', %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<lt-A-{n}@x>", "iid": iid_a},
+            )
+        for n in range(2):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address,
+                       date, source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'long-B', 'y@example.com',
+                       now(), 'b@example.com', %(iid)s, now())""",
+                {"id": uuid4(), "mid": f"<lt-B-{n}@x>", "iid": iid_b},
+            )
+        conn.commit()
+
+    a_threads, _ = db.long_threads(min_messages=5, account="a@example.com")
+    assert {t["thread_id"] for t in a_threads} == {"long-A"}
+
+    b_threads, _ = db.long_threads(min_messages=5, account="b@example.com")
+    assert b_threads == []
+
+
+def test_accounts_returns_summary(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a, iid_b = uuid4(), uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (acct, iid) in enumerate(
+            [("a@example.com", iid_a)] * 3 + [("b@example.com", iid_b)] * 2
+        ):
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, source_account,
+                       import_id, date, created_at)
+                   VALUES (%(id)s, %(mid)s, 't', %(acct)s, %(iid)s, now(), now())""",
+                {"id": uuid4(), "mid": f"<acc-{n}@x>", "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    summaries = db.accounts()
+    by_acct = {s.source_account: s for s in summaries}
+    assert by_acct["a@example.com"].email_count == 3
+    assert by_acct["b@example.com"].email_count == 2
+    assert by_acct["a@example.com"].import_count == 1
+
+
+def test_import_history_returns_records(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    with test_pool.connection() as conn:
+        # Clean first to isolate from other tests.
+        conn.execute(
+            "DELETE FROM imports WHERE source_account IN ('a@example.com', 'b@example.com')"
+        )
+        conn.commit()
+        for acct in ["a@example.com", "b@example.com", "a@example.com"]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 't', 'completed')",
+                {"id": uuid4(), "acct": acct},
+            )
+        conn.commit()
+
+    all_records = [
+        r for r in db.import_history() if r.source_account in ("a@example.com", "b@example.com")
+    ]
+    assert len(all_records) == 3
+
+    a_only = db.import_history(account="a@example.com")
+    assert len(a_only) == 2
+    assert all(r.source_account == "a@example.com" for r in a_only)

@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from maildb.ingest import orchestrator
 from maildb.ingest.orchestrator import count_unembedded, get_status, reset_pipeline, run_pipeline
 from maildb.ingest.tasks import complete_task, create_task
 
@@ -33,6 +34,7 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
         chunk_size_bytes=50 * 1024 * 1024,
         parse_workers=2,
         skip_embed=True,
+        source_account="test@example.com",
     )
     assert result["parse"]["completed"] > 0
     with test_pool.connection() as conn:
@@ -112,3 +114,132 @@ def test_reset_parse_phase(test_pool):
         assert cur.fetchone()[0] == 0
         cur = conn.execute("SELECT count(*) FROM emails")
         assert cur.fetchone()[0] == 0
+
+
+def test_run_pipeline_does_not_orphan_import_row_on_restart(test_pool, test_settings, tmp_path):
+    """Regression: the restart path (split_status total > 0, completed == 0)
+    must not leak an orphaned 'running' imports row.
+    """
+    # Simulate stale split state to trigger the restart branch.
+    create_task(test_pool, phase="split")
+    create_task(test_pool, phase="parse", chunk_path="/tmp/fake.chunk")
+    # Clean imports table before our run.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="restart@example.com",
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*), max(status) FROM imports")
+        count, status = cur.fetchone()
+        assert count == 1, f"Expected 1 imports row after restart, got {count}"
+        assert status == "completed"
+
+
+def test_run_pipeline_marks_import_failed_on_exception(
+    test_pool, test_settings, tmp_path, monkeypatch
+):
+    """On exception during the pipeline, the imports row should end up
+    status='failed' with completed_at set, and the exception should re-raise.
+    """
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated index failure")
+
+    monkeypatch.setattr(orchestrator, "run_index_phase", _boom)
+
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="simulated index failure"):
+        run_pipeline(
+            mbox_path=FIXTURES / "sample.mbox",
+            database_url=test_settings.database_url,
+            attachment_dir=tmp_path / "attachments",
+            tmp_dir=tmp_path / "chunks",
+            chunk_size_bytes=50 * 1024 * 1024,
+            parse_workers=2,
+            skip_embed=True,
+            source_account="failed@example.com",
+        )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status, completed_at FROM imports WHERE source_account = 'failed@example.com'"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "failed"
+        assert rows[0][1] is not None
+
+
+def test_run_pipeline_writes_imports_row_and_stamps_emails(test_pool, test_settings, tmp_path):
+    # Clear any imports rows left over from prior tests — conftest's _clean_emails
+    # fixture doesn't touch the imports table.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM imports")
+        conn.commit()
+
+    run_pipeline(
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="you@example.com",
+    )
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT source_account, status, messages_inserted FROM imports")
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "you@example.com"
+        assert rows[0][1] == "completed"
+        assert rows[0][2] > 0
+
+        cur = conn.execute(
+            "SELECT count(*) FROM emails WHERE source_account IS NULL OR import_id IS NULL"
+        )
+        assert cur.fetchone()[0] == 0
+
+
+def test_re_running_ingest_creates_new_import_but_zero_emails(test_pool, test_settings, tmp_path):
+    """Idempotent ingest: second run inserts zero emails but logs a new import row."""
+    common_kwargs = dict(  # noqa: C408
+        mbox_path=FIXTURES / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="re-run@example.com",
+    )
+    run_pipeline(**common_kwargs)
+    # Wipe ingest_tasks (but keep emails) so the second run replays the parse
+    # phase and exercises the ON CONFLICT dedup path.
+    with test_pool.connection() as conn:
+        conn.execute("DELETE FROM ingest_tasks")
+        conn.commit()
+    run_pipeline(**common_kwargs)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            """SELECT count(*), sum(messages_skipped)
+               FROM imports WHERE source_account = 're-run@example.com'"""
+        )
+        count, total_skipped = cur.fetchone()
+        assert count == 2
+        assert total_skipped > 0, "Second import should have recorded skipped duplicates"

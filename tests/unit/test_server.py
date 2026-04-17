@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 from uuid import uuid4
 
-from maildb.models import Email, Recipients, SearchResult
+from maildb import server
+from maildb.models import AccountSummary, Email, ImportRecord, Recipients, SearchResult
 from maildb.server import (
     SERIALIZABLE_EMAIL_FIELDS,
     _serialize_email,
@@ -33,6 +35,8 @@ def _make_email() -> Email:
         in_reply_to=None,
         references=[],
         embedding=[0.1] * 768,
+        source_account=None,
+        import_id=None,
         created_at=datetime(2025, 1, 15, 10, 0, tzinfo=UTC),
     )
 
@@ -227,3 +231,59 @@ def test_mcp_has_all_tools() -> None:
     }
 
     assert expected <= tool_names, f"Missing tools: {expected - tool_names}"
+
+
+def test_find_passes_account_to_db() -> None:
+    mock_db = MagicMock()
+    mock_db.find.return_value = ([], 0)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    server.find(ctx, account="you@example.com")
+    kwargs = mock_db.find.call_args.kwargs
+    assert kwargs["account"] == "you@example.com"
+
+
+def test_accounts_tool_serializes_summaries() -> None:
+    mock_db = MagicMock()
+    mock_db.accounts.return_value = [
+        AccountSummary(
+            source_account="a@example.com",
+            email_count=10,
+            first_date=datetime(2026, 1, 1, tzinfo=UTC),
+            last_date=datetime(2026, 4, 1, tzinfo=UTC),
+            import_count=2,
+        ),
+    ]
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.accounts(ctx)
+    assert isinstance(result, list)
+    assert result[0]["source_account"] == "a@example.com"
+    assert result[0]["email_count"] == 10
+    assert result[0]["first_date"].startswith("2026-01")
+
+
+def test_import_history_tool() -> None:
+    mock_db = MagicMock()
+    iid = uuid4()
+    mock_db.import_history.return_value = [
+        ImportRecord(
+            id=iid,
+            source_account="a@example.com",
+            source_file="x.mbox",
+            started_at=datetime(2026, 4, 16, tzinfo=UTC),
+            completed_at=None,
+            messages_total=0,
+            messages_inserted=0,
+            messages_skipped=0,
+            status="running",
+        ),
+    ]
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.import_history(ctx)
+    assert result[0]["id"] == str(iid)
+    assert result[0]["status"] == "running"

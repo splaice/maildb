@@ -28,6 +28,8 @@ _EMAILS_COLUMNS: set[str] = {
     "labels",
     "in_reply_to",
     "created_at",
+    "source_account",
+    "import_id",
 }
 
 _SENT_TO_COLUMNS: set[str] = _EMAILS_COLUMNS | {

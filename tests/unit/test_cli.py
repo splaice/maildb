@@ -1,46 +1,178 @@
 from __future__ import annotations
 
-import sys
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from maildb.ingest.__main__ import main
+from typer.testing import CliRunner
+
+from maildb.cli import app
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+runner = CliRunner()
 
-def test_skip_embed_flag_parsed(tmp_path: Path) -> None:
+
+def test_serve_invokes_mcp_run():
+    with patch("maildb.cli._configure_logging"), patch("maildb.cli.mcp.run") as mock_run:
+        result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 0, result.output
+    mock_run.assert_called_once()
+
+
+def test_help_lists_subcommands():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "serve" in result.output
+    assert "ingest" in result.output
+
+
+def test_ingest_run_requires_account(tmp_path: Path):
+    mbox = tmp_path / "test.mbox"
+    mbox.touch()
+    result = runner.invoke(app, ["ingest", "run", str(mbox)])
+    assert result.exit_code != 0
+    assert "account" in result.output.lower() or "missing" in result.output.lower()
+
+
+def test_ingest_run_validates_account_format(tmp_path: Path):
+    mbox = tmp_path / "test.mbox"
+    mbox.touch()
+    result = runner.invoke(app, ["ingest", "run", str(mbox), "--account", "not-an-email"])
+    assert result.exit_code != 0
+    assert "email" in result.output.lower()
+
+
+def test_ingest_run_passes_account_through(tmp_path: Path):
     mbox = tmp_path / "test.mbox"
     mbox.touch()
     with (
-        patch("maildb.ingest.__main__.run_pipeline") as mock_pipeline,
-        patch("maildb.ingest.__main__.create_pool") as mock_pool,
-        patch("maildb.ingest.__main__.init_db"),
-        patch.object(sys, "argv", ["prog", str(mbox), "--skip-embed"]),
+        patch("maildb.cli.run_pipeline") as mock_pipeline,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
     ):
         mock_pool.return_value = MagicMock()
         mock_pipeline.return_value = {}
+        result = runner.invoke(app, ["ingest", "run", str(mbox), "--account", "you@example.com"])
+    assert result.exit_code == 0, result.output
+    mock_pipeline.assert_called_once()
+    kwargs = mock_pipeline.call_args[1]
+    assert kwargs["source_account"] == "you@example.com"
+    assert kwargs["skip_embed"] is False
 
-        main()
-        mock_pipeline.assert_called_once()
-        call_kwargs = mock_pipeline.call_args[1]
-        assert call_kwargs["skip_embed"] is True
 
-
-def test_no_skip_embed_by_default(tmp_path: Path) -> None:
+def test_ingest_run_skip_embed_flag(tmp_path: Path):
     mbox = tmp_path / "test.mbox"
     mbox.touch()
     with (
-        patch("maildb.ingest.__main__.run_pipeline") as mock_pipeline,
-        patch("maildb.ingest.__main__.create_pool") as mock_pool,
-        patch("maildb.ingest.__main__.init_db"),
-        patch.object(sys, "argv", ["prog", str(mbox)]),
+        patch("maildb.cli.run_pipeline") as mock_pipeline,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
     ):
         mock_pool.return_value = MagicMock()
         mock_pipeline.return_value = {}
+        result = runner.invoke(
+            app,
+            ["ingest", "run", str(mbox), "--account", "you@example.com", "--skip-embed"],
+        )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_pipeline.call_args[1]
+    assert kwargs["skip_embed"] is True
 
-        main()
-        mock_pipeline.assert_called_once()
-        call_kwargs = mock_pipeline.call_args[1]
-        assert call_kwargs.get("skip_embed", False) is False
+
+def test_ingest_status_invokes_get_status():
+    with (
+        patch("maildb.cli.get_status") as mock_status,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        # Arrange: pool.connection() → cursor → execute() → fetchall returns a row.
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            (
+                datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+                "you@example.com",
+                "completed",
+                42,
+                3,
+            )
+        ]
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
+
+        mock_status.return_value = {
+            "split": {},
+            "parse": {},
+            "index": {},
+            "embed": {},
+            "total_emails": 0,
+        }
+        result = runner.invoke(app, ["ingest", "status"])
+
+    assert result.exit_code == 0, result.output
+    mock_status.assert_called_once()
+    # Confirms _print_imports_summary actually ran the loop body.
+    assert "Imports" in result.output
+    assert "you@example.com" in result.output
+    assert "completed" in result.output
+    assert "42" in result.output
+
+
+def test_ingest_status_filters_by_account():
+    """--account adds source_account filter to the imports query."""
+    with (
+        patch("maildb.cli.get_status") as mock_status,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        execute_mock = pool_instance.connection.return_value.__enter__.return_value.execute
+        execute_mock.return_value = cursor
+        mock_pool.return_value = pool_instance
+
+        mock_status.return_value = {
+            "split": {},
+            "parse": {},
+            "index": {},
+            "embed": {},
+            "total_emails": 0,
+        }
+        result = runner.invoke(app, ["ingest", "status", "--account", "you@example.com"])
+
+    assert result.exit_code == 0, result.output
+    # Verify the account filter was applied in the SQL params.
+    calls = execute_mock.call_args_list
+    assert any(
+        len(call.args) >= 2 and call.args[1].get("account") == "you@example.com" for call in calls
+    )
+
+
+def test_ingest_reset_requires_yes_or_aborts():
+    """Declining the confirm prompt aborts with exit code 1 and 'Aborted.' message."""
+    with (
+        patch("maildb.cli.reset_pipeline") as mock_reset,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["ingest", "reset"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Aborted." in result.output
+    assert mock_reset.call_count == 0
+
+
+def test_ingest_reset_with_yes_calls_reset():
+    with (
+        patch("maildb.cli.reset_pipeline") as mock_reset,
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["ingest", "reset", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_reset.assert_called_once()

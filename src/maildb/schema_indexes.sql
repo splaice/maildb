@@ -9,5 +9,9 @@ CREATE INDEX IF NOT EXISTS idx_email_recipients ON emails USING GIN (recipients)
 CREATE INDEX IF NOT EXISTS idx_email_thread_sender_date ON emails (thread_id, sender_address, date);
 CREATE INDEX IF NOT EXISTS idx_email_attachments_email_id ON email_attachments (email_id);
 CREATE INDEX IF NOT EXISTS idx_email_attachments_attachment_id ON email_attachments (attachment_id);
+CREATE INDEX IF NOT EXISTS idx_email_source_account ON emails (source_account);
+CREATE INDEX IF NOT EXISTS idx_email_import_id ON emails (import_id);
+CREATE INDEX IF NOT EXISTS idx_imports_source_account ON imports (source_account);
+CREATE INDEX IF NOT EXISTS idx_imports_started_at ON imports (started_at DESC);
 -- HNSW index created separately after embed phase:
 -- CREATE INDEX IF NOT EXISTS idx_email_embedding ON emails USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);

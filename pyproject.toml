@@ -12,7 +12,11 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "structlog>=24.4",
     "mcp>=1.26.0",
+    "typer>=0.12",
 ]
+
+[project.scripts]
+maildb = "maildb.cli:app"
 
 [dependency-groups]
 dev = [

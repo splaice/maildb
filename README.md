@@ -20,7 +20,7 @@ uv sync
 
 # Copy and edit environment config
 cp .env.example .env
-# Edit .env — set MAILDB_DATABASE_URL and MAILDB_USER_EMAIL at minimum
+# Edit .env — set MAILDB_DATABASE_URL and MAILDB_USER_EMAILS at minimum
 ```
 
 ### Database setup
@@ -42,21 +42,33 @@ ollama pull nomic-embed-text
 MailDB imports `.mbox` files (e.g., from Gmail Takeout). The ingest pipeline has four phases: split, parse, index, and embed. It is restartable — if interrupted, re-running the same command picks up where it left off.
 
 ```bash
-# Import an mbox file
-uv run python -m maildb.ingest /path/to/mail.mbox
+# Import an mbox file (--account is required)
+uv run maildb ingest run --account you@example.com /path/to/mail.mbox
 
 # Import without generating embeddings (much faster, semantic search won't work)
-uv run python -m maildb.ingest /path/to/mail.mbox --skip-embed
+uv run maildb ingest run --account you@example.com /path/to/mail.mbox --skip-embed
 
-# Check pipeline progress
-uv run python -m maildb.ingest status
+# Check pipeline progress (optionally filter by account)
+uv run maildb ingest status
+uv run maildb ingest status --account you@example.com
 
 # Reset pipeline state (to re-import)
-uv run python -m maildb.ingest reset
-uv run python -m maildb.ingest reset --phase embed   # reset only the embed phase
+uv run maildb ingest reset
+uv run maildb ingest reset --phase embed   # reset only the embed phase
+uv run maildb ingest reset --yes           # skip the confirmation prompt
 ```
 
 Embedding is the slowest phase (~20 messages/second with 4 Ollama workers). A 50 GB mbox with ~840K messages takes roughly 12 hours to embed on an M1 Max.
+
+### Migrating an existing database
+
+If you have a pre-existing database without account tagging, run:
+
+```bash
+uv run maildb ingest migrate --account you@example.com
+```
+
+This tags every untagged email with the given account. It's idempotent and only touches rows where `source_account IS NULL`.
 
 ## Running the MCP server
 
@@ -73,7 +85,8 @@ All settings are controlled via environment variables (prefixed `MAILDB_`) or a 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAILDB_DATABASE_URL` | `postgresql://maildb@localhost:5432/maildb` | PostgreSQL connection string |
-| `MAILDB_USER_EMAIL` | (none) | Your email address — required for `unreplied()` and `top_contacts()` |
+| `MAILDB_USER_EMAILS` | (none) | Comma-separated list of your email addresses — required for `unreplied()` and `top_contacts()`. Supports multiple accounts (e.g. `you@example.com,you@work.com`). |
+| `MAILDB_USER_EMAIL` | (none) | Backwards-compat alias for `MAILDB_USER_EMAILS`. Accepts a single address; prefer `MAILDB_USER_EMAILS` for new setups. |
 | `MAILDB_OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `MAILDB_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model for embeddings |
 

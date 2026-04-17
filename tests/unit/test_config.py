@@ -50,3 +50,40 @@ def test_debug_log_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.debug_log == "/tmp/custom-debug.log"
     assert settings.debug_log_level == "INFO"
     assert settings.debug_log_max_bytes == 5_242_880
+
+
+def test_user_emails_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
+    monkeypatch.setenv("MAILDB_USER_EMAILS", "a@example.com,b@example.com")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.user_emails == ["a@example.com", "b@example.com"]
+
+
+def test_legacy_user_email_merges_into_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAILDB_USER_EMAIL", "legacy@example.com")
+    monkeypatch.delenv("MAILDB_USER_EMAILS", raising=False)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.user_emails == ["legacy@example.com"]
+
+
+def test_legacy_user_email_prepended_when_not_already_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAILDB_USER_EMAIL", "legacy@example.com")
+    monkeypatch.setenv("MAILDB_USER_EMAILS", "a@example.com,b@example.com")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.user_emails == ["legacy@example.com", "a@example.com", "b@example.com"]
+
+
+def test_legacy_user_email_not_duplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAILDB_USER_EMAIL", "a@example.com")
+    monkeypatch.setenv("MAILDB_USER_EMAILS", "a@example.com,b@example.com")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.user_emails == ["a@example.com", "b@example.com"]
+
+
+def test_no_user_emails_is_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAILDB_USER_EMAIL", raising=False)
+    monkeypatch.delenv("MAILDB_USER_EMAILS", raising=False)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.user_emails == []
