@@ -7,6 +7,7 @@ import pytest
 
 import maildb.ingest.process_attachments as process_attachments_module
 from maildb.ingest.process_attachments import (
+    _reclaim_stale,
     ensure_pending_rows,
     process_one,
     run,
@@ -167,8 +168,6 @@ def test_process_one_embeds_chunks_when_ollama_available(test_pool, tmp_path, te
 def test_watchdog_reclaims_stale_extracting_row(test_pool, tmp_path):
     """A row stuck in 'extracting' with a stale extracted_at is reset to 'pending'
     by the _reclaim_stale helper run at the top of run()."""
-    from maildb.ingest.process_attachments import _reclaim_stale
-
     att_id = _insert_attachment(test_pool, "wd", "text/plain", "stale.txt")
     ensure_pending_rows(test_pool)
 

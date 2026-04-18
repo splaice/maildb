@@ -442,6 +442,30 @@ def process_status() -> None:
             typer.echo("\nTop failure reasons")
             for reason, n in rows:
                 typer.echo(f"  {n:>4,}  {reason[:120] if reason else ''}")
+
+        with pool.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT a.content_type,
+                       count(*) AS n,
+                       avg(ac.extraction_ms)::float AS avg_ms,
+                       avg((SELECT count(*) FROM attachment_chunks WHERE attachment_id = a.id))::float AS avg_chunks
+                FROM attachment_contents ac
+                JOIN attachments a ON a.id = ac.attachment_id
+                WHERE ac.status = 'extracted' AND a.content_type IS NOT NULL
+                GROUP BY a.content_type
+                ORDER BY n DESC LIMIT 20
+                """
+            )
+            rows = cur.fetchall()
+        if rows:
+            typer.echo("\nPer-content-type throughput")
+            typer.echo(f"  {'type':<55} {'N':>7} {'avg_ms':>10} {'avg_chunks':>12}")
+            for content_type, n, avg_ms, avg_chunks in rows:
+                typer.echo(
+                    f"  {content_type[:55]:<55} {n:>7,} "
+                    f"{(avg_ms or 0):>10.1f} {(avg_chunks or 0):>12.1f}"
+                )
     finally:
         _close_pool(pool)
 
