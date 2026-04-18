@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from maildb.db import init_db
@@ -265,9 +266,7 @@ def test_init_db_backfills_reference_count(test_pool) -> None:  # type: ignore[n
                 "VALUES (gen_random_uuid(), %s, 't', 'test@example.com') RETURNING id",
                 (mid,),
             )
-            eid = conn.execute(
-                "SELECT id FROM emails WHERE message_id=%s", (mid,)
-            ).fetchone()[0]
+            eid = conn.execute("SELECT id FROM emails WHERE message_id=%s", (mid,)).fetchone()[0]
             conn.execute(
                 "INSERT INTO email_attachments (email_id, attachment_id, filename) "
                 "VALUES (%s, %s, 'x.pdf')",
@@ -275,17 +274,15 @@ def test_init_db_backfills_reference_count(test_pool) -> None:  # type: ignore[n
             )
         # Reset reference_count to 0 so we can prove the backfill runs.
         conn.execute(
-            "UPDATE attachments SET reference_count = 0 WHERE id = %s", (att_id,),
+            "UPDATE attachments SET reference_count = 0 WHERE id = %s",
+            (att_id,),
         )
         conn.commit()
 
-    from maildb.db import init_db
     init_db(test_pool)
 
     with test_pool.connection() as conn:
-        cur = conn.execute(
-            "SELECT reference_count FROM attachments WHERE id = %s", (att_id,)
-        )
+        cur = conn.execute("SELECT reference_count FROM attachments WHERE id = %s", (att_id,))
         assert cur.fetchone()[0] == 2
 
 
@@ -310,7 +307,6 @@ def test_attachment_contents_table_exists(test_pool) -> None:  # type: ignore[no
 
 def test_attachment_contents_status_check_enforced(test_pool) -> None:  # type: ignore[no-untyped-def]
     """CHECK constraint rejects invalid status values."""
-    import psycopg
     with test_pool.connection() as conn:
         conn.execute(
             "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
@@ -321,5 +317,46 @@ def test_attachment_contents_status_check_enforced(test_pool) -> None:  # type: 
             conn.execute(
                 "INSERT INTO attachment_contents (attachment_id, status) VALUES (%s, %s)",
                 (att_id, "bogus"),
+            )
+        conn.rollback()
+
+
+def test_attachment_chunks_table_exists(test_pool) -> None:  # type: ignore[no-untyped-def]
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'attachment_chunks' ORDER BY column_name"
+        )
+        cols = {row[0] for row in cur.fetchall()}
+    assert cols == {
+        "id",
+        "attachment_id",
+        "chunk_index",
+        "heading_path",
+        "page_number",
+        "token_count",
+        "text",
+        "embedding",
+    }
+
+
+def test_attachment_chunks_unique_index_on_attachment_chunk(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """(attachment_id, chunk_index) must be unique."""
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('cc', 'z.pdf', 'application/pdf', 1, 'cc/z.pdf')"
+        )
+        att_id = conn.execute("SELECT id FROM attachments WHERE sha256='cc'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO attachment_chunks (attachment_id, chunk_index, token_count, text) "
+            "VALUES (%s, 0, 5, 'hi')",
+            (att_id,),
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO attachment_chunks (attachment_id, chunk_index, token_count, text) "
+                "VALUES (%s, 0, 6, 'hey')",
+                (att_id,),
             )
         conn.rollback()

@@ -100,3 +100,15 @@ CREATE TABLE IF NOT EXISTS attachment_contents (
     extraction_ms     INT,
     extractor_version TEXT
 );
+
+CREATE TABLE IF NOT EXISTS attachment_chunks (
+    id             BIGSERIAL PRIMARY KEY,
+    attachment_id  INT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    chunk_index    INT NOT NULL,
+    heading_path   TEXT,
+    page_number    INT,
+    token_count    INT NOT NULL,
+    text           TEXT NOT NULL,
+    embedding      vector(768),
+    UNIQUE (attachment_id, chunk_index)
+);
