@@ -7,7 +7,15 @@ and by the Marker dispatch below.
 
 from __future__ import annotations
 
-from typing import Final
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final
+
+import structlog
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+logger = structlog.get_logger()
 
 SUPPORTED: Final[set[str]] = {
     "pdf",
@@ -46,15 +54,7 @@ def route_content_type(content_type: str | None) -> str | None:
     return _ROUTES.get(content_type.lower())
 
 
-from dataclasses import dataclass
-from pathlib import Path
-
-import structlog
-
-logger = structlog.get_logger()
-
-
-class ExtractionFailed(Exception):
+class ExtractionFailedError(Exception):
     """Raised when extraction cannot proceed. The message is recorded as `reason`."""
 
 
@@ -81,11 +81,11 @@ def _marker_convert(path: Path) -> tuple[str, str]:
 
 
 def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResult:
-    """Extract markdown from an attachment. Raises ExtractionFailed on unsupported
+    """Extract markdown from an attachment. Raises ExtractionFailedError on unsupported
     types or when Marker errors out."""
     bucket = route_content_type(content_type)
     if bucket is None:
-        raise ExtractionFailed(f"content_type {content_type!r} is not supported by Marker")
+        raise ExtractionFailedError(f"content_type {content_type!r} is not supported by Marker")
 
     if bucket == "text":
         return ExtractionResult(
@@ -104,7 +104,7 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
     # Legacy .doc / .xls need LibreOffice pre-conversion. Defer to Marker for the
     # rest — Marker handles PDF, DOCX, XLSX, PPTX, and images natively.
     if bucket in ("doc_legacy", "xls_legacy"):
-        raise ExtractionFailed(
+        raise ExtractionFailedError(
             f"{bucket}: legacy binary format requires LibreOffice pre-conversion "
             "(not implemented in v1)"
         )
@@ -112,6 +112,6 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
     try:
         markdown, version = _marker_convert(path)
     except Exception as exc:
-        raise ExtractionFailed(f"marker: {exc}") from exc
+        raise ExtractionFailedError(f"marker: {exc}") from exc
 
     return ExtractionResult(markdown=markdown, extractor_version=version)

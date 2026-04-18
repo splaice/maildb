@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
 import pytest
 
-from maildb.ingest.extraction import SUPPORTED, route_content_type
+from maildb.ingest.extraction import (
+    SUPPORTED,
+    ExtractionFailedError,
+    ExtractionResult,
+    extract_markdown,
+    route_content_type,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -67,16 +79,6 @@ def test_supported_set_matches_router():
     assert reachable <= SUPPORTED
 
 
-from pathlib import Path
-from unittest.mock import patch
-
-from maildb.ingest.extraction import (
-    ExtractionFailed,
-    ExtractionResult,
-    extract_markdown,
-)
-
-
 def test_extract_passes_through_text_file(tmp_path: Path):
     p = tmp_path / "hello.txt"
     p.write_text("Hello world\nA second line")
@@ -110,6 +112,6 @@ def test_extract_calls_marker_for_pdf(tmp_path: Path):
 def test_extract_unsupported_raises_extraction_failed(tmp_path: Path):
     p = tmp_path / "a.mp3"
     p.write_bytes(b"ID3\x00")
-    with pytest.raises(ExtractionFailed) as exc:
+    with pytest.raises(ExtractionFailedError) as exc:
         extract_markdown(p, content_type="audio/mpeg")
     assert "not supported" in str(exc.value).lower()
