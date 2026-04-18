@@ -351,8 +351,12 @@ def test_search_all_passes_recipient_count_filters_through() -> None:
     ctx = MagicMock()
     ctx.request_context.lifespan_context.db = mock_db
     server.search_all(
-        ctx, query="x",
-        max_to=1, max_cc=0, max_recipients=3, direct_only=True,
+        ctx,
+        query="x",
+        max_to=1,
+        max_cc=0,
+        max_recipients=3,
+        direct_only=True,
     )
     kwargs = mock_db.search_all.call_args.kwargs
     assert kwargs["max_to"] == 1
