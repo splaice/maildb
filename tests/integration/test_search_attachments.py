@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -137,3 +138,67 @@ def test_search_attachments_honors_email_level_account_filter(test_pool, test_se
     # Scoped to account B: should not find it.
     results_b, _ = db.search_attachments(query="unique", account="b@ex.com")
     assert not any(r.attachment_id == att_id for r in results_b)
+
+
+def test_get_attachment_markdown_returns_full_text(test_pool, test_settings):
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('gm', 'full.pdf', 'application/pdf', 100, 'gm/gm/gm') RETURNING id"
+        )
+        att_id = cur.fetchone()[0]
+        conn.execute(
+            "INSERT INTO attachment_contents (attachment_id, status, markdown, markdown_bytes) "
+            "VALUES (%s, 'extracted', %s, %s)",
+            (att_id, "# Full document text", 20),
+        )
+        conn.commit()
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    assert db.get_attachment_markdown(att_id) == "# Full document text"
+
+
+def test_get_attachment_markdown_returns_none_when_not_extracted(test_pool, test_settings):
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('gm2', 'pending.pdf', 'application/pdf', 100, 'gm2/gm2/gm2') RETURNING id"
+        )
+        att_id = cur.fetchone()[0]
+        conn.execute(
+            "INSERT INTO attachment_contents (attachment_id, status) VALUES (%s, 'pending')",
+            (att_id,),
+        )
+        conn.commit()
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    assert db.get_attachment_markdown(att_id) is None
+
+
+def test_search_all_merges_email_and_attachment_hits(test_pool, test_settings):
+    """Seed one email with an embedding + one attachment chunk. search_all returns both."""
+    # Seed one email with an embedding close to our query.
+    vec = [0.5] * 768
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                   date, embedding, source_account, created_at)
+               VALUES (gen_random_uuid(), %s, 't', 'Budget', 'ceo@acme.com',
+                       %s, %s, 'sa@ex.com', now())""",
+            ("<email-sa-1@ex.com>", datetime(2025, 1, 1, tzinfo=UTC), str(vec)),
+        )
+        conn.commit()
+
+    _seed_attachment_chunk(
+        test_pool,
+        sha256="sa1",
+        chunk_text="A chunk about quarterly budget.",
+        embedding=[0.5] * 768,
+        email_ids=["<email-sa-2@ex.com>"],
+    )
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = [0.5] * 768
+    results, total = db.search_all(query="budget")
+    assert total >= 2
+    sources = {r.source for r in results}
+    assert sources == {"email", "attachment"}

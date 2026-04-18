@@ -23,6 +23,7 @@ from maildb.models import (
     Email,
     ImportRecord,
     SearchResult,
+    UnifiedSearchResult,
 )
 
 if TYPE_CHECKING:
@@ -1130,6 +1131,92 @@ class MailDB:
                 )
             )
         return results, total
+
+    def get_attachment_markdown(self, attachment_id: int) -> str | None:
+        """Return the full extracted markdown for an attachment, or None if
+        extraction is pending, failed, or the row doesn't exist.
+        """
+        row = _query_one_dict(
+            self._pool,
+            "SELECT markdown FROM attachment_contents "
+            "WHERE attachment_id = %(id)s AND status = 'extracted'",
+            {"id": attachment_id},
+        )
+        return row["markdown"] if row else None
+
+    def search_all(
+        self,
+        query: str,
+        *,
+        sender: str | None = None,
+        sender_domain: str | None = None,
+        recipient: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        labels: list[str] | None = None,
+        max_to: int | None = None,
+        max_cc: int | None = None,
+        max_recipients: int | None = None,
+        direct_only: bool = False,
+        account: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[UnifiedSearchResult], int]:
+        """Run both email and attachment searches, merge by similarity."""
+        over_fetch = max(2 * (limit + offset), limit + offset)
+        email_hits, _ = self.search(
+            query,
+            sender=sender,
+            sender_domain=sender_domain,
+            recipient=recipient,
+            after=after,
+            before=before,
+            labels=labels,
+            max_to=max_to,
+            max_cc=max_cc,
+            max_recipients=max_recipients,
+            direct_only=direct_only,
+            account=account,
+            limit=over_fetch,
+            offset=0,
+        )
+        attachment_hits, _ = self.search_attachments(
+            query,
+            sender=sender,
+            sender_domain=sender_domain,
+            recipient=recipient,
+            after=after,
+            before=before,
+            labels=labels,
+            max_to=max_to,
+            max_cc=max_cc,
+            max_recipients=max_recipients,
+            direct_only=direct_only,
+            account=account,
+            limit=over_fetch,
+            offset=0,
+        )
+
+        unified: list[UnifiedSearchResult] = [
+            UnifiedSearchResult(
+                source="email",
+                similarity=h.similarity,
+                email=h.email,
+                attachment_result=None,
+            )
+            for h in email_hits
+        ] + [
+            UnifiedSearchResult(
+                source="attachment",
+                similarity=a.similarity,
+                email=None,
+                attachment_result=a,
+            )
+            for a in attachment_hits
+        ]
+        unified.sort(key=lambda r: r.similarity, reverse=True)
+        total = len(unified)
+        return unified[offset : offset + limit], total
 
     def query(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute a Tier 2 DSL query and return results as dicts.
