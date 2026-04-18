@@ -94,6 +94,7 @@ max-complexity = 12
 ]
 "src/maildb/maildb.py" = ["S608", "C901"]  # SQL construction is safe (parameterized); complexity from filter params
 "src/maildb/dsl.py" = ["S608"]  # SQL construction is safe (parameterized, whitelisted)
+"src/maildb/ingest/process_attachments.py" = ["S608"]  # selector_sql is internal-only; not user-supplied
 "src/maildb/ingest/orchestrator.py" = ["C901"]  # pipeline orchestration is inherently sequential
 "tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
 
