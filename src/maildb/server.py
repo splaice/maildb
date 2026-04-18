@@ -725,6 +725,124 @@ def get_emails(
     return _wrap_response(serialized, total=len(serialized), offset=0, limit=len(ids))
 
 
+def _serialize_attachment_result(r: Any) -> dict[str, Any]:
+    return {
+        "attachment_id": r.attachment_id,
+        "filename": r.filename,
+        "content_type": r.content_type,
+        "sha256": r.sha256,
+        "chunk": {
+            "id": r.chunk.id,
+            "chunk_index": r.chunk.chunk_index,
+            "heading_path": r.chunk.heading_path,
+            "page_number": r.chunk.page_number,
+            "token_count": r.chunk.token_count,
+            "text": r.chunk.text,
+        },
+        "emails": r.emails,
+        "similarity": r.similarity,
+    }
+
+
+@mcp.tool()
+@log_tool
+def search_attachments(
+    ctx: Context,
+    query: str,
+    sender: str | None = None,
+    sender_domain: str | None = None,
+    recipient: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    labels: list[str] | None = None,
+    max_to: int | None = None,
+    max_cc: int | None = None,
+    max_recipients: int | None = None,
+    direct_only: bool = False,
+    account: str | None = None,
+    content_type: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Semantic search over attachment chunk embeddings.
+
+    Returns {total, offset, limit, results: [{attachment_id, filename, chunk, emails, similarity}]}.
+    """
+    db = _get_db(ctx)
+    results, total = db.search_attachments(
+        query,
+        sender=sender,
+        sender_domain=sender_domain,
+        recipient=recipient,
+        after=after,
+        before=before,
+        labels=labels,
+        max_to=max_to,
+        max_cc=max_cc,
+        max_recipients=max_recipients,
+        direct_only=direct_only,
+        account=account,
+        content_type=content_type,
+        limit=limit,
+        offset=offset,
+    )
+    serialized = [_serialize_attachment_result(r) for r in results]
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
+
+
+@mcp.tool()
+@log_tool
+def search_all(
+    ctx: Context,
+    query: str,
+    sender: str | None = None,
+    sender_domain: str | None = None,
+    recipient: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    labels: list[str] | None = None,
+    account: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Unified search across emails and attachment contents.
+
+    Returns {total, offset, limit, results: [{source, similarity, ...}]} where each
+    result carries source="email" with an email payload, or source="attachment"
+    with an attachment_result payload.
+    """
+    db = _get_db(ctx)
+    results, total = db.search_all(
+        query,
+        sender=sender,
+        sender_domain=sender_domain,
+        recipient=recipient,
+        after=after,
+        before=before,
+        labels=labels,
+        account=account,
+        limit=limit,
+        offset=offset,
+    )
+    serialized: list[dict[str, Any]] = []
+    for r in results:
+        payload: dict[str, Any] = {"source": r.source, "similarity": r.similarity}
+        if r.source == "email" and r.email is not None:
+            payload["email"] = _serialize_email(r.email)
+        elif r.source == "attachment" and r.attachment_result is not None:
+            payload["attachment"] = _serialize_attachment_result(r.attachment_result)
+        serialized.append(payload)
+    return _wrap_response(serialized, total=total, offset=offset, limit=limit)
+
+
+@mcp.tool()
+@log_tool
+def get_attachment_markdown(ctx: Context, attachment_id: int) -> str | None:
+    """Return the full extracted markdown for an attachment, or null if not extracted."""
+    db = _get_db(ctx)
+    return db.get_attachment_markdown(attachment_id)
+
+
 @mcp.tool()
 @log_tool
 def accounts(ctx: Context) -> list[dict[str, Any]]:
