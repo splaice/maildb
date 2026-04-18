@@ -287,3 +287,39 @@ def test_init_db_backfills_reference_count(test_pool) -> None:  # type: ignore[n
             "SELECT reference_count FROM attachments WHERE id = %s", (att_id,)
         )
         assert cur.fetchone()[0] == 2
+
+
+def test_attachment_contents_table_exists(test_pool) -> None:  # type: ignore[no-untyped-def]
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'attachment_contents' ORDER BY column_name"
+        )
+        cols = {row[0] for row in cur.fetchall()}
+    assert cols == {
+        "attachment_id",
+        "status",
+        "markdown",
+        "markdown_bytes",
+        "reason",
+        "extracted_at",
+        "extraction_ms",
+        "extractor_version",
+    }
+
+
+def test_attachment_contents_status_check_enforced(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """CHECK constraint rejects invalid status values."""
+    import psycopg
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('bb', 'y.pdf', 'application/pdf', 1, 'bb/y.pdf')"
+        )
+        att_id = conn.execute("SELECT id FROM attachments WHERE sha256='bb'").fetchone()[0]
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO attachment_contents (attachment_id, status) VALUES (%s, %s)",
+                (att_id, "bogus"),
+            )
+        conn.rollback()

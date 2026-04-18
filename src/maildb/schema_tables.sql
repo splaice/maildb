@@ -88,3 +88,15 @@ CREATE TABLE IF NOT EXISTS email_accounts (
     first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (email_id, source_account)
 );
+
+CREATE TABLE IF NOT EXISTS attachment_contents (
+    attachment_id     INT PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,
+    status            TEXT NOT NULL
+                      CHECK (status IN ('pending','extracting','extracted','failed','skipped')),
+    markdown          TEXT,
+    markdown_bytes    INT,
+    reason            TEXT,
+    extracted_at      TIMESTAMPTZ,
+    extraction_ms     INT,
+    extractor_version TEXT
+);
