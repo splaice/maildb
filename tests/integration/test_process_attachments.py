@@ -162,3 +162,32 @@ def test_process_one_embeds_chunks_when_ollama_available(test_pool, tmp_path, te
         )
         assert cur.fetchone()[0] >= 1
     assert client.embed_batch.called
+
+
+def test_watchdog_reclaims_stale_extracting_row(test_pool, tmp_path):
+    """A row stuck in 'extracting' with a stale extracted_at is reset to 'pending'
+    by the _reclaim_stale helper run at the top of run()."""
+    from maildb.ingest.process_attachments import _reclaim_stale
+
+    att_id = _insert_attachment(test_pool, "wd", "text/plain", "stale.txt")
+    ensure_pending_rows(test_pool)
+
+    # Force the row into 'extracting' with a stale timestamp (older than the watchdog threshold).
+    with test_pool.connection() as conn:
+        conn.execute(
+            "UPDATE attachment_contents "
+            "SET status = 'extracting', extracted_at = now() - interval '2 hours' "
+            "WHERE attachment_id = %s",
+            (att_id,),
+        )
+        conn.commit()
+
+    reclaimed = _reclaim_stale(test_pool)
+    assert reclaimed >= 1
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status FROM attachment_contents WHERE attachment_id = %s",
+            (att_id,),
+        )
+        assert cur.fetchone()[0] == "pending"
