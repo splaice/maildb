@@ -27,6 +27,7 @@ dev = [
     "mypy>=1.13",
     "ruff>=0.8",
     "factory-boy>=3.3",
+    "reportlab>=4.4.10",
 ]
 
 [build-system]
