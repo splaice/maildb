@@ -26,7 +26,7 @@ Initial source is local `.mbox` files. Gmail API sync is planned.
 |-------|---------|--------------|
 | Ingestion | `src/maildb/ingest/` | Mbox → parsed rows → embeddings, 4-phase pipeline with restartability |
 | Storage | PostgreSQL + `src/maildb/schema_tables.sql` | Emails, per-account attribution join, import sessions, attachments |
-| Query | `src/maildb/maildb.py`, `src/maildb/dsl.py` | Tier 1 fixed methods + Tier 2 JSON DSL |
+| Query | `src/maildb/maildb.py`, `src/maildb/dsl.py`, `src/maildb/ingest/chunking.py`, `src/maildb/tokenizer.py` | Tier 1 fixed methods + Tier 2 JSON DSL + attachment semantic search |
 | MCP server | `src/maildb/server.py` | FastMCP wrapper exposing every query method as a tool |
 
 The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP) and `ingest run|status|reset|migrate`.
