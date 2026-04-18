@@ -13,6 +13,8 @@ dependencies = [
     "structlog>=24.4",
     "mcp>=1.26.0",
     "typer>=0.12",
+    "marker-pdf>=1.2.0",
+    "tokenizers>=0.20",
 ]
 
 [project.scripts]
