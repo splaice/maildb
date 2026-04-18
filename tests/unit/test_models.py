@@ -175,6 +175,7 @@ def test_import_record_dataclass_shape():
 
 def test_attachment_chunk_dataclass_shape() -> None:
     from maildb.models import AttachmentChunk
+
     c = AttachmentChunk(
         id=1,
         attachment_id=10,
@@ -190,6 +191,7 @@ def test_attachment_chunk_dataclass_shape() -> None:
 
 def test_attachment_search_result_shape() -> None:
     from maildb.models import AttachmentChunk, AttachmentSearchResult
+
     chunk = AttachmentChunk(
         id=1,
         attachment_id=10,
@@ -214,11 +216,18 @@ def test_attachment_search_result_shape() -> None:
 
 def test_unified_search_result_either_branch() -> None:
     from maildb.models import UnifiedSearchResult
+
     email_side = UnifiedSearchResult(
-        source="email", similarity=0.9, email=None, attachment_result=None,
+        source="email",
+        similarity=0.9,
+        email=None,
+        attachment_result=None,
     )
     assert email_side.source == "email"
     attach_side = UnifiedSearchResult(
-        source="attachment", similarity=0.7, email=None, attachment_result=None,
+        source="attachment",
+        similarity=0.7,
+        email=None,
+        attachment_result=None,
     )
     assert attach_side.source == "attachment"

@@ -71,8 +71,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from maildb.ingest.extraction import (
-    ExtractionResult,
     ExtractionFailed,
+    ExtractionResult,
     extract_markdown,
 )
 

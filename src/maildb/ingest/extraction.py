@@ -85,9 +85,7 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
     types or when Marker errors out."""
     bucket = route_content_type(content_type)
     if bucket is None:
-        raise ExtractionFailed(
-            f"content_type {content_type!r} is not supported by Marker"
-        )
+        raise ExtractionFailed(f"content_type {content_type!r} is not supported by Marker")
 
     if bucket == "text":
         return ExtractionResult(
@@ -113,7 +111,7 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
 
     try:
         markdown, version = _marker_convert(path)
-    except Exception as exc:  # noqa: BLE001 — surface any Marker failure as reason
+    except Exception as exc:
         raise ExtractionFailed(f"marker: {exc}") from exc
 
     return ExtractionResult(markdown=markdown, extractor_version=version)
