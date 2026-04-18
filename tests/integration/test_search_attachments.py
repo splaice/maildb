@@ -32,6 +32,12 @@ def _seed_attachment_chunk(
                 (sha256, filename, content_type, 100, f"{sha256[:2]}/{sha256[2:4]}/{sha256}"),
             )
             attachment_id = cur.fetchone()[0]
+            conn.execute(
+                "INSERT INTO attachment_contents (attachment_id, status) "
+                "VALUES (%s, 'extracted') "
+                "ON CONFLICT (attachment_id) DO UPDATE SET status = 'extracted'",
+                (attachment_id,),
+            )
         vec = str(embedding or [0.1] * 768)
         cur = conn.execute(
             """INSERT INTO attachment_chunks
@@ -171,6 +177,74 @@ def test_get_attachment_markdown_returns_none_when_not_extracted(test_pool, test
         conn.commit()
     db = MailDB._from_pool(test_pool, config=test_settings)
     assert db.get_attachment_markdown(att_id) is None
+
+
+def test_get_attachment_markdown_honors_account_scope(test_pool, test_settings):
+    """With account set, markdown is returned only when the attachment is linked to
+    an email attributed to that account."""
+    iid_a = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%s, 'a@ex.com', 't', 'completed')",
+            (iid_a,),
+        )
+        cur = conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('gm3', 'scoped.pdf', 'application/pdf', 100, 'gm3/gm3/gm3') RETURNING id"
+        )
+        att_id = cur.fetchone()[0]
+        conn.execute(
+            "INSERT INTO attachment_contents (attachment_id, status, markdown, markdown_bytes) "
+            "VALUES (%s, 'extracted', '# scoped', 8)",
+            (att_id,),
+        )
+        conn.execute(
+            "INSERT INTO emails (id, message_id, thread_id, source_account) "
+            "VALUES (gen_random_uuid(), '<scoped-1@ex.com>', 't', 'a@ex.com')"
+        )
+        eid = conn.execute(
+            "SELECT id FROM emails WHERE message_id = '<scoped-1@ex.com>'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO email_attachments (email_id, attachment_id, filename) "
+            "VALUES (%s, %s, 'scoped.pdf')",
+            (eid, att_id),
+        )
+        conn.execute(
+            "INSERT INTO email_accounts (email_id, source_account, import_id) "
+            "VALUES (%s, 'a@ex.com', %s)",
+            (eid, iid_a),
+        )
+        conn.commit()
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    assert db.get_attachment_markdown(att_id) == "# scoped"
+    assert db.get_attachment_markdown(att_id, account="a@ex.com") == "# scoped"
+    assert db.get_attachment_markdown(att_id, account="b@ex.com") is None
+
+
+def test_search_attachments_excludes_failed_extractions(test_pool, test_settings):
+    """Chunks whose parent attachment_contents.status is not 'extracted' must not appear
+    in search results even if the chunks have valid embeddings on disk."""
+    att_id, _ = _seed_attachment_chunk(
+        test_pool,
+        sha256="orphan1",
+        filename="orphan.pdf",
+        chunk_text="orphaned failure chunk text",
+        email_ids=["<orphan-1@ex.com>"],
+    )
+    with test_pool.connection() as conn:
+        conn.execute(
+            "UPDATE attachment_contents SET status = 'failed', "
+            "reason = 'simulated mid-pipeline crash' WHERE attachment_id = %s",
+            (att_id,),
+        )
+        conn.commit()
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = [0.1] * 768
+    results, _ = db.search_attachments(query="orphaned")
+    assert not any(r.attachment_id == att_id for r in results)
 
 
 def test_search_all_merges_email_and_attachment_hits(test_pool, test_settings):

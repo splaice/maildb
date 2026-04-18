@@ -1098,6 +1098,8 @@ class MailDB:
                    COUNT(*) OVER() AS _total
             FROM attachment_chunks ac
             JOIN attachments a ON a.id = ac.attachment_id
+            JOIN attachment_contents co
+              ON co.attachment_id = ac.attachment_id AND co.status = 'extracted'
             WHERE ac.embedding IS NOT NULL
               AND vector_norm(ac.embedding) > 0
               {ct_clause}
@@ -1132,16 +1134,29 @@ class MailDB:
             )
         return results, total
 
-    def get_attachment_markdown(self, attachment_id: int) -> str | None:
+    def get_attachment_markdown(
+        self, attachment_id: int, *, account: str | None = None
+    ) -> str | None:
         """Return the full extracted markdown for an attachment, or None if
         extraction is pending, failed, or the row doesn't exist.
+
+        When `account` is given, also require the attachment to be referenced
+        by at least one email attributed to that account.
         """
-        row = _query_one_dict(
-            self._pool,
-            "SELECT markdown FROM attachment_contents "
-            "WHERE attachment_id = %(id)s AND status = 'extracted'",
-            {"id": attachment_id},
+        sql = (
+            "SELECT c.markdown FROM attachment_contents c "
+            "WHERE c.attachment_id = %(id)s AND c.status = 'extracted'"
         )
+        params: dict[str, Any] = {"id": attachment_id}
+        if account is not None:
+            sql += (
+                " AND EXISTS (SELECT 1 FROM email_attachments ea "
+                "JOIN email_accounts eacc ON eacc.email_id = ea.email_id "
+                "WHERE ea.attachment_id = c.attachment_id "
+                "AND eacc.source_account = %(account)s)"
+            )
+            params["account"] = account
+        row = _query_one_dict(self._pool, sql, params)
         return row["markdown"] if row else None
 
     def search_all(

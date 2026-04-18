@@ -343,6 +343,16 @@ def test_get_attachment_markdown_tool_returns_null_for_missing() -> None:
     ctx = MagicMock()
     ctx.request_context.lifespan_context.db = mock_db
     assert server.get_attachment_markdown(ctx, attachment_id=1) is None
+    mock_db.get_attachment_markdown.assert_called_with(1, account=None)
+
+
+def test_get_attachment_markdown_tool_passes_account_through() -> None:
+    mock_db = MagicMock()
+    mock_db.get_attachment_markdown.return_value = "# text"
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+    assert server.get_attachment_markdown(ctx, attachment_id=7, account="work@ex.com") == "# text"
+    mock_db.get_attachment_markdown.assert_called_with(7, account="work@ex.com")
 
 
 def test_search_all_passes_recipient_count_filters_through() -> None:

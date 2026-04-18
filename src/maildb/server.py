@@ -845,10 +845,16 @@ def search_all(
 
 @mcp.tool()
 @log_tool
-def get_attachment_markdown(ctx: Context, attachment_id: int) -> str | None:
-    """Return the full extracted markdown for an attachment, or null if not extracted."""
+def get_attachment_markdown(
+    ctx: Context, attachment_id: int, account: str | None = None
+) -> str | None:
+    """Return the full extracted markdown for an attachment, or null if not extracted.
+
+    When `account` is given, the attachment must be referenced by at least one email
+    attributed to that account; otherwise returns null.
+    """
     db = _get_db(ctx)
-    return db.get_attachment_markdown(attachment_id)
+    return db.get_attachment_markdown(attachment_id, account=account)
 
 
 @mcp.tool()
