@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 import typer
@@ -18,8 +19,12 @@ from maildb.ingest.orchestrator import (
     reset_pipeline,
     run_pipeline,
 )
+from maildb.ingest.process_attachments import run as pa_run
 from maildb.pii import scrub_pii
 from maildb.server import mcp
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
 
 app = typer.Typer(
     name="maildb",
@@ -249,6 +254,211 @@ def ingest_migrate(
     finally:
         pool.close()
     typer.echo(f"Backfilled {result['rows_updated']} rows with source_account={account}")
+
+
+process_app = typer.Typer(
+    name="process_attachments",
+    help="Extract + embed attachment contents for semantic search.",
+    no_args_is_help=True,
+)
+app.add_typer(process_app, name="process_attachments")
+
+
+def _build_process_pool() -> "ConnectionPool":  # noqa: UP037
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    return pool
+
+
+def _close_pool(pool: object) -> None:
+    close = getattr(pool, "close", None)
+    if close is not None:
+        close()
+
+
+def _count_selected(
+    pool: "ConnectionPool",  # noqa: UP037
+    *,
+    retry_failed: bool,
+    selector_sql: str,
+    selector_params: dict,  # type: ignore[type-arg]
+) -> int:
+    states = "('pending','failed')" if retry_failed else "('pending')"
+    sql = f"""
+        SELECT count(*) FROM attachment_contents
+         WHERE status IN {states} {selector_sql}
+    """  # noqa: S608
+    with pool.connection() as conn:
+        cur = conn.execute(sql, selector_params)
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+_BUCKET_TO_CONTENT_TYPES: dict[str, list[str]] = {
+    "pdf": ["application/pdf"],
+    "docx": [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    ],
+    "xlsx": [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ],
+    "pptx": [
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    "image": [
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/gif",
+        "image/tiff",
+        "image/webp",
+    ],
+    "text": ["text/plain"],
+    "html": ["text/html"],
+}
+
+
+@process_app.command("run")
+def process_run(
+    workers: int = typer.Option(1, "--workers", help="Parallel workers."),
+    retry_failed: bool = typer.Option(
+        True, "--retry-failed/--no-retry-failed", help="Re-process rows with status='failed'."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report selection count without processing."
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Process at most N rows."),
+    sample: int | None = typer.Option(
+        None, "--sample", help="Random sample of N rows (wins over --limit)."
+    ),
+    only: str | None = typer.Option(
+        None, "--only", help=f"Filter bucket: {', '.join(_BUCKET_TO_CONTENT_TYPES)}."
+    ),
+    ids: str | None = typer.Option(None, "--ids", help="Comma-separated attachment_ids."),
+    min_size: int | None = typer.Option(None, "--min-size"),
+    max_size: int | None = typer.Option(None, "--max-size"),
+) -> None:
+    """Process pending (and optionally failed) attachments."""
+    selector_sql_parts: list[str] = []
+    selector_params: dict[str, object] = {}
+    if only is not None:
+        if only not in _BUCKET_TO_CONTENT_TYPES:
+            raise typer.BadParameter(f"--only must be one of {list(_BUCKET_TO_CONTENT_TYPES)}")
+        selector_sql_parts.append(
+            "AND attachment_id IN (SELECT id FROM attachments "
+            "WHERE content_type = ANY(%(content_types)s))"
+        )
+        selector_params["content_types"] = _BUCKET_TO_CONTENT_TYPES[only]
+    if ids is not None:
+        id_list = [int(x) for x in ids.split(",") if x.strip()]
+        selector_sql_parts.append("AND attachment_id = ANY(%(ids)s)")
+        selector_params["ids"] = id_list
+    if min_size is not None:
+        selector_sql_parts.append(
+            "AND attachment_id IN (SELECT id FROM attachments WHERE size >= %(min_size)s)"
+        )
+        selector_params["min_size"] = min_size
+    if max_size is not None:
+        selector_sql_parts.append(
+            "AND attachment_id IN (SELECT id FROM attachments WHERE size <= %(max_size)s)"
+        )
+        selector_params["max_size"] = max_size
+    if sample is not None:
+        selector_sql_parts.append(
+            "AND attachment_id IN ("
+            "SELECT attachment_id FROM attachment_contents "
+            "ORDER BY random() LIMIT %(sample)s)"
+        )
+        selector_params["sample"] = sample
+    elif limit is not None:
+        selector_sql_parts.append(
+            "AND attachment_id IN ("
+            "SELECT attachment_id FROM attachment_contents "
+            "ORDER BY attachment_id LIMIT %(limit)s)"
+        )
+        selector_params["limit"] = limit
+
+    selector_sql = " ".join(selector_sql_parts)
+
+    pool = _build_process_pool()
+    try:
+        if dry_run:
+            n = _count_selected(
+                pool,
+                retry_failed=retry_failed,
+                selector_sql=selector_sql,
+                selector_params=selector_params,
+            )
+            typer.echo(f"Would process {n} attachment(s). (--dry-run)")
+            return
+        settings = Settings()
+        counts = pa_run(
+            pool,
+            attachment_dir=Path(settings.attachment_dir),
+            workers=workers,
+            retry_failed=retry_failed,
+            selector_sql=selector_sql,
+            selector_params=selector_params,
+        )
+        typer.echo(
+            "Done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
+        )
+    finally:
+        _close_pool(pool)
+
+
+@process_app.command("status")
+def process_status() -> None:
+    """Summary of extraction state: pending / extracted / failed / skipped."""
+    pool = _build_process_pool()
+    try:
+        with pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT status, count(*) FROM attachment_contents GROUP BY status ORDER BY status"
+            )
+            rows = cur.fetchall()
+        typer.echo("Attachment extraction status")
+        for status, n in rows:
+            typer.echo(f"  {status:<10} {n:>7,}")
+
+        with pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT reason, count(*) FROM attachment_contents "
+                "WHERE status = 'failed' GROUP BY reason ORDER BY count(*) DESC LIMIT 10"
+            )
+            rows = cur.fetchall()
+        if rows:
+            typer.echo("\nTop failure reasons")
+            for reason, n in rows:
+                typer.echo(f"  {n:>4,}  {reason[:120] if reason else ''}")
+    finally:
+        _close_pool(pool)
+
+
+@process_app.command("retry")
+def process_retry(
+    workers: int = typer.Option(1, "--workers"),
+) -> None:
+    """Re-process only rows with status='failed'."""
+    pool = _build_process_pool()
+    try:
+        settings = Settings()
+        counts = pa_run(
+            pool,
+            attachment_dir=Path(settings.attachment_dir),
+            workers=workers,
+            retry_failed=True,
+            selector_sql="AND status = 'failed'",
+            selector_params={},
+        )
+        typer.echo(
+            "Retry done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
+        )
+    finally:
+        _close_pool(pool)
 
 
 if __name__ == "__main__":
