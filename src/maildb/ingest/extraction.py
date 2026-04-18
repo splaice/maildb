@@ -44,3 +44,76 @@ def route_content_type(content_type: str | None) -> str | None:
     if not content_type:
         return None
     return _ROUTES.get(content_type.lower())
+
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import structlog
+
+logger = structlog.get_logger()
+
+
+class ExtractionFailed(Exception):
+    """Raised when extraction cannot proceed. The message is recorded as `reason`."""
+
+
+@dataclass
+class ExtractionResult:
+    markdown: str
+    extractor_version: str  # e.g. "marker==1.2.3" or "passthrough==1"
+
+
+def _marker_convert(path: Path) -> tuple[str, str]:
+    """Run Marker on a single file; return (markdown, version_string).
+
+    Isolated so tests can monkeypatch it without importing marker-pdf.
+    """
+    import marker  # noqa: PLC0415 — deferred import keeps the test suite fast
+    from marker.converters.pdf import PdfConverter  # noqa: PLC0415
+    from marker.models import create_model_dict  # noqa: PLC0415
+    from marker.output import text_from_rendered  # noqa: PLC0415
+
+    converter = PdfConverter(artifact_dict=create_model_dict())
+    rendered = converter(str(path))
+    text, _, _ = text_from_rendered(rendered)
+    return text, f"marker=={getattr(marker, '__version__', 'unknown')}"
+
+
+def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResult:
+    """Extract markdown from an attachment. Raises ExtractionFailed on unsupported
+    types or when Marker errors out."""
+    bucket = route_content_type(content_type)
+    if bucket is None:
+        raise ExtractionFailed(
+            f"content_type {content_type!r} is not supported by Marker"
+        )
+
+    if bucket == "text":
+        return ExtractionResult(
+            markdown=path.read_text(encoding="utf-8", errors="replace"),
+            extractor_version="passthrough==1",
+        )
+
+    if bucket == "html":
+        # Pass HTML through as-is; Marker can handle conversion downstream if needed,
+        # but for v1 we preserve the original markup so agents can see tags.
+        return ExtractionResult(
+            markdown=path.read_text(encoding="utf-8", errors="replace"),
+            extractor_version="passthrough==1",
+        )
+
+    # Legacy .doc / .xls need LibreOffice pre-conversion. Defer to Marker for the
+    # rest — Marker handles PDF, DOCX, XLSX, PPTX, and images natively.
+    if bucket in ("doc_legacy", "xls_legacy"):
+        raise ExtractionFailed(
+            f"{bucket}: legacy binary format requires LibreOffice pre-conversion "
+            "(not implemented in v1)"
+        )
+
+    try:
+        markdown, version = _marker_convert(path)
+    except Exception as exc:  # noqa: BLE001 — surface any Marker failure as reason
+        raise ExtractionFailed(f"marker: {exc}") from exc
+
+    return ExtractionResult(markdown=markdown, extractor_version=version)

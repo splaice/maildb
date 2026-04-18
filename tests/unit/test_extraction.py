@@ -65,3 +65,51 @@ def test_supported_set_matches_router():
     }
     reachable.discard(None)
     assert reachable <= SUPPORTED
+
+
+from pathlib import Path
+from unittest.mock import patch
+
+from maildb.ingest.extraction import (
+    ExtractionResult,
+    ExtractionFailed,
+    extract_markdown,
+)
+
+
+def test_extract_passes_through_text_file(tmp_path: Path):
+    p = tmp_path / "hello.txt"
+    p.write_text("Hello world\nA second line")
+    result = extract_markdown(p, content_type="text/plain")
+    assert isinstance(result, ExtractionResult)
+    assert "Hello world" in result.markdown
+    assert result.extractor_version.startswith("passthrough")
+
+
+def test_extract_passes_through_html(tmp_path: Path):
+    p = tmp_path / "page.html"
+    p.write_text("<html><body><h1>Hi</h1><p>there</p></body></html>")
+    result = extract_markdown(p, content_type="text/html")
+    # Passthrough preserves the raw content; it's not Marker's job.
+    assert "<h1>Hi</h1>" in result.markdown or "Hi" in result.markdown
+
+
+def test_extract_calls_marker_for_pdf(tmp_path: Path):
+    fake_pdf = tmp_path / "fake.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4\n...")
+    with patch(
+        "maildb.ingest.extraction._marker_convert",
+        return_value=("# Fake extracted markdown\n\nBody.", "marker==1.10.2"),
+    ) as m:
+        result = extract_markdown(fake_pdf, content_type="application/pdf")
+    assert m.called
+    assert result.markdown.startswith("# Fake extracted markdown")
+    assert result.extractor_version.startswith("marker==")
+
+
+def test_extract_unsupported_raises_extraction_failed(tmp_path: Path):
+    p = tmp_path / "a.mp3"
+    p.write_bytes(b"ID3\x00")
+    with pytest.raises(ExtractionFailed) as exc:
+        extract_markdown(p, content_type="audio/mpeg")
+    assert "not supported" in str(exc.value).lower()
