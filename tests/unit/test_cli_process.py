@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -92,3 +92,37 @@ def test_run_with_ids(tmp_path):
     assert result.exit_code == 0
     kwargs = mock_run.call_args.kwargs
     assert list(kwargs["selector_params"]["ids"]) == [1, 2, 3]
+
+
+def test_process_attachments_status_shows_counts(tmp_path):
+    with patch("maildb.cli._build_process_pool") as mock_pool:
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            ("pending", 5),
+            ("extracted", 100),
+            ("failed", 2),
+            ("skipped", 12),
+        ]
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
+        result = runner.invoke(app, ["process_attachments", "status"])
+    assert result.exit_code == 0
+    assert "extracted" in result.output.lower()
+    assert "100" in result.output
+
+
+def test_process_attachments_retry_runs_only_failed(tmp_path):
+    with (
+        patch("maildb.cli._build_process_pool") as mock_pool,
+        patch("maildb.cli.pa_run") as mock_run,
+    ):
+        mock_pool.return_value = object()
+        mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
+        result = runner.invoke(app, ["process_attachments", "retry"])
+    assert result.exit_code == 0
+    kwargs = mock_run.call_args.kwargs
+    # retry command forces retry_failed=True and restricts to failed-only
+    assert kwargs["retry_failed"] is True
+    # selector_sql should filter to status='failed' only
+    assert "status = 'failed'" in kwargs["selector_sql"]
