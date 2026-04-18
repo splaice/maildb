@@ -6,7 +6,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from maildb.db import init_db
+from maildb.db import create_hnsw_index_attachment_chunks, init_db
 
 pytestmark = pytest.mark.integration
 
@@ -360,3 +360,14 @@ def test_attachment_chunks_unique_index_on_attachment_chunk(test_pool) -> None: 
                 (att_id,),
             )
         conn.rollback()
+
+
+def test_create_attachment_chunks_hnsw_index(test_pool) -> None:  # type: ignore[no-untyped-def]
+    create_hnsw_index_attachment_chunks(test_pool)
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM pg_indexes "
+            "WHERE tablename = 'attachment_chunks' "
+            "AND indexname = 'idx_attachment_chunks_embedding'"
+        )
+        assert cur.fetchone()[0] == 1

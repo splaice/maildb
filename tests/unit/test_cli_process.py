@@ -22,7 +22,11 @@ def test_process_attachments_run_passes_workers_and_retry(tmp_path):
         patch("maildb.cli._build_process_pool") as mock_pool,
         patch("maildb.cli.pa_run") as mock_run,
     ):
-        mock_pool.return_value = object()
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
         mock_run.return_value = {"extracted": 3, "failed": 0, "skipped": 0}
         result = runner.invoke(
             app,
@@ -58,7 +62,11 @@ def test_run_with_limit_passes_selector(tmp_path):
         patch("maildb.cli._build_process_pool") as mock_pool,
         patch("maildb.cli.pa_run") as mock_run,
     ):
-        mock_pool.return_value = object()
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
         mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
         result = runner.invoke(app, ["process_attachments", "run", "--limit", "5"])
     assert result.exit_code == 0
@@ -73,7 +81,11 @@ def test_run_with_only_pdf(tmp_path):
         patch("maildb.cli._build_process_pool") as mock_pool,
         patch("maildb.cli.pa_run") as mock_run,
     ):
-        mock_pool.return_value = object()
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
         mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
         result = runner.invoke(app, ["process_attachments", "run", "--only", "pdf"])
     assert result.exit_code == 0
@@ -86,7 +98,11 @@ def test_run_with_ids(tmp_path):
         patch("maildb.cli._build_process_pool") as mock_pool,
         patch("maildb.cli.pa_run") as mock_run,
     ):
-        mock_pool.return_value = object()
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
         mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
         result = runner.invoke(app, ["process_attachments", "run", "--ids", "1,2,3"])
     assert result.exit_code == 0

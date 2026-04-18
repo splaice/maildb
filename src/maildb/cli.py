@@ -12,7 +12,7 @@ import structlog
 import typer
 
 from maildb.config import Settings
-from maildb.db import create_pool, init_db
+from maildb.db import create_hnsw_index_attachment_chunks, create_pool, init_db
 from maildb.ingest.orchestrator import (
     backfill_source_account,
     get_status,
@@ -406,6 +406,14 @@ def process_run(
         typer.echo(
             "Done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
         )
+        # If any chunks got embedded this run, make sure the HNSW index exists.
+        with pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT count(*) FROM attachment_chunks WHERE embedding IS NOT NULL"
+            )
+            n_embedded = cur.fetchone()[0]  # type: ignore[index]
+        if n_embedded > 0:
+            create_hnsw_index_attachment_chunks(pool)
     finally:
         _close_pool(pool)
 

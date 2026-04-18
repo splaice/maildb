@@ -77,3 +77,19 @@ def create_indexes(pool: ConnectionPool) -> None:
         conn.execute(index_sql)
         conn.commit()
     logger.info("indexes_created")
+
+
+def create_hnsw_index_attachment_chunks(pool: ConnectionPool) -> None:
+    """Create the HNSW index on attachment_chunks.embedding.
+
+    Run once, after the first full extract pass completes. Skips if the
+    index already exists.
+    """
+    with pool.connection() as conn:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_attachment_chunks_embedding "
+            "ON attachment_chunks USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64)"
+        )
+        conn.commit()
+    logger.info("hnsw_index_created", table="attachment_chunks")
