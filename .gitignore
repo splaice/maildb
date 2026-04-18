@@ -23,4 +23,8 @@ htmlcov/
 attachments/
 ingest_tmp/
 
+# Allow test fixtures that share the "attachments" directory name
+!tests/fixtures/attachments/
+!tests/fixtures/attachments/**
+
 .claude/settings.local.json

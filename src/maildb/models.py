@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003  (runtime import for dataclass fields)
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID  # noqa: TC003  (runtime import for dataclass fields)
 
 
@@ -138,3 +138,34 @@ class ImportRecord:
     messages_inserted: int
     messages_skipped: int
     status: str
+
+
+@dataclass
+class AttachmentChunk:
+    id: int
+    attachment_id: int
+    chunk_index: int
+    heading_path: str | None
+    page_number: int | None
+    token_count: int
+    text: str
+    embedding: list[float] | None = None
+
+
+@dataclass
+class AttachmentSearchResult:
+    attachment_id: int
+    filename: str
+    content_type: str | None
+    sha256: str
+    chunk: AttachmentChunk
+    emails: list[str]
+    similarity: float
+
+
+@dataclass
+class UnifiedSearchResult:
+    source: Literal["email", "attachment"]
+    similarity: float
+    email: Email | None
+    attachment_result: AttachmentSearchResult | None

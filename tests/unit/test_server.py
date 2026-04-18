@@ -6,7 +6,15 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 from maildb import server
-from maildb.models import AccountSummary, Email, ImportRecord, Recipients, SearchResult
+from maildb.models import (
+    AccountSummary,
+    AttachmentChunk,
+    AttachmentSearchResult,
+    Email,
+    ImportRecord,
+    Recipients,
+    SearchResult,
+)
 from maildb.server import (
     SERIALIZABLE_EMAIL_FIELDS,
     _serialize_email,
@@ -287,3 +295,81 @@ def test_import_history_tool() -> None:
     result = server.import_history(ctx)
     assert result[0]["id"] == str(iid)
     assert result[0]["status"] == "running"
+
+
+def test_server_has_new_attachment_tools() -> None:
+    names = set(mcp._tool_manager._tools.keys())
+    assert {"search_attachments", "search_all", "get_attachment_markdown"} <= names
+
+
+def test_search_attachments_tool_serializes() -> None:
+    mock_db = MagicMock()
+    mock_db.search_attachments.return_value = (
+        [
+            AttachmentSearchResult(
+                attachment_id=1,
+                filename="a.pdf",
+                content_type="application/pdf",
+                sha256="abc",
+                chunk=AttachmentChunk(
+                    id=10,
+                    attachment_id=1,
+                    chunk_index=0,
+                    heading_path="Overview",
+                    page_number=3,
+                    token_count=5,
+                    text="hi",
+                ),
+                emails=["<x@y.com>"],
+                similarity=0.95,
+            )
+        ],
+        1,
+    )
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.search_attachments(ctx, query="anything")
+    assert result["total"] == 1
+    hit = result["results"][0]
+    assert hit["attachment_id"] == 1
+    assert hit["chunk"]["text"] == "hi"
+    assert hit["emails"] == ["<x@y.com>"]
+
+
+def test_get_attachment_markdown_tool_returns_null_for_missing() -> None:
+    mock_db = MagicMock()
+    mock_db.get_attachment_markdown.return_value = None
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+    assert server.get_attachment_markdown(ctx, attachment_id=1) is None
+    mock_db.get_attachment_markdown.assert_called_with(1, account=None)
+
+
+def test_get_attachment_markdown_tool_passes_account_through() -> None:
+    mock_db = MagicMock()
+    mock_db.get_attachment_markdown.return_value = "# text"
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+    assert server.get_attachment_markdown(ctx, attachment_id=7, account="work@ex.com") == "# text"
+    mock_db.get_attachment_markdown.assert_called_with(7, account="work@ex.com")
+
+
+def test_search_all_passes_recipient_count_filters_through() -> None:
+    mock_db = MagicMock()
+    mock_db.search_all.return_value = ([], 0)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+    server.search_all(
+        ctx,
+        query="x",
+        max_to=1,
+        max_cc=0,
+        max_recipients=3,
+        direct_only=True,
+    )
+    kwargs = mock_db.search_all.call_args.kwargs
+    assert kwargs["max_to"] == 1
+    assert kwargs["max_cc"] == 0
+    assert kwargs["max_recipients"] == 3
+    assert kwargs["direct_only"] is True

@@ -67,9 +67,12 @@ CREATE TABLE IF NOT EXISTS attachments (
     content_type    TEXT,
     size            BIGINT NOT NULL,
     storage_path    TEXT NOT NULL,
+    reference_count INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT now(),
     UNIQUE (sha256)
 );
+
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS reference_count INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS email_attachments (
     email_id        UUID NOT NULL REFERENCES emails(id),
@@ -84,4 +87,28 @@ CREATE TABLE IF NOT EXISTS email_accounts (
     import_id      UUID NOT NULL REFERENCES imports(id),
     first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (email_id, source_account)
+);
+
+CREATE TABLE IF NOT EXISTS attachment_contents (
+    attachment_id     INT PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,
+    status            TEXT NOT NULL
+                      CHECK (status IN ('pending','extracting','extracted','failed','skipped')),
+    markdown          TEXT,
+    markdown_bytes    INT,
+    reason            TEXT,
+    extracted_at      TIMESTAMPTZ,
+    extraction_ms     INT,
+    extractor_version TEXT
+);
+
+CREATE TABLE IF NOT EXISTS attachment_chunks (
+    id             BIGSERIAL PRIMARY KEY,
+    attachment_id  INT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    chunk_index    INT NOT NULL,
+    heading_path   TEXT,
+    page_number    INT,
+    token_count    INT NOT NULL,
+    text           TEXT NOT NULL,
+    embedding      vector(768),
+    UNIQUE (attachment_id, chunk_index)
 );

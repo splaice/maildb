@@ -15,5 +15,16 @@ CREATE INDEX IF NOT EXISTS idx_imports_source_account ON imports (source_account
 CREATE INDEX IF NOT EXISTS idx_imports_started_at ON imports (started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_accounts_source_account ON email_accounts (source_account);
 CREATE INDEX IF NOT EXISTS idx_email_accounts_import_id ON email_accounts (import_id);
+CREATE INDEX IF NOT EXISTS idx_attachment_contents_status
+    ON attachment_contents (status)
+    WHERE status IN ('pending','failed','extracting');
+
+CREATE INDEX IF NOT EXISTS idx_attachment_chunks_attachment_id
+    ON attachment_chunks (attachment_id);
+-- HNSW created separately after first extraction completes:
+-- CREATE INDEX IF NOT EXISTS idx_attachment_chunks_embedding
+--   ON attachment_chunks USING hnsw (embedding vector_cosine_ops)
+--   WITH (m = 16, ef_construction = 64);
+
 -- HNSW index created separately after embed phase:
 -- CREATE INDEX IF NOT EXISTS idx_email_embedding ON emails USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from maildb.ingest.orchestrator import run_pipeline
 from maildb.ingest.parse import process_chunk
 from maildb.ingest.tasks import create_task, get_phase_status
 
@@ -110,3 +111,53 @@ def test_process_chunk_handles_failure(test_pool, test_settings, tmp_path):
     )
     status = get_phase_status(test_pool, "parse")
     assert status["failed"] == 1
+
+
+def test_parse_increments_reference_count(test_pool, test_settings, tmp_path):
+    """Running the pipeline on an mbox whose messages share one attachment
+    increments attachments.reference_count correctly."""
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    run_pipeline(
+        mbox_path=fixtures / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="ref@example.com",
+    )
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*), sum(reference_count) FROM attachments")
+        _n_att, total_refs = cur.fetchone()
+        # Every email_attachments row should map to exactly one reference_count unit.
+        cur = conn.execute("SELECT count(*) FROM email_attachments")
+        ea_count = cur.fetchone()[0]
+    assert ea_count == total_refs, (
+        f"reference_count total ({total_refs}) must equal email_attachments count ({ea_count})"
+    )
+
+
+def test_parse_creates_pending_attachment_contents_row(test_pool, test_settings, tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    run_pipeline(
+        mbox_path=fixtures / "sample.mbox",
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+        source_account="pend@example.com",
+    )
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM attachments a "
+            "LEFT JOIN attachment_contents ac ON ac.attachment_id = a.id "
+            "WHERE ac.attachment_id IS NULL"
+        )
+        missing = cur.fetchone()[0]
+    assert missing == 0, (
+        f"Every attachment should have a corresponding attachment_contents row; "
+        f"{missing} are missing."
+    )

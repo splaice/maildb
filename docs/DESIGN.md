@@ -26,7 +26,7 @@ Initial source is local `.mbox` files. Gmail API sync is planned.
 |-------|---------|--------------|
 | Ingestion | `src/maildb/ingest/` | Mbox → parsed rows → embeddings, 4-phase pipeline with restartability |
 | Storage | PostgreSQL + `src/maildb/schema_tables.sql` | Emails, per-account attribution join, import sessions, attachments |
-| Query | `src/maildb/maildb.py`, `src/maildb/dsl.py` | Tier 1 fixed methods + Tier 2 JSON DSL |
+| Query | `src/maildb/maildb.py`, `src/maildb/dsl.py`, `src/maildb/ingest/chunking.py`, `src/maildb/tokenizer.py` | Tier 1 fixed methods + Tier 2 JSON DSL + attachment semantic search |
 | MCP server | `src/maildb/server.py` | FastMCP wrapper exposing every query method as a tool |
 
 The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP) and `ingest run|status|reset|migrate`.
@@ -86,7 +86,7 @@ Storage: ~8 GB for 841K rows including embeddings and indexes. Multi-account ove
 Listed so the reasoning stays discoverable:
 
 - **Gmail sync.** Incremental sync via Gmail API + OAuth. Same `emails` table, attribution recorded in `email_accounts` like any other import. Will motivate incremental per-message embedding (issue #41) and possibly account auto-detection from Takeout metadata (issue #42).
-- **Attachment content indexing.** Extract and embed text from PDFs / documents — a substantial feature, not a gap. Deferred.
+- **Audio / video transcription.** Voicemails (~12K in the corpus) aren't in the attachment search scope — would need Whisper or similar. Deferred.
 - **Multi-user.** Would require `user_id` column + row-level security. Different product; not planned.
 
 ## 8. Active Issues

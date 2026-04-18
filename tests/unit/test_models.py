@@ -8,10 +8,13 @@ from uuid import uuid4
 from maildb.models import (
     AccountSummary,
     Attachment,
+    AttachmentChunk,
+    AttachmentSearchResult,
     Email,
     ImportRecord,
     Recipients,
     SearchResult,
+    UnifiedSearchResult,
 )
 
 
@@ -171,3 +174,57 @@ def test_import_record_dataclass_shape():
         status="running",
     )
     assert r.status == "running"
+
+
+def test_attachment_chunk_dataclass_shape() -> None:
+    c = AttachmentChunk(
+        id=1,
+        attachment_id=10,
+        chunk_index=0,
+        heading_path="Overview > Payment Terms",
+        page_number=3,
+        token_count=250,
+        text="Late fees apply after 30 days.",
+    )
+    assert c.token_count == 250
+    assert c.heading_path == "Overview > Payment Terms"
+
+
+def test_attachment_search_result_shape() -> None:
+    chunk = AttachmentChunk(
+        id=1,
+        attachment_id=10,
+        chunk_index=0,
+        heading_path=None,
+        page_number=None,
+        token_count=5,
+        text="hi",
+    )
+    r = AttachmentSearchResult(
+        attachment_id=10,
+        filename="x.pdf",
+        content_type="application/pdf",
+        sha256="aa",
+        chunk=chunk,
+        emails=["<a@b.com>"],
+        similarity=0.87,
+    )
+    assert r.similarity == 0.87
+    assert r.emails == ["<a@b.com>"]
+
+
+def test_unified_search_result_either_branch() -> None:
+    email_side = UnifiedSearchResult(
+        source="email",
+        similarity=0.9,
+        email=None,
+        attachment_result=None,
+    )
+    assert email_side.source == "email"
+    attach_side = UnifiedSearchResult(
+        source="attachment",
+        similarity=0.7,
+        email=None,
+        attachment_result=None,
+    )
+    assert attach_side.source == "attachment"
