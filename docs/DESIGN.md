@@ -86,7 +86,7 @@ Storage: ~8 GB for 841K rows including embeddings and indexes. Multi-account ove
 Listed so the reasoning stays discoverable:
 
 - **Gmail sync.** Incremental sync via Gmail API + OAuth. Same `emails` table, attribution recorded in `email_accounts` like any other import. Will motivate incremental per-message embedding (issue #41) and possibly account auto-detection from Takeout metadata (issue #42).
-- **Attachment content indexing.** Extract and embed text from PDFs / documents — a substantial feature, not a gap. Deferred.
+- **Audio / video transcription.** Voicemails (~12K in the corpus) aren't in the attachment search scope — would need Whisper or similar. Deferred.
 - **Multi-user.** Would require `user_id` column + row-level security. Different product; not planned.
 
 ## 8. Active Issues
