@@ -16,7 +16,14 @@ from maildb.config import Settings
 from maildb.db import create_pool, init_db
 from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
-from maildb.models import AccountSummary, Email, ImportRecord, SearchResult
+from maildb.models import (
+    AccountSummary,
+    AttachmentChunk,
+    AttachmentSearchResult,
+    Email,
+    ImportRecord,
+    SearchResult,
+)
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -980,6 +987,149 @@ class MailDB:
         for row in rows:
             row.pop("_total", None)
         return [Email.from_row(row) for row in rows], total
+
+    def search_attachments(
+        self,
+        query: str,
+        *,
+        sender: str | None = None,
+        sender_domain: str | None = None,
+        recipient: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        labels: list[str] | None = None,
+        max_to: int | None = None,
+        max_cc: int | None = None,
+        max_recipients: int | None = None,
+        direct_only: bool = False,
+        account: str | None = None,
+        content_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[AttachmentSearchResult], int]:
+        """Semantic search over attachment chunk embeddings."""
+        query_embedding = self._embedding_client.embed(query)
+
+        # Build email-level conditions directly with `e.` prefixes — safer than
+        # trying to rewrite the output of `_build_filters`, which already qualifies
+        # some columns (e.g. `ea.source_account` for the account-EXISTS clause) that
+        # would collide with naive string substitution.
+        conditions: list[str] = []
+        params: dict[str, Any] = {}
+        if sender is not None:
+            conditions.append("e.sender_address = %(sender)s")
+            params["sender"] = sender
+        if sender_domain is not None:
+            conditions.append("e.sender_domain = %(sender_domain)s")
+            params["sender_domain"] = sender_domain
+        if recipient is not None:
+            conditions.append(
+                "(e.recipients->'to' @> %(recipient_json)s "
+                "OR e.recipients->'cc' @> %(recipient_json)s "
+                "OR e.recipients->'bcc' @> %(recipient_json)s)"
+            )
+            params["recipient_json"] = json.dumps([recipient])
+        if after is not None:
+            conditions.append("e.date >= %(after)s")
+            params["after"] = after
+        if before is not None:
+            conditions.append("e.date < %(before)s")
+            params["before"] = before
+        if labels is not None:
+            conditions.append("e.labels @> %(labels)s")
+            params["labels"] = labels
+        if direct_only and (max_to is not None or max_cc is not None):
+            msg = "Cannot combine direct_only with max_to or max_cc"
+            raise ValueError(msg)
+        if direct_only:
+            max_to, max_cc = 1, 0
+        if max_to is not None:
+            conditions.append(
+                "jsonb_array_length(COALESCE(e.recipients->'to', '[]'::jsonb)) <= %(max_to)s"
+            )
+            params["max_to"] = max_to
+        if max_cc is not None:
+            conditions.append(
+                "jsonb_array_length(COALESCE(e.recipients->'cc', '[]'::jsonb)) <= %(max_cc)s"
+            )
+            params["max_cc"] = max_cc
+        if max_recipients is not None:
+            conditions.append(
+                "(jsonb_array_length(COALESCE(e.recipients->'to', '[]'::jsonb))"
+                " + jsonb_array_length(COALESCE(e.recipients->'cc', '[]'::jsonb))"
+                " + jsonb_array_length(COALESCE(e.recipients->'bcc', '[]'::jsonb))"
+                ") <= %(max_recipients)s"
+            )
+            params["max_recipients"] = max_recipients
+        if account is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM email_accounts ea_acc "
+                "WHERE ea_acc.email_id = e.id AND ea_acc.source_account = %(account)s)"
+            )
+            params["account"] = account
+
+        email_exists = ""
+        if conditions:
+            email_exists = (
+                " AND EXISTS (SELECT 1 FROM email_attachments ea "
+                "JOIN emails e ON e.id = ea.email_id "
+                f"WHERE ea.attachment_id = ac.attachment_id AND {' AND '.join(conditions)})"
+            )
+
+        params["query_embedding"] = str(query_embedding)
+        params["limit"] = limit
+        params["offset"] = offset
+
+        ct_clause = ""
+        if content_type is not None:
+            ct_clause = " AND a.content_type = %(content_type)s"
+            params["content_type"] = content_type
+
+        sql = f"""
+            SELECT ac.id AS chunk_id, ac.attachment_id, ac.chunk_index,
+                   ac.heading_path, ac.page_number, ac.token_count, ac.text,
+                   a.filename, a.content_type, a.sha256,
+                   1 - (ac.embedding <=> %(query_embedding)s::vector) AS similarity,
+                   (SELECT COALESCE(array_agg(e2.message_id), ARRAY[]::text[])
+                      FROM email_attachments ea2
+                      JOIN emails e2 ON e2.id = ea2.email_id
+                     WHERE ea2.attachment_id = ac.attachment_id) AS email_message_ids,
+                   COUNT(*) OVER() AS _total
+            FROM attachment_chunks ac
+            JOIN attachments a ON a.id = ac.attachment_id
+            WHERE ac.embedding IS NOT NULL
+              AND vector_norm(ac.embedding) > 0
+              {ct_clause}
+              {email_exists}
+            ORDER BY ac.embedding <=> %(query_embedding)s::vector
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+
+        rows = _query_dicts(self._pool, sql, params)
+        total = rows[0]["_total"] if rows else 0
+        results = []
+        for row in rows:
+            chunk = AttachmentChunk(
+                id=row["chunk_id"],
+                attachment_id=row["attachment_id"],
+                chunk_index=row["chunk_index"],
+                heading_path=row["heading_path"],
+                page_number=row["page_number"],
+                token_count=row["token_count"],
+                text=row["text"],
+            )
+            results.append(
+                AttachmentSearchResult(
+                    attachment_id=row["attachment_id"],
+                    filename=row["filename"],
+                    content_type=row["content_type"],
+                    sha256=row["sha256"],
+                    chunk=chunk,
+                    emails=list(row["email_message_ids"] or []),
+                    similarity=row["similarity"],
+                )
+            )
+        return results, total
 
     def query(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute a Tier 2 DSL query and return results as dicts.
