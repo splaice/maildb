@@ -8,13 +8,14 @@ mid-run (watchdog reclaims 'extracting' rows older than the threshold).
 
 from __future__ import annotations
 
-import contextlib
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from maildb.config import Settings
+from maildb.embeddings import EmbeddingClient
 from maildb.ingest.chunking import chunk_markdown
 from maildb.ingest.extraction import ExtractionFailedError, extract_markdown
 
@@ -86,11 +87,62 @@ def _write_markdown_mirror(attachment_dir: Path, storage_path: str, markdown: st
     mirror.write_text(markdown, encoding="utf-8")
 
 
+_EMBED_BATCH_SIZE = 50
+
+
+def _build_embedding_client() -> EmbeddingClient:
+    settings = Settings()
+    return EmbeddingClient(
+        ollama_url=settings.ollama_url,
+        model_name=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+    )
+
+
 def _embed_chunks(pool: ConnectionPool, chunks: list[dict[str, Any]]) -> None:
-    """Stub embed entry point; real implementation lives in a later task.
-    Kept as a function here so tests can monkeypatch it.
+    """Embed chunks in batches and write vectors back to the DB.
+
+    On per-batch error, falls back to single-row embedding. Rows that
+    still fail get a zero-vector sentinel (same pattern the email embed
+    worker uses).
     """
-    raise NotImplementedError  # replaced in Task 4.2
+    if not chunks:
+        return
+
+    client = _build_embedding_client()
+
+    # Resolve chunk row IDs from DB — tests pass dicts built from Chunk objects
+    # that don't yet carry the bigserial id.
+    attachment_id = chunks[0]["attachment_id"]
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT id, chunk_index, text FROM attachment_chunks "
+            "WHERE attachment_id = %s ORDER BY chunk_index",
+            (attachment_id,),
+        )
+        rows = cur.fetchall()
+
+    for start in range(0, len(rows), _EMBED_BATCH_SIZE):
+        batch = rows[start : start + _EMBED_BATCH_SIZE]
+        ids = [r[0] for r in batch]
+        texts = [r[2] for r in batch]
+        try:
+            vectors = client.embed_batch(texts)
+        except Exception:
+            vectors = []
+            for t in texts:
+                try:
+                    vectors.append(client.embed(t))
+                except Exception:
+                    vectors.append([0.0] * client._dimensions)
+
+        with pool.connection() as conn:
+            for cid, vec in zip(ids, vectors, strict=True):
+                conn.execute(
+                    "UPDATE attachment_chunks SET embedding = %s WHERE id = %s",
+                    (str(vec), cid),
+                )
+            conn.commit()
 
 
 def _set_status(
@@ -208,9 +260,8 @@ def process_one(pool: ConnectionPool, attachment_id: int, *, attachment_dir: Pat
             chunk_rows.append({"attachment_id": attachment_id, **c.__dict__})
         conn.commit()
 
-    # Embed (stubbed in unit tests; real implementation attached in Task 4.2)
-    with contextlib.suppress(NotImplementedError):
-        _embed_chunks(pool, chunk_rows)
+    # Embed chunks via Ollama; tests monkeypatch _embed_chunks or _build_embedding_client.
+    _embed_chunks(pool, chunk_rows)
 
     # Write the on-disk markdown mirror.
     _write_markdown_mirror(attachment_dir, att["storage_path"], result.markdown)

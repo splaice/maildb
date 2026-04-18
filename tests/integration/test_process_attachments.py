@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import maildb.ingest.process_attachments as process_attachments_module
 from maildb.ingest.process_attachments import (
     ensure_pending_rows,
     process_one,
@@ -133,3 +134,31 @@ def test_run_processes_multiple(test_pool, tmp_path: Path):
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM attachment_contents WHERE status = 'extracted'")
         assert cur.fetchone()[0] >= 3
+
+
+def test_process_one_embeds_chunks_when_ollama_available(test_pool, tmp_path, test_settings):
+    """With a mocked EmbeddingClient, chunks get embedded and the embedding column is populated."""
+    att_id = _insert_attachment(test_pool, "ee", "text/plain", "embed.txt", size=80)
+    sp = tmp_path / "ee" / "ee" / "ee"
+    sp.parent.mkdir(parents=True)
+    sp.write_text("# Heading\n\nA paragraph that will become a chunk.")
+
+    ensure_pending_rows(test_pool)
+    client = MagicMock()
+    client.embed_batch.return_value = [[0.1] * 768]
+
+    with patch.object(
+        process_attachments_module,
+        "_build_embedding_client",
+        return_value=client,
+    ):
+        process_one(test_pool, att_id, attachment_dir=tmp_path)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE attachment_id = %s "
+            "AND embedding IS NOT NULL",
+            (att_id,),
+        )
+        assert cur.fetchone()[0] >= 1
+    assert client.embed_batch.called
