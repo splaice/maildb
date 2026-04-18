@@ -343,3 +343,19 @@ def test_get_attachment_markdown_tool_returns_null_for_missing() -> None:
     ctx = MagicMock()
     ctx.request_context.lifespan_context.db = mock_db
     assert server.get_attachment_markdown(ctx, attachment_id=1) is None
+
+
+def test_search_all_passes_recipient_count_filters_through() -> None:
+    mock_db = MagicMock()
+    mock_db.search_all.return_value = ([], 0)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+    server.search_all(
+        ctx, query="x",
+        max_to=1, max_cc=0, max_recipients=3, direct_only=True,
+    )
+    kwargs = mock_db.search_all.call_args.kwargs
+    assert kwargs["max_to"] == 1
+    assert kwargs["max_cc"] == 0
+    assert kwargs["max_recipients"] == 3
+    assert kwargs["direct_only"] is True
