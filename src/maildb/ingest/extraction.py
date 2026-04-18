@@ -69,10 +69,10 @@ def _marker_convert(path: Path) -> tuple[str, str]:
 
     Isolated so tests can monkeypatch it without importing marker-pdf.
     """
-    import marker  # noqa: PLC0415 — deferred import keeps the test suite fast
-    from marker.converters.pdf import PdfConverter  # noqa: PLC0415
-    from marker.models import create_model_dict  # noqa: PLC0415
-    from marker.output import text_from_rendered  # noqa: PLC0415
+    import marker  # type: ignore[import-untyped]  # noqa: PLC0415
+    from marker.converters.pdf import PdfConverter  # type: ignore[import-untyped]  # noqa: PLC0415
+    from marker.models import create_model_dict  # type: ignore[import-untyped]  # noqa: PLC0415
+    from marker.output import text_from_rendered  # type: ignore[import-untyped]  # noqa: PLC0415
 
     converter = PdfConverter(artifact_dict=create_model_dict())
     rendered = converter(str(path))
