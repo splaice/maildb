@@ -235,3 +235,55 @@ def test_init_db_backfills_email_accounts_from_emails(test_pool) -> None:  # typ
         )
         rows = cur.fetchall()
     assert rows == [("legacy@example.com", iid)]
+
+
+def test_attachments_has_reference_count(test_pool) -> None:  # type: ignore[no-untyped-def]
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT column_name, data_type, is_nullable "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'attachments' AND column_name = 'reference_count'"
+        )
+        row = cur.fetchone()
+    assert row is not None
+    assert row[1] == "integer"
+    assert row[2] == "NO"
+
+
+def test_init_db_backfills_reference_count(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """Given rows in email_attachments, init_db computes reference_count."""
+    with test_pool.connection() as conn:
+        # Seed: one attachment referenced by two distinct emails.
+        conn.execute(
+            "INSERT INTO attachments (sha256, filename, content_type, size, storage_path) "
+            "VALUES ('aa', 'x.pdf', 'application/pdf', 1, 'aa/x.pdf') RETURNING id"
+        )
+        att_id = conn.execute("SELECT id FROM attachments WHERE sha256='aa'").fetchone()[0]
+        for mid in ("<ref-1@ex.com>", "<ref-2@ex.com>"):
+            conn.execute(
+                "INSERT INTO emails (id, message_id, thread_id, source_account) "
+                "VALUES (gen_random_uuid(), %s, 't', 'test@example.com') RETURNING id",
+                (mid,),
+            )
+            eid = conn.execute(
+                "SELECT id FROM emails WHERE message_id=%s", (mid,)
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO email_attachments (email_id, attachment_id, filename) "
+                "VALUES (%s, %s, 'x.pdf')",
+                (eid, att_id),
+            )
+        # Reset reference_count to 0 so we can prove the backfill runs.
+        conn.execute(
+            "UPDATE attachments SET reference_count = 0 WHERE id = %s", (att_id,),
+        )
+        conn.commit()
+
+    from maildb.db import init_db
+    init_db(test_pool)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT reference_count FROM attachments WHERE id = %s", (att_id,)
+        )
+        assert cur.fetchone()[0] == 2

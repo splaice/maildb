@@ -28,6 +28,22 @@ def init_db(pool: ConnectionPool) -> None:
     with pool.connection() as conn:
         conn.execute(schema_sql)
 
+        # Backfill attachments.reference_count from email_attachments.
+        # Safe to run every init_db: only rewrites rows where count differs.
+        conn.execute(
+            """
+            UPDATE attachments a
+               SET reference_count = sub.n
+              FROM (
+                  SELECT attachment_id, count(*) AS n
+                    FROM email_attachments
+                   GROUP BY attachment_id
+              ) sub
+             WHERE a.id = sub.attachment_id
+               AND a.reference_count != sub.n
+            """
+        )
+
         # Mirror any legacy (emails.source_account, emails.import_id) pairs
         # into email_accounts. Safe to re-run — ON CONFLICT DO NOTHING.
         conn.execute(

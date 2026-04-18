@@ -67,9 +67,12 @@ CREATE TABLE IF NOT EXISTS attachments (
     content_type    TEXT,
     size            BIGINT NOT NULL,
     storage_path    TEXT NOT NULL,
+    reference_count INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT now(),
     UNIQUE (sha256)
 );
+
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS reference_count INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS email_attachments (
     email_id        UUID NOT NULL REFERENCES emails(id),
