@@ -325,7 +325,12 @@ _BUCKET_TO_CONTENT_TYPES: dict[str, list[str]] = {
 def process_run(
     workers: int = typer.Option(1, "--workers", help="Parallel workers."),
     retry_failed: bool = typer.Option(
-        True, "--retry-failed/--no-retry-failed", help="Re-process rows with status='failed'."
+        False,
+        "--retry-failed/--no-retry-failed",
+        help="Re-claim rows with status='failed' within the same session. Default off — "
+        "previously-failed rows (including timeouts) stay failed until explicitly retried "
+        "via `process_attachments retry`. Avoids the livelock where a failed row is "
+        "immediately re-claimed by the same worker.",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report selection count without processing."
