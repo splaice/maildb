@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     ingest_workers: int = -1
     embed_workers: int = 4
     embed_batch_size: int = 50
+    # Per-attachment extraction wall-clock ceiling (seconds). 0 disables.
+    extract_timeout_s: int = 300
 
     # Debug logging
     debug_log: str = "~/.maildb/debug.log"

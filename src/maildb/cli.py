@@ -340,6 +340,12 @@ def process_run(
     ids: str | None = typer.Option(None, "--ids", help="Comma-separated attachment_ids."),
     min_size: int | None = typer.Option(None, "--min-size"),
     max_size: int | None = typer.Option(None, "--max-size"),
+    extract_timeout: int = typer.Option(
+        300,
+        "--extract-timeout",
+        help="Per-attachment wall-clock ceiling in seconds (0 disables). "
+        "Timed-out rows are marked failed with reason prefixed 'timed out after'.",
+    ),
 ) -> None:
     """Process pending (and optionally failed) attachments."""
     selector_sql_parts: list[str] = []
@@ -403,6 +409,7 @@ def process_run(
             selector_sql=selector_sql,
             selector_params=selector_params,
             database_url=settings.database_url,
+            extract_timeout_s=extract_timeout,
         )
         typer.echo(
             "Done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
@@ -474,19 +481,33 @@ def process_status() -> None:
 @process_app.command("retry")
 def process_retry(
     workers: int = typer.Option(1, "--workers"),
+    extract_timeout: int = typer.Option(
+        300,
+        "--extract-timeout",
+        help="Per-attachment wall-clock ceiling in seconds (0 disables).",
+    ),
+    timeouts_only: bool = typer.Option(
+        False,
+        "--timeouts-only",
+        help="Retry only rows whose failure reason starts with 'timed out after'.",
+    ),
 ) -> None:
     """Re-process only rows with status='failed'."""
     pool = _build_process_pool()
     try:
         settings = Settings()
+        selector_sql = "AND status = 'failed'"
+        if timeouts_only:
+            selector_sql += " AND reason LIKE 'timed out after%%'"
         counts = pa_run(
             pool,
             attachment_dir=Path(settings.attachment_dir),
             workers=workers,
             retry_failed=True,
-            selector_sql="AND status = 'failed'",
+            selector_sql=selector_sql,
             selector_params={},
             database_url=settings.database_url,
+            extract_timeout_s=extract_timeout,
         )
         typer.echo(
             "Retry done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)

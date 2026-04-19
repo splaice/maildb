@@ -8,10 +8,11 @@ mid-run (watchdog reclaims 'extracting' rows older than the threshold).
 
 from __future__ import annotations
 
+import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from psycopg_pool import ConnectionPool
@@ -20,6 +21,37 @@ from maildb.config import Settings
 from maildb.embeddings import EmbeddingClient
 from maildb.ingest.chunking import chunk_markdown
 from maildb.ingest.extraction import ExtractionFailedError, extract_markdown
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+class ExtractionTimeoutError(Exception):
+    """Raised when extract_markdown exceeds its wall-clock budget."""
+
+
+def _run_with_timeout[R](seconds: int, fn: Callable[[], R]) -> R:
+    """Run ``fn`` and raise ExtractionTimeoutError if it doesn't return within ``seconds``.
+
+    Uses SIGALRM — must be called from the main thread of the calling process.
+    Because each subprocess worker is single-threaded here, that's fine. Passing
+    ``seconds <= 0`` disables the timeout.
+    """
+    if seconds <= 0:
+        return fn()
+
+    def _handler(_signum: int, _frame: object) -> None:
+        msg = f"timed out after {seconds}s"
+        raise ExtractionTimeoutError(msg)
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        return fn()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
 
 logger = structlog.get_logger()
 
@@ -214,13 +246,31 @@ def _claim_row(
         return row[0] if row else None
 
 
-def process_one(pool: ConnectionPool, attachment_id: int, *, attachment_dir: Path) -> None:
-    """Extract → chunk → embed → status for a single attachment row."""
+def process_one(
+    pool: ConnectionPool,
+    attachment_id: int,
+    *,
+    attachment_dir: Path,
+    extract_timeout_s: int = 0,
+) -> None:
+    """Extract → chunk → embed → status for a single attachment row.
+
+    ``extract_timeout_s`` caps the wall-clock time spent inside extract_markdown
+    per attachment; when exceeded the row is marked failed with a reason that
+    starts with ``"timed out after"`` so timeouts can be queried and retried
+    independently of other failures.
+    """
     att = _load_attachment(pool, attachment_id)
     file_path = attachment_dir / Path(att["storage_path"])
     t0 = time.monotonic()
     try:
-        result = extract_markdown(file_path, content_type=att["content_type"])
+        result = _run_with_timeout(
+            extract_timeout_s,
+            lambda: extract_markdown(file_path, content_type=att["content_type"]),
+        )
+    except ExtractionTimeoutError as exc:
+        _set_status(pool, attachment_id, status="failed", reason=str(exc))
+        return
     except ExtractionFailedError as exc:
         # Unsupported types are skipped; Marker errors are failures.
         if "not supported" in str(exc).lower() or "requires LibreOffice" in str(exc):
@@ -283,6 +333,7 @@ def _claim_and_process_loop(
     retry_failed: bool,
     selector_sql: str,
     selector_params: dict[str, Any] | None,
+    extract_timeout_s: int = 0,
 ) -> None:
     """Claim rows one at a time via SKIP LOCKED and process until none remain."""
     while True:
@@ -295,7 +346,12 @@ def _claim_and_process_loop(
         if attachment_id is None:
             return
         try:
-            process_one(pool, attachment_id, attachment_dir=attachment_dir)
+            process_one(
+                pool,
+                attachment_id,
+                attachment_dir=attachment_dir,
+                extract_timeout_s=extract_timeout_s,
+            )
         except Exception as exc:
             _set_status(pool, attachment_id, status="failed", reason=str(exc))
 
@@ -307,6 +363,7 @@ def _subprocess_worker(
     retry_failed: bool,
     selector_sql: str,
     selector_params: dict[str, Any] | None,
+    extract_timeout_s: int = 0,
 ) -> None:
     """Subprocess entrypoint: build a fresh pool and run the claim loop.
 
@@ -323,6 +380,7 @@ def _subprocess_worker(
             retry_failed=retry_failed,
             selector_sql=selector_sql,
             selector_params=selector_params,
+            extract_timeout_s=extract_timeout_s,
         )
     finally:
         pool.close()
@@ -337,6 +395,7 @@ def run(
     selector_sql: str = "",
     selector_params: dict[str, Any] | None = None,
     database_url: str | None = None,
+    extract_timeout_s: int = 0,
 ) -> dict[str, int]:
     """Process all matching pending/failed rows.
 
@@ -344,6 +403,11 @@ def run(
     - ``workers > 1`` spawns subprocesses via ``ProcessPoolExecutor``; each loads
       Marker and builds its own pool. Pass ``database_url`` so the children can
       reconnect; it's required when workers > 1.
+
+    ``extract_timeout_s`` caps wall-clock time per attachment inside
+    extract_markdown; 0 disables the cap. Timed-out rows are marked ``failed``
+    with a reason prefixed ``"timed out after "`` so they can be queried and
+    retried as a distinct group.
     """
     ensure_pending_rows(pool)
     _reclaim_stale(pool)
@@ -357,6 +421,7 @@ def run(
             retry_failed=retry_failed,
             selector_sql=selector_sql,
             selector_params=selector_params,
+            extract_timeout_s=extract_timeout_s,
         )
     else:
         if database_url is None:
@@ -371,6 +436,7 @@ def run(
                     retry_failed=retry_failed,
                     selector_sql=selector_sql,
                     selector_params=selector_params,
+                    extract_timeout_s=extract_timeout_s,
                 )
                 for _ in range(workers)
             ]
