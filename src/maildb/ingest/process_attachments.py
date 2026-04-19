@@ -9,18 +9,17 @@ mid-run (watchdog reclaims 'extracting' rows older than the threshold).
 from __future__ import annotations
 
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
+from psycopg_pool import ConnectionPool
 
 from maildb.config import Settings
 from maildb.embeddings import EmbeddingClient
 from maildb.ingest.chunking import chunk_markdown
 from maildb.ingest.extraction import ExtractionFailedError, extract_markdown
-
-if TYPE_CHECKING:
-    from psycopg_pool import ConnectionPool
 
 logger = structlog.get_logger()
 
@@ -277,6 +276,58 @@ def process_one(pool: ConnectionPool, attachment_id: int, *, attachment_dir: Pat
     )
 
 
+def _claim_and_process_loop(
+    pool: ConnectionPool,
+    *,
+    attachment_dir: Path,
+    retry_failed: bool,
+    selector_sql: str,
+    selector_params: dict[str, Any] | None,
+) -> None:
+    """Claim rows one at a time via SKIP LOCKED and process until none remain."""
+    while True:
+        attachment_id = _claim_row(
+            pool,
+            retry_failed=retry_failed,
+            selector_sql=selector_sql,
+            selector_params=selector_params,
+        )
+        if attachment_id is None:
+            return
+        try:
+            process_one(pool, attachment_id, attachment_dir=attachment_dir)
+        except Exception as exc:
+            _set_status(pool, attachment_id, status="failed", reason=str(exc))
+
+
+def _subprocess_worker(
+    *,
+    database_url: str,
+    attachment_dir: Path,
+    retry_failed: bool,
+    selector_sql: str,
+    selector_params: dict[str, Any] | None,
+) -> None:
+    """Subprocess entrypoint: build a fresh pool and run the claim loop.
+
+    Each subprocess owns its own ConnectionPool and PyTorch runtime. The isolation
+    is required because Marker's model init is not thread-safe — multiple threads
+    hitting `create_model_dict()` concurrently produce meta-tensor errors. Process-
+    level parallelism avoids that entirely at the cost of per-process startup time.
+    """
+    pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=2, open=True)
+    try:
+        _claim_and_process_loop(
+            pool,
+            attachment_dir=attachment_dir,
+            retry_failed=retry_failed,
+            selector_sql=selector_sql,
+            selector_params=selector_params,
+        )
+    finally:
+        pool.close()
+
+
 def run(
     pool: ConnectionPool,
     *,
@@ -285,40 +336,44 @@ def run(
     retry_failed: bool = True,
     selector_sql: str = "",
     selector_params: dict[str, Any] | None = None,
+    database_url: str | None = None,
 ) -> dict[str, int]:
-    """Process all matching pending/failed rows using N workers.
+    """Process all matching pending/failed rows.
 
-    For workers > 1 this uses threads, which is appropriate for the
-    mixed I/O + short GPU bursts Marker produces. Connection pool is
-    configured for concurrent access already.
+    - ``workers == 1`` runs in-process on the provided pool.
+    - ``workers > 1`` spawns subprocesses via ``ProcessPoolExecutor``; each loads
+      Marker and builds its own pool. Pass ``database_url`` so the children can
+      reconnect; it's required when workers > 1.
     """
     ensure_pending_rows(pool)
     _reclaim_stale(pool)
 
     counts = {"extracted": 0, "failed": 0, "skipped": 0}
 
-    def _worker() -> None:
-        while True:
-            attachment_id = _claim_row(
-                pool,
-                retry_failed=retry_failed,
-                selector_sql=selector_sql,
-                selector_params=selector_params,
-            )
-            if attachment_id is None:
-                return
-            try:
-                process_one(pool, attachment_id, attachment_dir=attachment_dir)
-            except Exception as exc:
-                _set_status(pool, attachment_id, status="failed", reason=str(exc))
-
     if workers <= 1:
-        _worker()
+        _claim_and_process_loop(
+            pool,
+            attachment_dir=attachment_dir,
+            retry_failed=retry_failed,
+            selector_sql=selector_sql,
+            selector_params=selector_params,
+        )
     else:
-        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_worker) for _ in range(workers)]
+        if database_url is None:
+            msg = "database_url is required when workers > 1 (subprocesses need it to reconnect)"
+            raise ValueError(msg)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(
+                    _subprocess_worker,
+                    database_url=database_url,
+                    attachment_dir=attachment_dir,
+                    retry_failed=retry_failed,
+                    selector_sql=selector_sql,
+                    selector_params=selector_params,
+                )
+                for _ in range(workers)
+            ]
             for f in futures:
                 f.result()
 

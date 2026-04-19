@@ -402,6 +402,7 @@ def process_run(
             retry_failed=retry_failed,
             selector_sql=selector_sql,
             selector_params=selector_params,
+            database_url=settings.database_url,
         )
         typer.echo(
             "Done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
@@ -485,6 +486,7 @@ def process_retry(
             retry_failed=True,
             selector_sql="AND status = 'failed'",
             selector_params={},
+            database_url=settings.database_url,
         )
         typer.echo(
             "Retry done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
