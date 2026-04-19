@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -83,3 +84,44 @@ def test_subprocess_worker_opens_fresh_pool_and_closes_it() -> None:
     )
     loop.assert_called_once()
     fake_pool.close.assert_called_once()
+
+
+def test_run_with_timeout_disabled_calls_fn_directly() -> None:
+    """Timeout=0 must skip signal setup entirely and return the function result."""
+    calls = []
+    result = pa._run_with_timeout(0, lambda: calls.append("x") or "ok")
+    assert result == "ok"
+    assert calls == ["x"]
+
+
+def test_run_with_timeout_raises_extraction_timeout_error() -> None:
+    """SIGALRM-based timeout: a sleep longer than the ceiling raises and includes the ceiling."""
+    with pytest.raises(pa.ExtractionTimeoutError, match="timed out after 1s"):
+        pa._run_with_timeout(1, lambda: time.sleep(3))
+
+
+def test_process_one_timeout_marks_row_failed_with_timeout_reason() -> None:
+    """When extract_markdown blows the budget, the row is failed with reason starting
+    with 'timed out after' — so ops can query and retry them as a group."""
+    pool = MagicMock()
+    load_ret = {
+        "id": 99,
+        "filename": "slow.pdf",
+        "content_type": "application/pdf",
+        "storage_path": "aa/bb/x",
+    }
+    set_status = MagicMock()
+    with (
+        patch.object(pa, "_load_attachment", return_value=load_ret),
+        patch.object(pa, "_set_status", set_status),
+        patch.object(
+            pa,
+            "_run_with_timeout",
+            side_effect=pa.ExtractionTimeoutError("timed out after 300s"),
+        ),
+    ):
+        pa.process_one(pool, 99, attachment_dir=Path("/tmp"), extract_timeout_s=300)
+    set_status.assert_called_once()
+    _, kwargs = set_status.call_args
+    assert kwargs["status"] == "failed"
+    assert kwargs["reason"].startswith("timed out after ")
