@@ -30,6 +30,14 @@ class ExtractionTimeoutError(Exception):
     """Raised when extract_markdown exceeds its wall-clock budget."""
 
 
+class EmbedFailedError(Exception):
+    """Raised when one or more chunks cannot be embedded after per-row retry.
+
+    Carries the count of chunks that failed so the reason stored on the row
+    is concise and queryable.
+    """
+
+
 def _run_with_timeout[R](seconds: int, fn: Callable[[], R]) -> R:
     """Run ``fn`` and raise ExtractionTimeoutError if it doesn't return within ``seconds``.
 
@@ -133,17 +141,16 @@ def _build_embedding_client() -> EmbeddingClient:
 def _embed_chunks(pool: ConnectionPool, chunks: list[dict[str, Any]]) -> None:
     """Embed chunks in batches and write vectors back to the DB.
 
-    On per-batch error, falls back to single-row embedding. Rows that
-    still fail get a zero-vector sentinel (same pattern the email embed
-    worker uses).
+    On per-batch error, falls back to per-row embedding. If any row still
+    fails, raises ``EmbedFailedError`` — callers are expected to treat the
+    whole attachment as failed rather than store zero-vector sentinels that
+    would poison semantic search.
     """
     if not chunks:
         return
 
     client = _build_embedding_client()
 
-    # Resolve chunk row IDs from DB — tests pass dicts built from Chunk objects
-    # that don't yet carry the bigserial id.
     attachment_id = chunks[0]["attachment_id"]
     with pool.connection() as conn:
         cur = conn.execute(
@@ -153,27 +160,37 @@ def _embed_chunks(pool: ConnectionPool, chunks: list[dict[str, Any]]) -> None:
         )
         rows = cur.fetchall()
 
+    failed_chunk_ids: list[int] = []
+
     for start in range(0, len(rows), _EMBED_BATCH_SIZE):
         batch = rows[start : start + _EMBED_BATCH_SIZE]
         ids = [r[0] for r in batch]
         texts = [r[2] for r in batch]
+        vectors: list[list[float] | None]
         try:
-            vectors = client.embed_batch(texts)
+            vectors = list(client.embed_batch(texts))
         except Exception:
             vectors = []
-            for t in texts:
+            for cid, t in zip(ids, texts, strict=True):
                 try:
                     vectors.append(client.embed(t))
                 except Exception:
-                    vectors.append([0.0] * client._dimensions)
+                    vectors.append(None)
+                    failed_chunk_ids.append(cid)
 
         with pool.connection() as conn:
             for cid, vec in zip(ids, vectors, strict=True):
+                if vec is None:
+                    continue
                 conn.execute(
                     "UPDATE attachment_chunks SET embedding = %s WHERE id = %s",
                     (str(vec), cid),
                 )
             conn.commit()
+
+    if failed_chunk_ids:
+        msg = f"{len(failed_chunk_ids)}/{len(rows)} chunks"
+        raise EmbedFailedError(msg)
 
 
 def _set_status(
@@ -290,6 +307,10 @@ def process_one(
         conn.commit()
 
     chunks = chunk_markdown(result.markdown)
+    if not chunks:
+        _set_status(pool, attachment_id, status="skipped", reason="empty extraction")
+        return
+
     chunk_rows: list[dict[str, Any]] = []
     with pool.connection() as conn:
         for c in chunks:
@@ -309,8 +330,16 @@ def process_one(
             chunk_rows.append({"attachment_id": attachment_id, **c.__dict__})
         conn.commit()
 
-    # Embed chunks via Ollama; tests monkeypatch _embed_chunks or _build_embedding_client.
-    _embed_chunks(pool, chunk_rows)
+    try:
+        _embed_chunks(pool, chunk_rows)
+    except EmbedFailedError as exc:
+        with pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM attachment_chunks WHERE attachment_id = %s", (attachment_id,)
+            )
+            conn.commit()
+        _set_status(pool, attachment_id, status="failed", reason=f"embed failed: {exc}")
+        return
 
     # Write the on-disk markdown mirror.
     _write_markdown_mirror(attachment_dir, att["storage_path"], result.markdown)
@@ -449,3 +478,95 @@ def run(
             if status in counts:
                 counts[status] = n
     return counts
+
+
+def sweep_empty_extractions(pool: ConnectionPool) -> int:
+    """Reclassify ``status='extracted'`` rows that have zero chunks as ``skipped``.
+
+    These are rows where extraction succeeded but produced no usable text (e.g.
+    scanned images with no OCR output, empty PDFs). Leaving them as ``extracted``
+    with no chunks misrepresents coverage in status reports. Idempotent.
+    """
+    with pool.connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE attachment_contents
+               SET status = 'skipped', reason = 'empty extraction'
+             WHERE status = 'extracted'
+               AND NOT EXISTS (
+                   SELECT 1 FROM attachment_chunks ch
+                    WHERE ch.attachment_id = attachment_contents.attachment_id
+               )
+            """
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def _zero_vector_literal(dimensions: int) -> str:
+    """pgvector text representation of an all-zero vector."""
+    return "[" + ",".join(["0"] * dimensions) + "]"
+
+
+def reembed_zero_vectors(
+    pool: ConnectionPool,
+    *,
+    limit: int | None = None,
+) -> dict[str, int]:
+    """Re-embed chunks whose stored vector is the all-zero sentinel.
+
+    The prior fallback in ``_embed_chunks`` silently stamped zero vectors when
+    Ollama errored; this drains that backlog. Single-row embed only.
+    On persistent per-chunk failure, the containing ``attachment_contents`` row
+    is marked ``failed`` with reason ``embed failed: ...`` and its chunks dropped,
+    mirroring ``process_one`` semantics.
+
+    Returns ``{"reembedded": int, "failed": int}``.
+    """
+    client = _build_embedding_client()
+    zero = _zero_vector_literal(client._dimensions)
+
+    sql = (
+        "SELECT id, attachment_id, text FROM attachment_chunks "
+        "WHERE embedding = %s::vector ORDER BY attachment_id, chunk_index"
+    )
+    params: tuple[Any, ...] = (zero,)
+    if limit is not None:
+        sql += " LIMIT %s"
+        params = (zero, limit)
+
+    with pool.connection() as conn:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+
+    stats = {"reembedded": 0, "failed": 0}
+    failed_attachments: set[int] = set()
+    for chunk_id, attachment_id, text in rows:
+        if attachment_id in failed_attachments:
+            continue
+        try:
+            vec = client.embed(text)
+        except Exception as exc:
+            failed_attachments.add(attachment_id)
+            with pool.connection() as conn:
+                conn.execute(
+                    "DELETE FROM attachment_chunks WHERE attachment_id = %s",
+                    (attachment_id,),
+                )
+                conn.commit()
+            _set_status(
+                pool,
+                attachment_id,
+                status="failed",
+                reason=f"embed failed: {type(exc).__name__}: {exc}",
+            )
+            stats["failed"] += 1
+            continue
+        with pool.connection() as conn:
+            conn.execute(
+                "UPDATE attachment_chunks SET embedding = %s WHERE id = %s",
+                (str(vec), chunk_id),
+            )
+            conn.commit()
+        stats["reembedded"] += 1
+    return stats
