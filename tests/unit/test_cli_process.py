@@ -15,6 +15,7 @@ def test_process_attachments_help_lists_subcommands():
     assert "run" in result.output
     assert "status" in result.output
     assert "retry" in result.output
+    assert "reembed" in result.output
 
 
 def test_process_attachments_run_passes_workers_and_retry(tmp_path):
@@ -146,6 +147,44 @@ def test_process_attachments_retry_runs_only_failed(tmp_path):
     assert kwargs["retry_failed"] is True
     # selector_sql should filter to status='failed' only
     assert "status = 'failed'" in kwargs["selector_sql"]
+
+
+def test_process_attachments_reembed_dry_run_reports_counts_and_does_not_write():
+    with (
+        patch("maildb.cli._build_process_pool") as mock_pool,
+        patch("maildb.cli._count_zero_vector_chunks", return_value=42),
+        patch("maildb.cli._count_empty_extractions", return_value=5),
+        patch("maildb.cli.pa_sweep_empty_extractions") as mock_sweep,
+        patch("maildb.cli.pa_reembed_zero_vectors") as mock_reembed,
+    ):
+        mock_pool.return_value = object()
+        result = runner.invoke(app, ["process_attachments", "reembed", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "42" in result.output
+    assert "5" in result.output
+    mock_sweep.assert_not_called()
+    mock_reembed.assert_not_called()
+
+
+def test_process_attachments_reembed_runs_sweep_and_reembed():
+    with (
+        patch("maildb.cli._build_process_pool") as mock_pool,
+        patch("maildb.cli.pa_sweep_empty_extractions", return_value=3) as mock_sweep,
+        patch(
+            "maildb.cli.pa_reembed_zero_vectors",
+            return_value={"reembedded": 10, "failed": 1},
+        ) as mock_reembed,
+        patch("maildb.cli.create_hnsw_index_attachment_chunks") as mock_idx,
+    ):
+        mock_pool.return_value = object()
+        result = runner.invoke(app, ["process_attachments", "reembed", "--limit", "100"])
+    assert result.exit_code == 0, result.output
+    assert "reembedded=10" in result.output
+    assert "failed=1" in result.output
+    assert "swept_empty=3" in result.output
+    mock_sweep.assert_called_once()
+    mock_reembed.assert_called_once_with(mock_pool.return_value, limit=100)
+    mock_idx.assert_called_once()
 
 
 def test_process_attachments_status_shows_per_content_type_throughput():

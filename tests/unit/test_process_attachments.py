@@ -125,3 +125,213 @@ def test_process_one_timeout_marks_row_failed_with_timeout_reason() -> None:
     _, kwargs = set_status.call_args
     assert kwargs["status"] == "failed"
     assert kwargs["reason"].startswith("timed out after ")
+
+
+def _fake_extract_result(markdown: str = "# hello\n\nworld"):
+    m = MagicMock()
+    m.markdown = markdown
+    m.extractor_version = "test-v1"
+    return m
+
+
+def test_embed_chunks_raises_when_all_retries_fail() -> None:
+    """If single-row retry also fails, _embed_chunks raises EmbedFailedError
+    rather than silently writing zero-vector sentinels."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    cur = conn.execute.return_value
+    # Two chunks pre-inserted and read back for embed
+    cur.fetchall.return_value = [(1, 0, "chunk a"), (2, 1, "chunk b")]
+
+    client = MagicMock()
+    client._dimensions = 768
+    client.embed_batch.side_effect = RuntimeError("ollama down")
+    client.embed.side_effect = RuntimeError("ollama still down")
+
+    with (
+        patch.object(pa, "_build_embedding_client", return_value=client),
+        pytest.raises(pa.EmbedFailedError),
+    ):
+        pa._embed_chunks(pool, [{"attachment_id": 42}])
+
+
+def test_embed_chunks_success_writes_real_vectors() -> None:
+    """Happy path: real vectors get written, no exception."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    cur = conn.execute.return_value
+    cur.fetchall.return_value = [(1, 0, "a"), (2, 1, "b")]
+
+    client = MagicMock()
+    client._dimensions = 3
+    client.embed_batch.return_value = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+
+    with patch.object(pa, "_build_embedding_client", return_value=client):
+        pa._embed_chunks(pool, [{"attachment_id": 42}])
+
+    # No zero-vector writes
+    written = [c.args for c in conn.execute.call_args_list if "UPDATE" in c.args[0]]
+    assert written, "expected UPDATE statements"
+    for _sql, params in written:
+        assert "[0.0, 0.0, 0.0]" not in params[0]
+
+
+def test_process_one_empty_markdown_marks_skipped() -> None:
+    """Extraction succeeded but produced no text → skipped with 'empty extraction',
+    no embed attempted."""
+    pool = MagicMock()
+    set_status = MagicMock()
+    embed = MagicMock()
+    with (
+        patch.object(
+            pa,
+            "_load_attachment",
+            return_value={
+                "id": 1,
+                "filename": "x.png",
+                "content_type": "image/png",
+                "storage_path": "a/x",
+            },
+        ),
+        patch.object(pa, "_run_with_timeout", return_value=_fake_extract_result("")),
+        patch.object(pa, "_set_status", set_status),
+        patch.object(pa, "_embed_chunks", embed),
+    ):
+        pa.process_one(pool, 1, attachment_dir=Path("/tmp"))
+    set_status.assert_called_once()
+    _, kwargs = set_status.call_args
+    assert kwargs["status"] == "skipped"
+    assert kwargs["reason"] == "empty extraction"
+    embed.assert_not_called()
+
+
+def test_process_one_markdown_produces_no_chunks_marks_skipped() -> None:
+    """Markdown present but chunker returns [] (e.g. whitespace-only) → skipped."""
+    pool = MagicMock()
+    set_status = MagicMock()
+    embed = MagicMock()
+    with (
+        patch.object(
+            pa,
+            "_load_attachment",
+            return_value={
+                "id": 1,
+                "filename": "x.pdf",
+                "content_type": "application/pdf",
+                "storage_path": "a/x",
+            },
+        ),
+        patch.object(pa, "_run_with_timeout", return_value=_fake_extract_result("   \n\n   ")),
+        patch.object(pa, "chunk_markdown", return_value=[]),
+        patch.object(pa, "_set_status", set_status),
+        patch.object(pa, "_embed_chunks", embed),
+    ):
+        pa.process_one(pool, 1, attachment_dir=Path("/tmp"))
+    set_status.assert_called_once()
+    _, kwargs = set_status.call_args
+    assert kwargs["status"] == "skipped"
+    assert kwargs["reason"] == "empty extraction"
+    embed.assert_not_called()
+
+
+def test_process_one_embed_failure_marks_failed_and_drops_chunks() -> None:
+    """If _embed_chunks raises EmbedFailedError, the row is marked failed with
+    reason prefix 'embed failed:' and chunks are deleted for clean retry."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    set_status = MagicMock()
+    with (
+        patch.object(
+            pa,
+            "_load_attachment",
+            return_value={
+                "id": 7,
+                "filename": "x.pdf",
+                "content_type": "application/pdf",
+                "storage_path": "a/x",
+            },
+        ),
+        patch.object(pa, "_run_with_timeout", return_value=_fake_extract_result("# h\n\nbody")),
+        patch.object(pa, "_embed_chunks", side_effect=pa.EmbedFailedError("ollama timeout")),
+        patch.object(pa, "_set_status", set_status),
+    ):
+        pa.process_one(pool, 7, attachment_dir=Path("/tmp"))
+    set_status.assert_called_once()
+    _, kwargs = set_status.call_args
+    assert kwargs["status"] == "failed"
+    assert kwargs["reason"].startswith("embed failed:")
+    # chunks deleted for this attachment (one DELETE before insert, one after failure)
+    delete_calls = [
+        c for c in conn.execute.call_args_list if "DELETE FROM attachment_chunks" in c.args[0]
+    ]
+    assert len(delete_calls) >= 2
+
+
+def test_sweep_empty_extractions_flips_rows_without_chunks() -> None:
+    """Sweep: status='extracted' with zero chunks → status='skipped', reason='empty extraction'."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    cur = conn.execute.return_value
+    cur.rowcount = 3
+
+    n = pa.sweep_empty_extractions(pool)
+
+    assert n == 3
+    sql = conn.execute.call_args_list[0].args[0]
+    assert "UPDATE attachment_contents" in sql
+    assert "status = 'skipped'" in sql
+    assert "'empty extraction'" in sql
+
+
+def test_reembed_zero_vectors_re_embeds_them() -> None:
+    """reembed_zero_vectors scans for zero-vector chunks, re-embeds each, and
+    updates the stored vector."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    # First query: find zero-vector chunks
+    find_cur = MagicMock()
+    find_cur.fetchall.return_value = [(101, 50, "chunk text one")]
+    # Subsequent UPDATEs
+    update_cur = MagicMock()
+    conn.execute.side_effect = [find_cur, update_cur]
+
+    client = MagicMock()
+    client._dimensions = 3
+    client.embed.return_value = [0.9, 0.1, 0.2]
+
+    with patch.object(pa, "_build_embedding_client", return_value=client):
+        stats = pa.reembed_zero_vectors(pool)
+
+    assert stats["reembedded"] == 1
+    assert stats["failed"] == 0
+    client.embed.assert_called_once_with("chunk text one")
+
+
+def test_reembed_zero_vectors_marks_row_failed_on_persistent_error() -> None:
+    """When embed raises for a chunk, its attachment_contents row is marked failed
+    with reason 'embed failed: …' and its chunks are dropped."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    find_cur = MagicMock()
+    find_cur.fetchall.return_value = [(101, 50, "chunk text one")]
+    # execute is called for: find → _set_status (inside failure path) → delete
+    conn.execute.side_effect = [find_cur] + [MagicMock() for _ in range(10)]
+
+    client = MagicMock()
+    client._dimensions = 3
+    client.embed.side_effect = RuntimeError("ollama dead")
+
+    set_status = MagicMock()
+    with (
+        patch.object(pa, "_build_embedding_client", return_value=client),
+        patch.object(pa, "_set_status", set_status),
+    ):
+        stats = pa.reembed_zero_vectors(pool)
+
+    assert stats["reembedded"] == 0
+    assert stats["failed"] == 1
+    set_status.assert_called_once()
+    args, kwargs = set_status.call_args
+    assert args[1] == 50  # attachment_id (positional)
+    assert kwargs["status"] == "failed"
+    assert kwargs["reason"].startswith("embed failed:")

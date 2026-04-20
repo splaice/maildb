@@ -19,7 +19,15 @@ from maildb.ingest.orchestrator import (
     reset_pipeline,
     run_pipeline,
 )
-from maildb.ingest.process_attachments import run as pa_run
+from maildb.ingest.process_attachments import (
+    reembed_zero_vectors as pa_reembed_zero_vectors,
+)
+from maildb.ingest.process_attachments import (
+    run as pa_run,
+)
+from maildb.ingest.process_attachments import (
+    sweep_empty_extractions as pa_sweep_empty_extractions,
+)
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -517,6 +525,70 @@ def process_retry(
         typer.echo(
             "Retry done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
         )
+    finally:
+        _close_pool(pool)
+
+
+def _count_zero_vector_chunks(pool: "ConnectionPool", dimensions: int) -> int:  # noqa: UP037
+    zero = "[" + ",".join(["0"] * dimensions) + "]"
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM attachment_chunks WHERE embedding = %s::vector",
+            (zero,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def _count_empty_extractions(pool: "ConnectionPool") -> int:  # noqa: UP037
+    with pool.connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT count(*) FROM attachment_contents ac
+             WHERE status = 'extracted'
+               AND NOT EXISTS (
+                   SELECT 1 FROM attachment_chunks ch WHERE ch.attachment_id = ac.attachment_id
+               )
+            """
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+@process_app.command("reembed")
+def process_reembed(
+    limit: int | None = typer.Option(
+        None, "--limit", help="Re-embed at most N zero-vector chunks."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing."),
+) -> None:
+    """Re-embed zero-vector chunks and reclassify empty extractions.
+
+    Drains the backlog left by the prior _embed_chunks fallback that silently
+    stored zero-vector sentinels on Ollama failures. Also sweeps extracted rows
+    with no chunks to 'skipped' (reason='empty extraction').
+    """
+    pool = _build_process_pool()
+    try:
+        settings = Settings()
+        if dry_run:
+            n_zeros = _count_zero_vector_chunks(pool, settings.embedding_dimensions)
+            n_empty = _count_empty_extractions(pool)
+            typer.echo(
+                f"Would re-embed {n_zeros} zero-vector chunk(s) and "
+                f"reclassify {n_empty} empty extraction(s). (--dry-run)"
+            )
+            return
+
+        n_swept = pa_sweep_empty_extractions(pool)
+        stats = pa_reembed_zero_vectors(pool, limit=limit)
+        typer.echo(
+            "Reembed done. "
+            f"reembedded={stats['reembedded']} failed={stats['failed']} "
+            f"swept_empty={n_swept}"
+        )
+        if stats["reembedded"] > 0:
+            create_hnsw_index_attachment_chunks(pool)
     finally:
         _close_pool(pool)
 
