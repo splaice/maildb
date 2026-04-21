@@ -1,0 +1,153 @@
+diff --git a/surya/common/surya/__init__.py b/surya/common/surya/__init__.py
+index a32e3b26..8ddad9d2 100644
+--- a/surya/common/surya/__init__.py
++++ b/surya/common/surya/__init__.py
+@@ -15,7 +15,7 @@
+ from surya.common.surya.decoder import SuryaDecoderModel
+ from surya.common.surya.embedder import SimpleTokenEmbedder
+ from surya.common.surya.encoder import SuryaEncoderModel
+-from surya.common.util import pad_to_batch_size, pad_to_batch_size_repeat
++from surya.common.util import pad_to_batch_size, pad_to_batch_size_repeat, safe_max_item
+ from surya.common.xla import get_nearest_pad
+ from surya.settings import settings
+ 
+@@ -639,8 +639,8 @@ def get_image_embeddings(
+         max_batch_size: int | None = None,
+     ):
+         # embed all images with the vision encoder after they have already been tiled and flattened into a single batch
+-        unpadded_max_grid_size = (
+-            (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).max().item()
++        unpadded_max_grid_size = safe_max_item(
++            grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]
+         )
+         max_grid_size = get_nearest_pad(
+             unpadded_max_grid_size,
+diff --git a/surya/common/surya/encoder/__init__.py b/surya/common/surya/encoder/__init__.py
+index 8cbf5041..2c29c444 100644
+--- a/surya/common/surya/encoder/__init__.py
++++ b/surya/common/surya/encoder/__init__.py
+@@ -8,6 +8,7 @@
+ 
+ from surya.common.pretrained import SuryaPreTrainedModel
+ from surya.common.surya.encoder.config import SuryaEncoderConfig
++from surya.common.util import safe_max_item
+ from surya.common.xla import get_nearest_pad
+ from surya.logging import get_logger
+ from surya.settings import settings
+@@ -307,7 +308,7 @@ def forward(
+         v = v.squeeze(0)
+         cu_seqlens = cu_seqlens.squeeze(0)
+ 
+-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
++        max_seqlen = safe_max_item(cu_seqlens[1:] - cu_seqlens[:-1])
+         attn_output = flash_attn_varlen_func(
+             q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen
+         ).reshape(bsz, seq_length, -1)
+@@ -435,7 +436,7 @@ def unpack_qkv_with_mask(self, q, k, v, cu_seqlens):
+         head_dim = q.shape[2]
+ 
+         seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]  # Keep as tensor
+-        max_seq_len = seq_lengths.max().item()  # Use .max() on tensor
++        max_seq_len = safe_max_item(seq_lengths)
+ 
+         if settings.FOUNDATION_STATIC_CACHE:
+             # Pad max_seq_len to the nearest multiple for compilation
+diff --git a/surya/common/surya/flash_attn_utils.py b/surya/common/surya/flash_attn_utils.py
+index c8aefe35..95b2d244 100644
+--- a/surya/common/surya/flash_attn_utils.py
++++ b/surya/common/surya/flash_attn_utils.py
+@@ -22,9 +22,10 @@ def _get_unpad_data(attention_mask: torch.Tensor) -> tuple[torch.Tensor, torch.T
+         max_seqlen_in_batch (`int`):
+             Maximum sequence length in batch.
+     """
++    from surya.common.util import safe_max_item
+     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+-    max_seqlen_in_batch = seqlens_in_batch.max().item()
++    max_seqlen_in_batch = safe_max_item(seqlens_in_batch)
+     cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+     return (
+         indices,
+diff --git a/surya/common/util.py b/surya/common/util.py
+index 4d7b4bea..f55f54e7 100644
+--- a/surya/common/util.py
++++ b/surya/common/util.py
+@@ -8,6 +8,23 @@
+ from surya.common.polygon import PolygonBox
+ 
+ 
++def safe_max_item(tensor: torch.Tensor) -> int:
++    """Compute tensor.max().item() safely across all backends.
++
++    On MPS (Apple Silicon), the `.max()` kernel can produce incorrect
++    out-of-bounds indices for certain tensor shapes, causing
++    ``torch.AcceleratorError``.  Moving the (small) tensor to CPU before
++    reduction avoids the buggy kernel with negligible overhead.
++
++    On CUDA and CPU the tensor is used as-is.
++
++    See: https://github.com/datalab-to/surya/issues/490
++    """
++    if tensor.device.type == "mps":
++        return tensor.cpu().max().item()
++    return tensor.max().item()
++
++
+ def clean_boxes(boxes: List[PolygonBox]) -> List[PolygonBox]:
+     new_boxes = []
+     for box_obj in boxes:
+diff --git a/surya/foundation/cache/dynamic_ops.py b/surya/foundation/cache/dynamic_ops.py
+index 168092f3..11605800 100644
+--- a/surya/foundation/cache/dynamic_ops.py
++++ b/surya/foundation/cache/dynamic_ops.py
+@@ -259,8 +259,9 @@ def decode_attention_mask_update(
+             non_full_current_lens = current_lens[non_full_mask]
+             non_full_valid_tokens = num_valid_tokens[non_full_mask]
+ 
++            from surya.common.util import safe_max_item
+             max_valid_tokens = (
+-                non_full_valid_tokens.max().item()
++                safe_max_item(non_full_valid_tokens)
+                 if len(non_full_valid_tokens) > 0
+                 else 0
+             )
+@@ -353,7 +354,8 @@ def _decode_update(
+             text_token_counts + cache_text_start,
+         )
+ 
+-        max_tokens = num_valid_tokens.max().item()
++        from surya.common.util import safe_max_item
++        max_tokens = safe_max_item(num_valid_tokens)
+         offsets = torch.arange(max_tokens, device=device).unsqueeze(0)  # [1, max_T]
+         valid_mask = offsets < num_valid_tokens.unsqueeze(1)  # [B, max_T]
+         src_indices = (seq_len - num_valid_tokens).unsqueeze(1) + offsets  # [B, max_T]
+diff --git a/surya/foundation/cache/static_ops.py b/surya/foundation/cache/static_ops.py
+index 0b9ee242..69caec87 100644
+--- a/surya/foundation/cache/static_ops.py
++++ b/surya/foundation/cache/static_ops.py
+@@ -128,7 +128,8 @@ def _prefill_update(
+     def decode_attention_mask_update(
+         self, num_valid_tokens: torch.Tensor, cache_idxs: List[int]
+     ):
+-        max_valid_tokens = num_valid_tokens.max().item()
++        from surya.common.util import safe_max_item
++        max_valid_tokens = safe_max_item(num_valid_tokens)
+         if max_valid_tokens == 0:
+             # If no valid tokens, we don't need to update the attention mask
+             return
+diff --git a/surya/ocr_error/model/encoder.py b/surya/ocr_error/model/encoder.py
+index cac1c507..d0d0ffc0 100644
+--- a/surya/ocr_error/model/encoder.py
++++ b/surya/ocr_error/model/encoder.py
+@@ -26,9 +26,10 @@
+ 
+ 
+ def _get_unpad_data(attention_mask):
++    from surya.common.util import safe_max_item
+     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+-    max_seqlen_in_batch = seqlens_in_batch.max().item()
++    max_seqlen_in_batch = safe_max_item(seqlens_in_batch)
+     cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+     return (
+         indices,
