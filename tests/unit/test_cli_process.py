@@ -147,6 +147,42 @@ def test_process_attachments_retry_runs_only_failed(tmp_path):
     assert kwargs["retry_failed"] is True
     # selector_sql should filter to status='failed' only
     assert "status = 'failed'" in kwargs["selector_sql"]
+    # and by default must exclude hard-timeout rows to avoid re-claim loops
+    assert "hard-timeout" in kwargs["selector_sql"]
+    assert "NOT LIKE" in kwargs["selector_sql"]
+
+
+def test_process_attachments_retry_hard_timeouts_only_opt_in(tmp_path):
+    """--hard-timeouts-only flips the selector to target previously-killed rows."""
+    with (
+        patch("maildb.cli._build_process_pool") as mock_pool,
+        patch("maildb.cli.pa_run") as mock_run,
+    ):
+        mock_pool.return_value = object()
+        mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
+        result = runner.invoke(app, ["process_attachments", "retry", "--hard-timeouts-only"])
+    assert result.exit_code == 0
+    kwargs = mock_run.call_args.kwargs
+    assert "reason LIKE 'hard-timeout:" in kwargs["selector_sql"]
+    assert "NOT LIKE" not in kwargs["selector_sql"]
+
+
+def test_process_attachments_retry_timeouts_only_and_hard_timeouts_only_exclusive():
+    """The two mutually-exclusive filters should reject each other."""
+    with patch("maildb.cli._build_process_pool"):
+        result = runner.invoke(
+            app,
+            [
+                "process_attachments",
+                "retry",
+                "--timeouts-only",
+                "--hard-timeouts-only",
+            ],
+        )
+    # typer renders BadParameter as a non-zero exit; message is in a
+    # terminal-width box that CliRunner may truncate, so exit code is the
+    # durable signal
+    assert result.exit_code != 0
 
 
 def test_process_attachments_reembed_dry_run_reports_counts_and_does_not_write():

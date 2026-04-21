@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 import typer
 
+from maildb import jobs as jobs_mod
 from maildb.config import Settings
 from maildb.db import create_hnsw_index_attachment_chunks, create_pool, init_db
 from maildb.ingest.orchestrator import (
@@ -104,6 +107,35 @@ def serve() -> None:
     """Run the MailDB MCP server (stdio transport)."""
     _configure_logging()
     mcp.run()
+
+
+@app.command()
+def jobs(
+    since: int = typer.Option(
+        30,
+        "--since",
+        help="Rolling window in minutes for rate and ETA.",
+    ),
+    watch: int = typer.Option(
+        0,
+        "--watch",
+        help="Refresh every N seconds; 0 means print one snapshot and exit.",
+    ),
+) -> None:
+    """Status on active maildb jobs: processes, extraction counts, throughput, ETA."""
+    settings = Settings()
+    pool = create_pool(settings)
+    try:
+        while True:
+            snap = jobs_mod.snapshot(pool, window_minutes=since, exclude_pid=os.getpid())
+            if watch > 0:
+                typer.echo("\033[2J\033[H", nl=False)  # clear screen
+            typer.echo(jobs_mod.render(snap))
+            if watch <= 0:
+                return
+            time.sleep(watch)
+    finally:
+        pool.close()
 
 
 @ingest_app.command("run")
@@ -497,21 +529,43 @@ def process_retry(
     extract_timeout: int = typer.Option(
         300,
         "--extract-timeout",
-        help="Per-attachment wall-clock ceiling in seconds (0 disables).",
+        help="Per-attachment wall-clock ceiling in seconds (0 disables). "
+        "With workers=1 and timeout>0, runs under a subprocess supervisor that "
+        "SIGKILLs the worker when a single document exceeds this budget.",
     ),
     timeouts_only: bool = typer.Option(
         False,
         "--timeouts-only",
         help="Retry only rows whose failure reason starts with 'timed out after'.",
     ),
+    hard_timeouts_only: bool = typer.Option(
+        False,
+        "--hard-timeouts-only",
+        help="Retry only rows previously killed by the supervisor "
+        "(reason starts with 'hard-timeout:'). Pair with a larger "
+        "--extract-timeout to give them another chance.",
+    ),
 ) -> None:
-    """Re-process only rows with status='failed'."""
+    """Re-process only rows with status='failed'.
+
+    Default: excludes rows with reason prefix 'hard-timeout:' to avoid
+    re-claiming documents the supervisor already gave up on — they'll keep
+    failing under the same timeout. Use --hard-timeouts-only with a bumped
+    --extract-timeout to retry them deliberately.
+    """
+    if timeouts_only and hard_timeouts_only:
+        raise typer.BadParameter("--timeouts-only and --hard-timeouts-only are mutually exclusive")
+
     pool = _build_process_pool()
     try:
         settings = Settings()
         selector_sql = "AND status = 'failed'"
         if timeouts_only:
             selector_sql += " AND reason LIKE 'timed out after%%'"
+        elif hard_timeouts_only:
+            selector_sql += " AND reason LIKE 'hard-timeout:%%'"
+        else:
+            selector_sql += " AND (reason IS NULL OR reason NOT LIKE 'hard-timeout:%%')"
         counts = pa_run(
             pool,
             attachment_dir=Path(settings.attachment_dir),

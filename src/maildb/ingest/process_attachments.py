@@ -8,6 +8,7 @@ mid-run (watchdog reclaims 'extracting' rows older than the threshold).
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -444,14 +445,31 @@ def run(
     counts = {"extracted": 0, "failed": 0, "skipped": 0}
 
     if workers <= 1:
-        _claim_and_process_loop(
-            pool,
-            attachment_dir=attachment_dir,
-            retry_failed=retry_failed,
-            selector_sql=selector_sql,
-            selector_params=selector_params,
-            extract_timeout_s=extract_timeout_s,
-        )
+        if extract_timeout_s > 0:
+            if database_url is None:
+                msg = (
+                    "database_url is required when extract_timeout_s>0 "
+                    "(supervised worker runs in a subprocess)"
+                )
+                raise ValueError(msg)
+            _run_supervised_single_worker(
+                pool,
+                attachment_dir=attachment_dir,
+                retry_failed=retry_failed,
+                selector_sql=selector_sql,
+                selector_params=selector_params,
+                database_url=database_url,
+                extract_timeout_s=extract_timeout_s,
+            )
+        else:
+            _claim_and_process_loop(
+                pool,
+                attachment_dir=attachment_dir,
+                retry_failed=retry_failed,
+                selector_sql=selector_sql,
+                selector_params=selector_params,
+                extract_timeout_s=extract_timeout_s,
+            )
     else:
         if database_url is None:
             msg = "database_url is required when workers > 1 (subprocesses need it to reconnect)"
@@ -570,3 +588,115 @@ def reembed_zero_vectors(
             conn.commit()
         stats["reembedded"] += 1
     return stats
+
+
+# --- Supervised single-worker with hard-kill timeout -------------------------
+
+_SUPERVISOR_POLL_S = 5
+
+
+def _count_selected(
+    pool: ConnectionPool,
+    *,
+    retry_failed: bool,
+    selector_sql: str,
+    selector_params: dict[str, Any],
+) -> int:
+    """Count attachments that match the current claim filter (pending, plus failed if retrying)."""
+    states = "('pending','failed')" if retry_failed else "('pending')"
+    sql = f"SELECT count(*) FROM attachment_contents WHERE status IN {states} {selector_sql}"
+    with pool.connection() as conn:
+        cur = conn.execute(sql, selector_params)
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def _mp_context() -> Any:
+    """Return a 'spawn' multiprocessing context — fork is unsafe with Marker/torch on macOS.
+
+    Typed as Any because ``mp.context.BaseContext`` in the stubs hides ``.Process``;
+    at runtime the spawn context has it.
+    """
+    return mp.get_context("spawn")
+
+
+def _find_stuck_extracting(pool: ConnectionPool, extract_timeout_s: int) -> list[int]:
+    """Return attachment_ids that have been in 'extracting' longer than the timeout."""
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT attachment_id FROM attachment_contents "
+            "WHERE status = 'extracting' "
+            "  AND extracted_at < now() - (%s || ' seconds')::interval "
+            "ORDER BY attachment_id",
+            (extract_timeout_s,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def _run_supervised_single_worker(
+    pool: ConnectionPool,
+    *,
+    attachment_dir: Path,
+    retry_failed: bool,
+    selector_sql: str,
+    selector_params: dict[str, Any] | None,
+    database_url: str,
+    extract_timeout_s: int,
+) -> None:
+    """Single-worker run with subprocess-level hard timeout.
+
+    The SIGALRM-based timeout inside ``_run_with_timeout`` cannot interrupt
+    Marker when it's deep in a PyTorch C extension, so a stuck document pins
+    the whole retry forever. This supervisor spawns ``_subprocess_worker`` in
+    a fresh process, polls the DB every few seconds for rows that have been
+    in ``extracting`` longer than ``extract_timeout_s``, SIGKILLs the child,
+    marks those rows ``failed`` with reason prefix ``hard-timeout:``, and
+    respawns a new worker. Exits cleanly when no more matching rows remain.
+    """
+    while True:
+        remaining = _count_selected(
+            pool,
+            retry_failed=retry_failed,
+            selector_sql=selector_sql,
+            selector_params=selector_params or {},
+        )
+        if remaining == 0:
+            return
+
+        ctx = _mp_context()
+        worker = ctx.Process(
+            target=_subprocess_worker,
+            kwargs={
+                "database_url": database_url,
+                "attachment_dir": attachment_dir,
+                "retry_failed": retry_failed,
+                "selector_sql": selector_sql,
+                "selector_params": selector_params,
+                "extract_timeout_s": 0,  # SIGALRM is ineffective; supervisor owns the clock
+            },
+        )
+        worker.start()
+
+        killed = False
+        while worker.is_alive():
+            time.sleep(_SUPERVISOR_POLL_S)
+            stuck = _find_stuck_extracting(pool, extract_timeout_s)
+            if not stuck:
+                continue
+            logger.warning("killing_stuck_worker", stuck=stuck, timeout_s=extract_timeout_s)
+            worker.kill()
+            worker.join(timeout=10)
+            for aid in stuck:
+                _set_status(
+                    pool,
+                    aid,
+                    status="failed",
+                    reason=f"hard-timeout: killed after {extract_timeout_s}s",
+                )
+            killed = True
+            break
+
+        if not killed:
+            worker.join()
+            # Worker exited on its own — either work is done or it hit an unrecoverable
+            # error. Outer loop re-checks remaining; exits when 0.
