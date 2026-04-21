@@ -335,3 +335,147 @@ def test_reembed_zero_vectors_marks_row_failed_on_persistent_error() -> None:
     assert args[1] == 50  # attachment_id (positional)
     assert kwargs["status"] == "failed"
     assert kwargs["reason"].startswith("embed failed:")
+
+
+# --- Supervised single-worker with hard-kill timeout -------------------------
+
+
+def test_find_stuck_extracting_returns_rows_past_timeout() -> None:
+    """SQL selects 'extracting' rows whose extracted_at is older than now-timeout."""
+    pool = MagicMock()
+    cur = pool.connection.return_value.__enter__.return_value.execute.return_value
+    cur.fetchall.return_value = [(42,), (99,)]
+
+    result = pa._find_stuck_extracting(pool, extract_timeout_s=300)
+
+    assert result == [42, 99]
+    sql = pool.connection.return_value.__enter__.return_value.execute.call_args.args[0]
+    assert "status = 'extracting'" in sql
+    assert "extracted_at" in sql
+
+
+def test_run_single_worker_with_timeout_uses_supervised_path() -> None:
+    """When extract_timeout_s>0, workers=1 takes the supervised-subprocess path."""
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+    with (
+        patch.object(pa, "ensure_pending_rows", return_value=0),
+        patch.object(pa, "_reclaim_stale", return_value=0),
+        patch.object(pa, "_claim_and_process_loop") as loop,
+        patch.object(pa, "_run_supervised_single_worker") as sup,
+    ):
+        pa.run(
+            pool,
+            attachment_dir=Path("/tmp"),
+            workers=1,
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+    sup.assert_called_once()
+    loop.assert_not_called()
+
+
+def test_run_single_worker_without_timeout_uses_in_process_path() -> None:
+    """extract_timeout_s=0 still uses the in-process claim loop (no subprocess)."""
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+    with (
+        patch.object(pa, "ensure_pending_rows", return_value=0),
+        patch.object(pa, "_reclaim_stale", return_value=0),
+        patch.object(pa, "_claim_and_process_loop") as loop,
+        patch.object(pa, "_run_supervised_single_worker") as sup,
+    ):
+        pa.run(
+            pool,
+            attachment_dir=Path("/tmp"),
+            workers=1,
+            extract_timeout_s=0,
+        )
+    loop.assert_called_once()
+    sup.assert_not_called()
+
+
+def test_supervised_run_exits_when_no_work_remaining() -> None:
+    """If _count_selected reports 0, supervisor returns without spawning a worker."""
+    pool = MagicMock()
+    with (
+        patch.object(pa, "_count_selected", return_value=0),
+        patch.object(pa, "_mp_context") as ctx,
+    ):
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+    ctx.assert_not_called()
+
+
+def test_supervised_run_spawns_worker_when_work_remains() -> None:
+    """One worker is spawned per iteration until no work remains."""
+    pool = MagicMock()
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.side_effect = [True, False]  # poll once then worker exits
+    fake_ctx.Process.return_value = worker
+
+    with (
+        patch.object(pa, "_count_selected", side_effect=[5, 0]),
+        patch.object(pa, "_find_stuck_extracting", return_value=[]),
+        patch.object(pa, "_mp_context", return_value=fake_ctx),
+        patch.object(pa, "time") as tmod,
+    ):
+        tmod.sleep = MagicMock()
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+
+    worker.start.assert_called_once()
+    worker.kill.assert_not_called()
+    worker.join.assert_called()
+
+
+def test_supervised_run_kills_and_marks_failed_on_stuck() -> None:
+    """When _find_stuck_extracting returns a row, supervisor SIGKILLs the worker and
+    marks the row failed with reason prefix 'hard-timeout:'."""
+    pool = MagicMock()
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+    fake_ctx.Process.return_value = worker
+
+    set_status = MagicMock()
+    with (
+        patch.object(pa, "_count_selected", side_effect=[5, 0]),
+        patch.object(pa, "_find_stuck_extracting", side_effect=[[42], []]),
+        patch.object(pa, "_mp_context", return_value=fake_ctx),
+        patch.object(pa, "_set_status", set_status),
+        patch.object(pa, "time") as tmod,
+    ):
+        tmod.sleep = MagicMock()
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+
+    worker.kill.assert_called_once()
+    set_status.assert_called_once()
+    args, kwargs = set_status.call_args
+    assert args[1] == 42
+    assert kwargs["status"] == "failed"
+    assert kwargs["reason"].startswith("hard-timeout:")
+    assert "300" in kwargs["reason"]
