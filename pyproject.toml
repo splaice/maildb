@@ -98,6 +98,13 @@ max-complexity = 12
 "src/maildb/ingest/process_attachments.py" = ["S608"]  # selector_sql is internal-only; not user-supplied
 "src/maildb/ingest/orchestrator.py" = ["C901"]  # pipeline orchestration is inherently sequential
 "tests/fixtures/*.py" = ["INP001"]  # fixture scripts, not packages
+"scripts/**/*.py" = [
+    "T201",    # print is fine in CLI tools
+    "INP001",  # scripts/ is intentionally not a package
+    "N818",    # local Exception subclasses don't need 'Error' suffix
+    "PLC0415", # lazy imports are intentional (heavy ML deps)
+    "S603",    # subprocess input is internal, not user-supplied
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["maildb"]

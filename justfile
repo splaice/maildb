@@ -24,3 +24,8 @@ test-cov:
     uv run pytest --cov --cov-report=term-missing
 
 check: fmt lint test
+
+# Apply (or revert / check status of) the vendored surya MPS .max() fix.
+# Required after `uv sync` reinstalls surya-ocr until upstream PR #493 ships.
+patch-surya *ARGS="apply":
+    uv run python scripts/surya_mps_patch.py {{ARGS}}
