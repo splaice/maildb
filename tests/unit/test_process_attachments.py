@@ -340,18 +340,40 @@ def test_reembed_zero_vectors_marks_row_failed_on_persistent_error() -> None:
 # --- Supervised single-worker with hard-kill timeout -------------------------
 
 
-def test_find_stuck_extracting_returns_rows_past_timeout() -> None:
-    """SQL selects 'extracting' rows whose extracted_at is older than now-timeout."""
+def test_find_stuck_extracting_filters_by_claimed_by() -> None:
+    """SQL selects 'extracting' rows past the timeout AND owned by this supervisor only.
+
+    Without the ownership filter, parallel supervisors race and mass-mark each
+    other's actively-running rows as hard-timeout (issue #59).
+    """
     pool = MagicMock()
     cur = pool.connection.return_value.__enter__.return_value.execute.return_value
     cur.fetchall.return_value = [(42,), (99,)]
 
-    result = pa._find_stuck_extracting(pool, extract_timeout_s=300)
+    result = pa._find_stuck_extracting(pool, extract_timeout_s=300, claimed_by="sup-uuid-A")
 
     assert result == [42, 99]
-    sql = pool.connection.return_value.__enter__.return_value.execute.call_args.args[0]
+    call = pool.connection.return_value.__enter__.return_value.execute.call_args
+    sql, params = call.args
     assert "status = 'extracting'" in sql
     assert "extracted_at" in sql
+    assert "claimed_by" in sql
+    assert params[1] == "sup-uuid-A"
+
+
+def test_claim_row_writes_claimed_by() -> None:
+    """_claim_row tags the row with the supervisor's UUID so the matching
+    _find_stuck_extracting query can scope to its own work only."""
+    pool = MagicMock()
+    cur = pool.connection.return_value.__enter__.return_value.execute.return_value
+    cur.fetchone.return_value = (7,)
+
+    pa._claim_row(pool, retry_failed=True, claimed_by="sup-uuid-X")
+
+    call = pool.connection.return_value.__enter__.return_value.execute.call_args
+    sql, params = call.args
+    assert "claimed_by" in sql
+    assert params["claimed_by"] == "sup-uuid-X"
 
 
 def test_run_single_worker_with_timeout_uses_supervised_path() -> None:
@@ -451,6 +473,7 @@ def test_supervised_run_kills_and_marks_failed_on_stuck() -> None:
     fake_ctx = MagicMock()
     worker = MagicMock()
     worker.is_alive.return_value = True
+    worker.pid = 12345
     fake_ctx.Process.return_value = worker
 
     set_status = MagicMock()
@@ -459,6 +482,7 @@ def test_supervised_run_kills_and_marks_failed_on_stuck() -> None:
         patch.object(pa, "_find_stuck_extracting", side_effect=[[42], []]),
         patch.object(pa, "_mp_context", return_value=fake_ctx),
         patch.object(pa, "_set_status", set_status),
+        patch.object(pa, "_killpg_quietly") as killpg,
         patch.object(pa, "time") as tmod,
     ):
         tmod.sleep = MagicMock()
@@ -473,9 +497,58 @@ def test_supervised_run_kills_and_marks_failed_on_stuck() -> None:
         )
 
     worker.kill.assert_called_once()
+    killpg.assert_called_once_with(12345)  # process-group kill reaps grandchildren
     set_status.assert_called_once()
     args, kwargs = set_status.call_args
     assert args[1] == 42
     assert kwargs["status"] == "failed"
     assert kwargs["reason"].startswith("hard-timeout:")
     assert "300" in kwargs["reason"]
+
+
+def test_supervised_run_threads_unique_claimed_by_uuid() -> None:
+    """Supervisor generates a UUID once and passes the SAME value to:
+    - the spawned worker (so its claims tag the row with this id)
+    - _find_stuck_extracting (so it only sees rows it owns)
+
+    Without this, two supervisors race on shared stuck-row detection.
+    """
+    pool = MagicMock()
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.side_effect = [True, False]
+    worker.pid = 99
+    fake_ctx.Process.return_value = worker
+
+    find_stuck = MagicMock(return_value=[])
+    with (
+        patch.object(pa, "_count_selected", side_effect=[5, 0]),
+        patch.object(pa, "_find_stuck_extracting", find_stuck),
+        patch.object(pa, "_mp_context", return_value=fake_ctx),
+        patch.object(pa, "time") as tmod,
+    ):
+        tmod.sleep = MagicMock()
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+
+    # Worker was given a claimed_by kwarg
+    process_kwargs = fake_ctx.Process.call_args.kwargs["kwargs"]
+    assert "claimed_by" in process_kwargs
+    sup_id = process_kwargs["claimed_by"]
+    assert sup_id  # non-empty
+
+    # _find_stuck_extracting was called with the SAME id
+    assert find_stuck.call_args.kwargs.get("claimed_by") == sup_id
+
+
+def test_killpg_quietly_swallows_lookup_errors() -> None:
+    """SIGKILL on a pgid that no longer exists should not raise."""
+    with patch("os.killpg", side_effect=ProcessLookupError):
+        pa._killpg_quietly(12345)  # must not raise

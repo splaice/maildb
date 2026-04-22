@@ -98,8 +98,13 @@ CREATE TABLE IF NOT EXISTS attachment_contents (
     reason            TEXT,
     extracted_at      TIMESTAMPTZ,
     extraction_ms     INT,
-    extractor_version TEXT
+    extractor_version TEXT,
+    -- Supervisor UUID that claimed the row. Lets parallel supervisors distinguish
+    -- their own stuck workers from each other's in-flight rows.
+    claimed_by        TEXT
 );
+
+ALTER TABLE attachment_contents ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 
 CREATE TABLE IF NOT EXISTS attachment_chunks (
     id             BIGSERIAL PRIMARY KEY,

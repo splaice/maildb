@@ -8,9 +8,12 @@ mid-run (watchdog reclaims 'extracting' rows older than the threshold).
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
+import os
 import signal
 import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -240,8 +243,15 @@ def _claim_row(
     retry_failed: bool,
     selector_sql: str = "",
     selector_params: dict[str, Any] | None = None,
+    claimed_by: str | None = None,
 ) -> int | None:
-    """Atomically move one row to 'extracting' and return its attachment_id."""
+    """Atomically move one row to 'extracting' and return its attachment_id.
+
+    ``claimed_by`` tags the row with the caller's identifier so that a
+    supervisor watching for stuck rows can scope to its own worker only —
+    without it, parallel supervisors race and mass-mark each other's
+    in-flight rows as hard-timeout (see issue #59).
+    """
     states = "('pending','failed')" if retry_failed else "('pending')"
     sql = f"""
         WITH claimed AS (
@@ -253,12 +263,16 @@ def _claim_row(
              FOR UPDATE SKIP LOCKED
         )
         UPDATE attachment_contents
-           SET status = 'extracting', extracted_at = now(), reason = NULL
+           SET status = 'extracting',
+               extracted_at = now(),
+               reason = NULL,
+               claimed_by = %(claimed_by)s
          WHERE attachment_id IN (SELECT attachment_id FROM claimed)
         RETURNING attachment_id
     """
+    params = {"claimed_by": claimed_by, **(selector_params or {})}
     with pool.connection() as conn:
-        cur = conn.execute(sql, selector_params or {})
+        cur = conn.execute(sql, params)
         row = cur.fetchone()
         conn.commit()
         return row[0] if row else None
@@ -364,6 +378,7 @@ def _claim_and_process_loop(
     selector_sql: str,
     selector_params: dict[str, Any] | None,
     extract_timeout_s: int = 0,
+    claimed_by: str | None = None,
 ) -> None:
     """Claim rows one at a time via SKIP LOCKED and process until none remain."""
     while True:
@@ -372,6 +387,7 @@ def _claim_and_process_loop(
             retry_failed=retry_failed,
             selector_sql=selector_sql,
             selector_params=selector_params,
+            claimed_by=claimed_by,
         )
         if attachment_id is None:
             return
@@ -394,6 +410,7 @@ def _subprocess_worker(
     selector_sql: str,
     selector_params: dict[str, Any] | None,
     extract_timeout_s: int = 0,
+    claimed_by: str | None = None,
 ) -> None:
     """Subprocess entrypoint: build a fresh pool and run the claim loop.
 
@@ -401,7 +418,15 @@ def _subprocess_worker(
     is required because Marker's model init is not thread-safe — multiple threads
     hitting `create_model_dict()` concurrently produce meta-tensor errors. Process-
     level parallelism avoids that entirely at the cost of per-process startup time.
+
+    Calls ``os.setsid()`` first so that the supervisor can SIGKILL the entire
+    process group (this child plus any grandchildren marker/torch spawn). Without
+    that, each supervisor kill leaks the grandchildren as orphans (issue #59).
     """
+    # Already a session leader (e.g. when invoked outside the supervisor) — fine.
+    with contextlib.suppress(OSError, PermissionError):
+        os.setsid()
+
     pool = ConnectionPool(conninfo=database_url, min_size=1, max_size=2, open=True)
     try:
         _claim_and_process_loop(
@@ -411,6 +436,7 @@ def _subprocess_worker(
             selector_sql=selector_sql,
             selector_params=selector_params,
             extract_timeout_s=extract_timeout_s,
+            claimed_by=claimed_by,
         )
     finally:
         pool.close()
@@ -620,17 +646,43 @@ def _mp_context() -> Any:
     return mp.get_context("spawn")
 
 
-def _find_stuck_extracting(pool: ConnectionPool, extract_timeout_s: int) -> list[int]:
-    """Return attachment_ids that have been in 'extracting' longer than the timeout."""
+def _find_stuck_extracting(
+    pool: ConnectionPool,
+    extract_timeout_s: int,
+    *,
+    claimed_by: str | None = None,
+) -> list[int]:
+    """Return attachment_ids stuck in 'extracting' beyond the timeout.
+
+    When ``claimed_by`` is provided, only rows tagged with that supervisor's
+    UUID are returned — preventing parallel supervisors from killing each
+    other's actively-running rows (issue #59).
+    """
+    where_claimed_by = "AND claimed_by = %s" if claimed_by is not None else ""
+    sql = (
+        "SELECT attachment_id FROM attachment_contents "
+        "WHERE status = 'extracting' "
+        "  AND extracted_at < now() - (%s || ' seconds')::interval "
+        f" {where_claimed_by} "
+        "ORDER BY attachment_id"
+    )
+    params: tuple[Any, ...] = (
+        (extract_timeout_s, claimed_by) if claimed_by is not None else (extract_timeout_s,)
+    )
     with pool.connection() as conn:
-        cur = conn.execute(
-            "SELECT attachment_id FROM attachment_contents "
-            "WHERE status = 'extracting' "
-            "  AND extracted_at < now() - (%s || ' seconds')::interval "
-            "ORDER BY attachment_id",
-            (extract_timeout_s,),
-        )
+        cur = conn.execute(sql, params)
         return [row[0] for row in cur.fetchall()]
+
+
+def _killpg_quietly(pid: int, sig: int = signal.SIGKILL) -> None:
+    """SIGKILL the process group named by ``pid`` (the worker's pgid after setsid).
+
+    Reaps grandchildren — direct ``Process.kill()`` only terminates the immediate
+    child, leaving torch/marker helper processes as orphans (issue #59). Swallows
+    the typical ``ProcessLookupError`` when the group has already exited.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, sig)
 
 
 def _run_supervised_single_worker(
@@ -649,10 +701,19 @@ def _run_supervised_single_worker(
     Marker when it's deep in a PyTorch C extension, so a stuck document pins
     the whole retry forever. This supervisor spawns ``_subprocess_worker`` in
     a fresh process, polls the DB every few seconds for rows that have been
-    in ``extracting`` longer than ``extract_timeout_s``, SIGKILLs the child,
-    marks those rows ``failed`` with reason prefix ``hard-timeout:``, and
-    respawns a new worker. Exits cleanly when no more matching rows remain.
+    in ``extracting`` longer than ``extract_timeout_s``, SIGKILLs the child
+    (and its process group, to reap grandchildren), marks those rows ``failed``
+    with reason prefix ``hard-timeout:``, and respawns a new worker. Exits
+    cleanly when no more matching rows remain.
+
+    Each supervisor instance generates its own ``claimed_by`` UUID and only
+    kills rows tagged with that UUID — making it safe to run multiple
+    supervisors in parallel against the same DB without racing on shared
+    stuck-row detection (issue #59).
     """
+    supervisor_id = f"sup-{uuid.uuid4()}"
+    logger.info("supervisor_started", supervisor_id=supervisor_id)
+
     while True:
         remaining = _count_selected(
             pool,
@@ -673,6 +734,7 @@ def _run_supervised_single_worker(
                 "selector_sql": selector_sql,
                 "selector_params": selector_params,
                 "extract_timeout_s": 0,  # SIGALRM is ineffective; supervisor owns the clock
+                "claimed_by": supervisor_id,
             },
         )
         worker.start()
@@ -680,11 +742,17 @@ def _run_supervised_single_worker(
         killed = False
         while worker.is_alive():
             time.sleep(_SUPERVISOR_POLL_S)
-            stuck = _find_stuck_extracting(pool, extract_timeout_s)
+            stuck = _find_stuck_extracting(pool, extract_timeout_s, claimed_by=supervisor_id)
             if not stuck:
                 continue
-            logger.warning("killing_stuck_worker", stuck=stuck, timeout_s=extract_timeout_s)
+            logger.warning(
+                "killing_stuck_worker",
+                supervisor_id=supervisor_id,
+                stuck=stuck,
+                timeout_s=extract_timeout_s,
+            )
             worker.kill()
+            _killpg_quietly(worker.pid)  # reap grandchildren torch/marker spawned
             worker.join(timeout=10)
             for aid in stuck:
                 _set_status(

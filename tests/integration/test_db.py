@@ -302,6 +302,7 @@ def test_attachment_contents_table_exists(test_pool) -> None:  # type: ignore[no
         "extracted_at",
         "extraction_ms",
         "extractor_version",
+        "claimed_by",
     }
 
 
