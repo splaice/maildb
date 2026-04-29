@@ -115,3 +115,90 @@ def test_extract_unsupported_raises_extraction_failed(tmp_path: Path):
     with pytest.raises(ExtractionFailedError) as exc:
         extract_markdown(p, content_type="audio/mpeg")
     assert "not supported" in str(exc.value).lower()
+
+
+# --- Docling fallback for office formats (issue #61) -------------------------
+
+
+_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+@pytest.mark.parametrize("content_type", [_DOCX, _XLSX, _PPTX])
+def test_extract_falls_back_to_docling_for_office_when_marker_fails(
+    tmp_path: Path, content_type: str
+):
+    """Marker routes office formats through LibreOffice→PDF→Surya and fails on a
+    wide range of files. Docling handles DOCX/XLSX/PPTX natively. On Marker
+    failure for an office bucket, fall back to Docling and tag the result."""
+    p = tmp_path / "doc.bin"
+    p.write_bytes(b"PK\x03\x04fake")
+    with (
+        patch(
+            "maildb.ingest.extraction._marker_convert",
+            side_effect=RuntimeError("Failed to convert"),
+        ),
+        patch(
+            "maildb.ingest.extraction._docling_convert",
+            return_value=("# Docling\n\nbody", "docling==2.0.0"),
+        ) as docling,
+    ):
+        result = extract_markdown(p, content_type=content_type)
+    docling.assert_called_once()
+    assert result.markdown.startswith("# Docling")
+    assert result.extractor_version.startswith("docling==")
+
+
+def test_extract_does_not_fall_back_to_docling_for_pdf(tmp_path: Path):
+    """PDFs stay Marker-only — Marker's layout/heading fidelity is materially
+    better for PDFs and Docling is opt-in for office formats only."""
+    p = tmp_path / "fake.pdf"
+    p.write_bytes(b"%PDF-1.4\n...")
+    with (
+        patch(
+            "maildb.ingest.extraction._marker_convert",
+            side_effect=RuntimeError("marker boom"),
+        ),
+        patch("maildb.ingest.extraction._docling_convert") as docling,
+        pytest.raises(ExtractionFailedError, match="marker:"),
+    ):
+        extract_markdown(p, content_type="application/pdf")
+    docling.assert_not_called()
+
+
+def test_extract_when_both_marker_and_docling_fail_raises(tmp_path: Path):
+    """If Docling also fails, surface a combined error so ops see the full chain."""
+    p = tmp_path / "doc.docx"
+    p.write_bytes(b"PK\x03\x04fake")
+    with (
+        patch(
+            "maildb.ingest.extraction._marker_convert",
+            side_effect=RuntimeError("Failed to convert"),
+        ),
+        patch(
+            "maildb.ingest.extraction._docling_convert",
+            side_effect=RuntimeError("docling boom"),
+        ),
+        pytest.raises(ExtractionFailedError) as exc,
+    ):
+        extract_markdown(p, content_type=_DOCX)
+    msg = str(exc.value)
+    assert "marker" in msg.lower()
+    assert "docling" in msg.lower()
+
+
+def test_extract_marker_success_for_office_does_not_call_docling(tmp_path: Path):
+    """When Marker succeeds, Docling must not be invoked — Marker is primary."""
+    p = tmp_path / "doc.docx"
+    p.write_bytes(b"PK\x03\x04fake")
+    with (
+        patch(
+            "maildb.ingest.extraction._marker_convert",
+            return_value=("# Marker out", "marker==1.10.2"),
+        ),
+        patch("maildb.ingest.extraction._docling_convert") as docling,
+    ):
+        result = extract_markdown(p, content_type=_DOCX)
+    docling.assert_not_called()
+    assert result.extractor_version.startswith("marker==")

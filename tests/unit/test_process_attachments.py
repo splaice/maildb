@@ -552,3 +552,37 @@ def test_killpg_quietly_swallows_lookup_errors() -> None:
     """SIGKILL on a pgid that no longer exists should not raise."""
     with patch("os.killpg", side_effect=ProcessLookupError):
         pa._killpg_quietly(12345)  # must not raise
+
+
+# --- NUL-byte sanitization (issues #62, #67) ---------------------------------
+
+
+def test_strip_nul_removes_nul_bytes() -> None:
+    assert pa._strip_nul("hello\x00world") == "helloworld"
+    assert pa._strip_nul("\x00\x00\x00") == ""
+    assert pa._strip_nul("clean") == "clean"
+    assert pa._strip_nul(None) is None
+
+
+def test_set_status_strips_nul_from_markdown_and_reason() -> None:
+    """Marker can emit raw NUL bytes; PG text fields cannot store them.
+    _set_status must scrub both markdown and reason before INSERT — the
+    March 2026 email-parse fix only covered email bodies (#62, #67)."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+
+    pa._set_status(
+        pool,
+        99,
+        status="extracted",
+        markdown="head\x00ing\x00\nbody",
+        reason="oops\x00here",
+    )
+
+    # Inspect the params dict passed to UPDATE
+    call = conn.execute.call_args
+    _sql, params = call.args
+    assert "\x00" not in params["markdown"]
+    assert params["markdown"] == "heading\nbody"
+    assert "\x00" not in params["reason"]
+    assert params["reason"] == "oopshere"

@@ -197,6 +197,18 @@ def _embed_chunks(pool: ConnectionPool, chunks: list[dict[str, Any]]) -> None:
         raise EmbedFailedError(msg)
 
 
+def _strip_nul(text: str | None) -> str | None:
+    """Strip NUL (0x00) bytes — PostgreSQL text fields cannot contain them.
+
+    Marker can emit raw NUL bytes from certain PDFs and native libs may
+    surface NUL in error messages; sanitize at the DB boundary so neither
+    poisons an INSERT (issues #62, #67).
+    """
+    if text is None:
+        return None
+    return text.replace("\x00", "")
+
+
 def _set_status(
     pool: ConnectionPool,
     attachment_id: int,
@@ -208,6 +220,8 @@ def _set_status(
     extraction_ms: int | None = None,
     extractor_version: str | None = None,
 ) -> None:
+    reason = _strip_nul(reason)
+    markdown = _strip_nul(markdown)
     with pool.connection() as conn:
         conn.execute(
             """
