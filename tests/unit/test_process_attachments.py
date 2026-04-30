@@ -552,3 +552,111 @@ def test_killpg_quietly_swallows_lookup_errors() -> None:
     """SIGKILL on a pgid that no longer exists should not raise."""
     with patch("os.killpg", side_effect=ProcessLookupError):
         pa._killpg_quietly(12345)  # must not raise
+
+
+# --- NUL-byte sanitization (issues #62, #67) ---------------------------------
+
+
+def test_strip_nul_removes_nul_bytes() -> None:
+    assert pa._strip_nul("hello\x00world") == "helloworld"
+    assert pa._strip_nul("\x00\x00\x00") == ""
+    assert pa._strip_nul("clean") == "clean"
+    assert pa._strip_nul(None) is None
+
+
+def test_process_one_strips_nul_before_chunking_and_chunk_insert() -> None:
+    """Sanitization must happen at extraction time, not just at _set_status.
+
+    chunks are inserted into attachment_chunks.text BEFORE _set_status runs;
+    if Marker emits a NUL byte in result.markdown, the chunk insert at
+    process_attachments.py would fail with the PG NUL-in-text error before
+    we ever reach the sanitizing _set_status. So scrub once at the source.
+    """
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+    set_status = MagicMock()
+
+    # Capture what chunk_markdown was called with — proves we scrubbed before chunking.
+    seen: dict[str, str] = {}
+
+    def fake_chunk(text: str) -> list[object]:
+        seen["text"] = text
+        chunk = MagicMock()
+        chunk.chunk_index = 0
+        chunk.heading_path = None
+        chunk.page_number = None
+        chunk.token_count = 1
+        chunk.text = text  # whatever we pass through is what we want stored
+        chunk.__dict__ = {
+            "chunk_index": 0,
+            "heading_path": None,
+            "page_number": None,
+            "token_count": 1,
+            "text": text,
+        }
+        return [chunk]
+
+    with (
+        patch.object(
+            pa,
+            "_load_attachment",
+            return_value={
+                "id": 1,
+                "filename": "x.pdf",
+                "content_type": "application/pdf",
+                "storage_path": "a/x",
+            },
+        ),
+        patch.object(
+            pa,
+            "_run_with_timeout",
+            return_value=_fake_extract_result("head\x00ing\x00\nbody"),
+        ),
+        patch.object(pa, "chunk_markdown", side_effect=fake_chunk),
+        patch.object(pa, "_embed_chunks"),
+        patch.object(pa, "_write_markdown_mirror"),
+        patch.object(pa, "_set_status", set_status),
+    ):
+        pa.process_one(pool, 1, attachment_dir=Path("/tmp"))
+
+    # chunk_markdown got the scrubbed text
+    assert "\x00" not in seen["text"]
+    assert seen["text"] == "heading\nbody"
+
+    # The INSERT INTO attachment_chunks call's text param has no NUL bytes
+    insert_calls = [
+        c for c in conn.execute.call_args_list if "INSERT INTO attachment_chunks" in c.args[0]
+    ]
+    assert insert_calls, "expected a chunk insert"
+    # text is the 6th positional value in the params tuple
+    for _sql, params in [c.args for c in insert_calls]:
+        assert "\x00" not in params[5]
+
+    # And the final _set_status got scrubbed markdown
+    final_call = set_status.call_args
+    assert "\x00" not in final_call.kwargs["markdown"]
+    assert final_call.kwargs["status"] == "extracted"
+
+
+def test_set_status_strips_nul_from_markdown_and_reason() -> None:
+    """Marker can emit raw NUL bytes; PG text fields cannot store them.
+    _set_status must scrub both markdown and reason before INSERT — the
+    March 2026 email-parse fix only covered email bodies (#62, #67)."""
+    pool = MagicMock()
+    conn = pool.connection.return_value.__enter__.return_value
+
+    pa._set_status(
+        pool,
+        99,
+        status="extracted",
+        markdown="head\x00ing\x00\nbody",
+        reason="oops\x00here",
+    )
+
+    # Inspect the params dict passed to UPDATE
+    call = conn.execute.call_args
+    _sql, params = call.args
+    assert "\x00" not in params["markdown"]
+    assert params["markdown"] == "heading\nbody"
+    assert "\x00" not in params["reason"]
+    assert params["reason"] == "oopshere"

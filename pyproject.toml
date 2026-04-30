@@ -15,6 +15,7 @@ dependencies = [
     "typer>=0.12",
     "marker-pdf>=1.2.0",
     "tokenizers>=0.20",
+    "docling>=2.92.0",
 ]
 
 [project.scripts]

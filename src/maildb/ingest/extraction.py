@@ -64,6 +64,9 @@ class ExtractionResult:
     extractor_version: str  # e.g. "marker==1.2.3" or "passthrough==1"
 
 
+_OFFICE_BUCKETS: Final[frozenset[str]] = frozenset({"docx", "xlsx", "pptx"})
+
+
 def _marker_convert(path: Path) -> tuple[str, str]:
     """Run Marker on a single file; return (markdown, version_string).
 
@@ -80,9 +83,36 @@ def _marker_convert(path: Path) -> tuple[str, str]:
     return text, f"marker=={getattr(marker, '__version__', 'unknown')}"
 
 
+def _docling_convert(path: Path) -> tuple[str, str]:
+    """Run Docling on a single file; return (markdown, version_string).
+
+    Isolated so tests can monkeypatch it without importing docling.
+    """
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    from docling.document_converter import (  # type: ignore[import-untyped]  # noqa: PLC0415
+        DocumentConverter,
+    )
+
+    converter = DocumentConverter()
+    result = converter.convert(str(path))
+    text = result.document.export_to_markdown()
+    try:
+        ver = version("docling")
+    except PackageNotFoundError:
+        ver = "unknown"
+    return text, f"docling=={ver}"
+
+
 def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResult:
     """Extract markdown from an attachment. Raises ExtractionFailedError on unsupported
-    types or when Marker errors out."""
+    types or when extraction fails.
+
+    For office formats (DOCX/XLSX/PPTX), Marker is tried first; on failure, Docling
+    is tried as a fallback (issue #61) — Marker routes these through
+    LibreOffice→PDF→Surya and fails on a wide range of office files, while Docling
+    handles them natively.
+    """
     bucket = route_content_type(content_type)
     if bucket is None:
         raise ExtractionFailedError(f"content_type {content_type!r} is not supported by Marker")
@@ -111,7 +141,14 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
 
     try:
         markdown, version = _marker_convert(path)
-    except Exception as exc:
-        raise ExtractionFailedError(f"marker: {exc}") from exc
+    except Exception as marker_exc:
+        if bucket not in _OFFICE_BUCKETS:
+            raise ExtractionFailedError(f"marker: {marker_exc}") from marker_exc
+        try:
+            markdown, version = _docling_convert(path)
+        except Exception as docling_exc:
+            raise ExtractionFailedError(
+                f"marker: {marker_exc}; docling: {docling_exc}"
+            ) from docling_exc
 
     return ExtractionResult(markdown=markdown, extractor_version=version)
