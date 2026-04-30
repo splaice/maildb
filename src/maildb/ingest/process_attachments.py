@@ -330,12 +330,18 @@ def process_one(
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
+    # Sanitize once at the source — chunks land in attachment_chunks.text via
+    # raw INSERT before _set_status runs, and PG rejects NUL (0x00) in text
+    # fields. A NUL anywhere in result.markdown would otherwise abort the chunk
+    # insert below before we ever reach the sanitizing _set_status (#62).
+    markdown = _strip_nul(result.markdown) or ""
+
     # Drop any prior chunks (re-run safety)
     with pool.connection() as conn:
         conn.execute("DELETE FROM attachment_chunks WHERE attachment_id = %s", (attachment_id,))
         conn.commit()
 
-    chunks = chunk_markdown(result.markdown)
+    chunks = chunk_markdown(markdown)
     if not chunks:
         _set_status(pool, attachment_id, status="skipped", reason="empty extraction")
         return
@@ -371,14 +377,14 @@ def process_one(
         return
 
     # Write the on-disk markdown mirror.
-    _write_markdown_mirror(attachment_dir, att["storage_path"], result.markdown)
+    _write_markdown_mirror(attachment_dir, att["storage_path"], markdown)
 
     _set_status(
         pool,
         attachment_id,
         status="extracted",
-        markdown=result.markdown,
-        markdown_bytes=len(result.markdown.encode("utf-8")),
+        markdown=markdown,
+        markdown_bytes=len(markdown.encode("utf-8")),
         extraction_ms=elapsed_ms,
         extractor_version=result.extractor_version,
     )
