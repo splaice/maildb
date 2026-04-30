@@ -29,3 +29,9 @@ check: fmt lint test
 # Required after `uv sync` reinstalls surya-ocr until upstream PR #493 ships.
 patch-surya *ARGS="apply":
     uv run python scripts/surya_mps_patch.py {{ARGS}}
+
+# Smoke-test the Marker extraction pipeline after dependency changes.
+# Pass --extract to also run a fixture PDF end-to-end (slower, warmer caches).
+# Catches the cv2-stub class of breakage from bad `uv add` / `uv remove`.
+smoke-marker *ARGS:
+    uv run python scripts/smoke_marker.py {{ARGS}}

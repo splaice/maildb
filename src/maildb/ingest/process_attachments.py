@@ -318,11 +318,18 @@ def process_one(
         _set_status(pool, attachment_id, status="failed", reason=str(exc))
         return
     except ExtractionFailedError as exc:
-        # Unsupported types are skipped; Marker errors are failures.
-        if "not supported" in str(exc).lower() or "requires LibreOffice" in str(exc):
-            _set_status(pool, attachment_id, status="skipped", reason=str(exc))
+        # Unsupported types and below-threshold images are skipped (telemetry
+        # honesty: explicit skip vs failed); Marker errors are failures.
+        msg = str(exc)
+        is_skip = (
+            "not supported" in msg.lower()
+            or "requires LibreOffice" in msg
+            or msg.startswith("below-minimum-useful-size")
+        )
+        if is_skip:
+            _set_status(pool, attachment_id, status="skipped", reason=msg)
         else:
-            _set_status(pool, attachment_id, status="failed", reason=str(exc))
+            _set_status(pool, attachment_id, status="failed", reason=msg)
         return
     except Exception as exc:
         _set_status(pool, attachment_id, status="failed", reason=f"{type(exc).__name__}: {exc}")

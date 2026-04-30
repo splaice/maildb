@@ -119,6 +119,112 @@ def test_snapshot_eta_none_when_no_completions():
     assert snap.eta_for_status["pending"] is None
 
 
+def test_find_orphan_workers_detects_spawn_with_ppid_1():
+    """multiprocessing.spawn workers whose parent died (ppid=1) and whose
+    command mentions maildb are flagged as orphans (#69). Live processes
+    with a real ppid are skipped."""
+    ps_output = (
+        "  PID  PPID  PGID    RSS     ELAPSED ARGS\n"
+        # Live worker — parent supervisor still around (ppid != 1)
+        " 1234  1200  1200 437200    07:06:12 /usr/bin/python -c "
+        "from multiprocessing.spawn import spawn_main; spawn_main(...) maildb worker\n"
+        # Orphan worker — parent died, ppid=1
+        " 5555     1  5555 280000    04:22:00 /usr/bin/python -c "
+        "from multiprocessing.spawn import spawn_main; spawn_main(...) maildb worker\n"
+        # Unrelated orphan (no maildb signal) — must not be flagged
+        " 6666     1  6666  10000    01:00:00 /usr/bin/python some/other/thing.py\n"
+        # Random non-spawn process — must not be flagged
+        " 7777     1  7777   1000    00:10:00 /usr/sbin/cron\n"
+    )
+    with patch.object(jobs.subprocess, "run") as run:
+        run.return_value = MagicMock(returncode=0, stdout=ps_output)
+        orphans = jobs.find_orphan_workers()
+
+    pids = {o.pid for o in orphans}
+    assert pids == {5555}
+    o = orphans[0]
+    assert o.pgid == 5555
+    assert o.elapsed == "04:22:00"
+    assert o.rss_kb == 280000
+
+
+def test_snapshot_includes_orphans():
+    pool = MagicMock()
+    fake_orphans = [
+        jobs.OrphanProcess(
+            pid=5555, pgid=5555, elapsed="04:22:00", rss_kb=280000, command="python -c spawn_main"
+        )
+    ]
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(jobs, "yield_by_content_type", return_value=[]),
+        patch.object(jobs, "find_orphan_workers", return_value=fake_orphans),
+    ):
+        snap = jobs.snapshot(pool, window_minutes=30)
+    assert snap.orphans == fake_orphans
+
+
+def test_render_includes_orphan_warning_section():
+    pool = MagicMock()
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(jobs, "yield_by_content_type", return_value=[]),
+        patch.object(
+            jobs,
+            "find_orphan_workers",
+            return_value=[
+                jobs.OrphanProcess(
+                    pid=5555,
+                    pgid=5555,
+                    elapsed="04:22:00",
+                    rss_kb=280000,
+                    command="python -c spawn_main maildb worker",
+                ),
+            ],
+        ),
+    ):
+        out = jobs.render(jobs.snapshot(pool, window_minutes=30))
+    assert "Lingering subprocesses" in out
+    assert "5555" in out
+    assert "orphan" in out.lower()
+
+
+def test_kill_orphans_sends_sigkill_to_each_pgid():
+    """kill_orphans iterates the list and SIGKILLs each process group.
+
+    Group kill (not direct pid) is required to reap grandchildren torch/marker
+    spawned (same reason _killpg_quietly exists in the supervisor)."""
+    orphans = [
+        jobs.OrphanProcess(pid=1111, pgid=1111, elapsed="01:00:00", rss_kb=1, command="x"),
+        jobs.OrphanProcess(pid=2222, pgid=2222, elapsed="02:00:00", rss_kb=1, command="y"),
+    ]
+    with patch("os.killpg") as killpg:
+        killed = jobs.kill_orphans(orphans)
+    assert killed == [1111, 2222]
+    # signal value comes second; just confirm both pgids were killed
+    sent_pgids = [c.args[0] for c in killpg.call_args_list]
+    assert sent_pgids == [1111, 2222]
+
+
+def test_kill_orphans_swallows_already_gone_processes():
+    """ProcessLookupError on a since-dead orphan must not abort the rest."""
+    orphans = [
+        jobs.OrphanProcess(pid=1111, pgid=1111, elapsed="01:00:00", rss_kb=1, command="x"),
+        jobs.OrphanProcess(pid=2222, pgid=2222, elapsed="02:00:00", rss_kb=1, command="y"),
+    ]
+    with patch("os.killpg", side_effect=[ProcessLookupError, None]):
+        killed = jobs.kill_orphans(orphans)
+    # First was already gone; second was killed. Both reported in killed list
+    # so the operator sees what was attempted.
+    assert killed == [1111, 2222]
+
+
 def test_yield_by_content_type_buckets_by_route():
     """Raw (content_type, status, count) rows from PG bucket into the same
     names the extraction router uses (pdf/docx/xlsx/pptx/image/text/html/...).
@@ -268,6 +374,72 @@ def test_render_includes_headline_sections():
     assert "ETA" in out
 
 
+def test_jobs_cli_kill_orphans_prompts_and_kills_on_confirm():
+    """--kill-orphans lists orphans, prompts, then kills on 'y'."""
+    runner = CliRunner()
+    fake_orphans = [
+        jobs.OrphanProcess(pid=5555, pgid=5555, elapsed="04:22:00", rss_kb=2_100_000, command="x"),
+    ]
+    with (
+        patch("maildb.cli.create_pool"),
+        patch("maildb.cli.jobs_mod.find_orphan_workers", return_value=fake_orphans),
+        patch("maildb.cli.jobs_mod.kill_orphans", return_value=[5555]) as kill,
+    ):
+        result = runner.invoke(app, ["jobs", "--kill-orphans"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "Found 1 orphan" in result.output
+    assert "5555" in result.output
+    assert "SIGKILL" in result.output
+    kill.assert_called_once_with(fake_orphans)
+
+
+def test_jobs_cli_kill_orphans_aborts_on_no():
+    """Bare `--kill-orphans` with `n` answer must NOT kill anything."""
+    runner = CliRunner()
+    fake_orphans = [
+        jobs.OrphanProcess(pid=5555, pgid=5555, elapsed="04:22:00", rss_kb=1, command="x"),
+    ]
+    with (
+        patch("maildb.cli.create_pool"),
+        patch("maildb.cli.jobs_mod.find_orphan_workers", return_value=fake_orphans),
+        patch("maildb.cli.jobs_mod.kill_orphans") as kill,
+    ):
+        result = runner.invoke(app, ["jobs", "--kill-orphans"], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert "Aborted" in result.output
+    kill.assert_not_called()
+
+
+def test_jobs_cli_kill_orphans_yes_skips_prompt():
+    """--yes runs without prompting."""
+    runner = CliRunner()
+    fake_orphans = [
+        jobs.OrphanProcess(pid=5555, pgid=5555, elapsed="04:22:00", rss_kb=1, command="x"),
+    ]
+    with (
+        patch("maildb.cli.create_pool"),
+        patch("maildb.cli.jobs_mod.find_orphan_workers", return_value=fake_orphans),
+        patch("maildb.cli.jobs_mod.kill_orphans", return_value=[5555]) as kill,
+    ):
+        result = runner.invoke(app, ["jobs", "--kill-orphans", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Kill all?" not in result.output  # no prompt was issued
+    kill.assert_called_once()
+
+
+def test_jobs_cli_kill_orphans_no_orphans():
+    runner = CliRunner()
+    with (
+        patch("maildb.cli.create_pool"),
+        patch("maildb.cli.jobs_mod.find_orphan_workers", return_value=[]),
+        patch("maildb.cli.jobs_mod.kill_orphans") as kill,
+    ):
+        result = runner.invoke(app, ["jobs", "--kill-orphans"])
+    assert result.exit_code == 0, result.output
+    assert "No orphan" in result.output
+    kill.assert_not_called()
+
+
 def test_jobs_cli_prints_snapshot_and_exits_without_watch():
     runner = CliRunner()
     fake_snap = jobs.JobsSnapshot(
@@ -279,6 +451,7 @@ def test_jobs_cli_prints_snapshot_and_exits_without_watch():
         rate_per_min=10 / 30,
         eta_for_status={"pending": 900, "failed": None},
         yield_by_type=[],
+        orphans=[],
     )
     with (
         patch("maildb.cli.create_pool"),
