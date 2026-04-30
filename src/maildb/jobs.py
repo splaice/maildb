@@ -2,7 +2,7 @@
 
 Gives a single-snapshot view of:
  - active ``maildb`` processes (via ``ps``)
- - attachment-extraction counts
+ - attachment-extraction counts (overall and per content-type bucket)
  - rows currently ``extracting`` and how long they've been stuck
  - recent throughput (docs/min over a window)
  - rough ETA to drain remaining work
@@ -16,6 +16,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from maildb.ingest.extraction import route_content_type
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -39,6 +41,29 @@ class InFlight:
 
 
 @dataclass
+class TypeYield:
+    """Per-content-type extraction counts and yield ratio."""
+
+    bucket: str  # pdf | docx | xlsx | pptx | image | text | html | doc_legacy | xls_legacy | other
+    extracted: int
+    failed: int
+    skipped: int
+    pending: int
+
+    @property
+    def total(self) -> int:
+        return self.extracted + self.failed + self.skipped + self.pending
+
+    @property
+    def yield_pct(self) -> float | None:
+        """extracted / (extracted + failed) * 100, or None if both are 0."""
+        denom = self.extracted + self.failed
+        if denom == 0:
+            return None
+        return self.extracted / denom * 100.0
+
+
+@dataclass
 class JobsSnapshot:
     processes: list[ProcessInfo]
     counts: dict[str, int]
@@ -47,6 +72,7 @@ class JobsSnapshot:
     window_minutes: int
     rate_per_min: float
     eta_for_status: dict[str, int | None]  # pending/failed: seconds or None
+    yield_by_type: list[TypeYield]
 
 
 def list_maildb_processes(exclude_pid: int | None = None) -> list[ProcessInfo]:
@@ -133,6 +159,38 @@ def in_flight_rows(pool: ConnectionPool) -> list[InFlight]:
         ]
 
 
+def yield_by_content_type(pool: ConnectionPool) -> list[TypeYield]:
+    """Per-bucket extraction counts joined from attachments + attachment_contents.
+
+    Buckets follow ``route_content_type`` (pdf/docx/xlsx/pptx/image/text/html/
+    doc_legacy/xls_legacy); anything unsupported folds into ``other`` so the
+    output covers the full corpus. Sorted by descending total volume.
+    """
+    with pool.connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT a.content_type, ac.status, count(*)
+              FROM attachment_contents ac
+              JOIN attachments a ON a.id = ac.attachment_id
+             GROUP BY a.content_type, ac.status
+            """
+        )
+        rows = cur.fetchall()
+
+    by_bucket: dict[str, dict[str, int]] = {}
+    for ct, status, n in rows:
+        bucket = route_content_type(ct) or "other"
+        slot = by_bucket.setdefault(
+            bucket, {"extracted": 0, "failed": 0, "skipped": 0, "pending": 0}
+        )
+        if status in slot:
+            slot[status] += int(n)
+
+    out = [TypeYield(bucket=b, **counts) for b, counts in by_bucket.items()]
+    out.sort(key=lambda y: y.total, reverse=True)
+    return out
+
+
 def completed_in_window(pool: ConnectionPool, *, window_minutes: int) -> dict[str, int]:
     with pool.connection() as conn:
         cur = conn.execute(
@@ -159,6 +217,7 @@ def snapshot(
     counts = attachment_counts(pool)
     in_flight = in_flight_rows(pool)
     completed = completed_in_window(pool, window_minutes=window_minutes)
+    yield_by_type = yield_by_content_type(pool)
 
     total_completed = sum(completed.values())
     rate_per_min = total_completed / window_minutes if window_minutes > 0 else 0.0
@@ -179,6 +238,7 @@ def snapshot(
         window_minutes=window_minutes,
         rate_per_min=rate_per_min,
         eta_for_status=eta,
+        yield_by_type=yield_by_type,
     )
 
 
@@ -204,6 +264,24 @@ def format_bytes(n: int) -> str:
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
         n //= 1024
     return f"{n}TB"
+
+
+def _render_yield_by_type(yields: list[TypeYield]) -> list[str]:
+    if not yields:
+        return []
+    lines = [
+        "",
+        "## Yield by content-type",
+        f"  {'bucket':<11}  {'extracted':>9}  {'failed':>7}  "
+        f"{'skipped':>7}  {'pending':>7}  {'yield':>6}",
+    ]
+    for y in yields:
+        yield_s = f"{y.yield_pct:.1f}%" if y.yield_pct is not None else "    —"
+        lines.append(
+            f"  {y.bucket:<11}  {y.extracted:>9,}  {y.failed:>7,}  "
+            f"{y.skipped:>7,}  {y.pending:>7,}  {yield_s:>6}"
+        )
+    return lines
 
 
 def render(snap: JobsSnapshot) -> str:
@@ -244,6 +322,8 @@ def render(snap: JobsSnapshot) -> str:
     lines.append(f"  rate:      {snap.rate_per_min:.2f} docs/min")
     if snap.rate_per_min > 0:
         lines.append(f"             {snap.rate_per_min * 60:.1f} docs/hour")
+
+    lines.extend(_render_yield_by_type(snap.yield_by_type))
 
     lines.append("")
     lines.append("## ETA")

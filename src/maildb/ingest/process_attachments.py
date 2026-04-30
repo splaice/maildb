@@ -730,6 +730,14 @@ def _run_supervised_single_worker(
     kills rows tagged with that UUID — making it safe to run multiple
     supervisors in parallel against the same DB without racing on shared
     stuck-row detection (issue #59).
+
+    .. warning::
+        On Apple Silicon, do **not** run multiple supervisors against the
+        same MPS device. Per-supervisor isolation makes parallel runs *safe*
+        but two MPS workers contend on the GPU and trigger surya bugs at
+        unpatched call sites — yield collapses from ~73% (single) to ~3%
+        (dual). Net useful throughput is strictly worse with two workers.
+        See issue #64 and ``docs/runbooks/attachment-extraction-mps-discipline.md``.
     """
     supervisor_id = f"sup-{uuid.uuid4()}"
     logger.info("supervisor_started", supervisor_id=supervisor_id)

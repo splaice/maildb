@@ -119,6 +119,103 @@ def test_snapshot_eta_none_when_no_completions():
     assert snap.eta_for_status["pending"] is None
 
 
+def test_yield_by_content_type_buckets_by_route():
+    """Raw (content_type, status, count) rows from PG bucket into the same
+    names the extraction router uses (pdf/docx/xlsx/pptx/image/text/html/...).
+    Yield% = extracted / (extracted + failed); skipped not counted."""
+    pool = MagicMock()
+    cur = pool.connection.return_value.__enter__.return_value.execute.return_value
+    cur.fetchall.return_value = [
+        ("application/pdf", "extracted", 3210),
+        ("application/pdf", "failed", 150),
+        ("application/pdf", "skipped", 801),
+        ("application/pdf", "pending", 1200),
+        (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "extracted",
+            957,
+        ),
+        (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "failed",
+            42,
+        ),
+        ("image/png", "extracted", 100),
+        ("image/jpeg", "extracted", 50),
+        ("image/jpeg", "failed", 5),
+        ("audio/mpeg", "skipped", 17),  # unsupported -> "other"
+    ]
+
+    result = jobs.yield_by_content_type(pool)
+
+    by_bucket = {y.bucket: y for y in result}
+    assert by_bucket["pdf"].extracted == 3210
+    assert by_bucket["pdf"].failed == 150
+    assert by_bucket["pdf"].skipped == 801
+    assert by_bucket["pdf"].pending == 1200
+    assert by_bucket["docx"].extracted == 957
+    assert by_bucket["docx"].failed == 42
+    # png and jpeg fold into a single "image" bucket
+    assert by_bucket["image"].extracted == 150
+    assert by_bucket["image"].failed == 5
+    # unsupported types collapse into "other"
+    assert by_bucket["other"].skipped == 17
+
+
+def test_yield_by_content_type_yield_percent():
+    """Yield % = extracted / (extracted + failed) * 100."""
+    y = jobs.TypeYield(bucket="pdf", extracted=80, failed=20, skipped=0, pending=0)
+    assert y.yield_pct == 80.0
+    y = jobs.TypeYield(bucket="x", extracted=0, failed=0, skipped=5, pending=0)
+    assert y.yield_pct is None  # no completions -> can't compute
+
+
+def test_snapshot_includes_yield_by_type():
+    pool = MagicMock()
+    fake_yield = [jobs.TypeYield(bucket="pdf", extracted=10, failed=2, skipped=1, pending=5)]
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={"pending": 5}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(jobs, "yield_by_content_type", return_value=fake_yield),
+    ):
+        snap = jobs.snapshot(pool, window_minutes=30)
+    assert snap.yield_by_type == fake_yield
+
+
+def test_render_includes_yield_by_type_section():
+    pool = MagicMock()
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={"pending": 0}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(
+            jobs,
+            "yield_by_content_type",
+            return_value=[
+                jobs.TypeYield(
+                    bucket="pdf", extracted=3210, failed=150, skipped=801, pending=1200
+                ),
+                jobs.TypeYield(bucket="docx", extracted=957, failed=42, skipped=12, pending=0),
+                jobs.TypeYield(bucket="other", extracted=0, failed=0, skipped=17, pending=0),
+            ],
+        ),
+    ):
+        out = jobs.render(jobs.snapshot(pool, window_minutes=30))
+
+    assert "Yield by content-type" in out
+    assert "pdf" in out
+    assert "docx" in out
+    # numbers visible
+    assert "3,210" in out or "3210" in out
+    # yield % rendered for buckets with completions
+    assert "95.5%" in out or "95.5" in out  # 3210/(3210+150) ≈ 95.5
+    # buckets with no completions show a placeholder, not "0.0%"
+    assert "0.0%" not in out
+
+
 def test_render_includes_headline_sections():
     pool = MagicMock()
     with (
@@ -157,6 +254,7 @@ def test_render_includes_headline_sections():
             "completed_in_window",
             return_value={"extracted": 8, "failed": 2},
         ),
+        patch.object(jobs, "yield_by_content_type", return_value=[]),
     ):
         out = jobs.render(jobs.snapshot(pool, window_minutes=30))
 
@@ -180,6 +278,7 @@ def test_jobs_cli_prints_snapshot_and_exits_without_watch():
         window_minutes=30,
         rate_per_min=10 / 30,
         eta_for_status={"pending": 900, "failed": None},
+        yield_by_type=[],
     )
     with (
         patch("maildb.cli.create_pool"),
