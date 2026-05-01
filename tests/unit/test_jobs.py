@@ -374,6 +374,20 @@ def test_render_includes_headline_sections():
     assert "ETA" in out
 
 
+def test_jobs_cli_kill_orphans_does_not_open_db_pool():
+    """--kill-orphans is OS-only — Postgres being unreachable must NOT block
+    the operator from cleaning up runaway workers (it's exactly when they
+    need it). Branch on kill_orphans before constructing Settings/create_pool."""
+    runner = CliRunner()
+    with (
+        patch("maildb.cli.create_pool") as create_pool,
+        patch("maildb.cli.jobs_mod.find_orphan_workers", return_value=[]),
+    ):
+        result = runner.invoke(app, ["jobs", "--kill-orphans"])
+    assert result.exit_code == 0, result.output
+    create_pool.assert_not_called()
+
+
 def test_jobs_cli_kill_orphans_prompts_and_kills_on_confirm():
     """--kill-orphans lists orphans, prompts, then kills on 'y'."""
     runner = CliRunner()

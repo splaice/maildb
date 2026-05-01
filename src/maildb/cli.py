@@ -134,12 +134,15 @@ def jobs(
     ),
 ) -> None:
     """Status on active maildb jobs: processes, extraction counts, throughput, ETA."""
+    # --kill-orphans is OS-only and must work even when Postgres is down or
+    # connection slots are exhausted — that's precisely when an operator
+    # needs to clear runaway workers. Branch before constructing the pool.
+    if kill_orphans:
+        _kill_orphans_command(yes=yes)
+        return
     settings = Settings()
     pool = create_pool(settings)
     try:
-        if kill_orphans:
-            _kill_orphans_command(yes=yes)
-            return
         while True:
             snap = jobs_mod.snapshot(pool, window_minutes=since, exclude_pid=os.getpid())
             if watch > 0:
