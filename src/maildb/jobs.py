@@ -2,7 +2,7 @@
 
 Gives a single-snapshot view of:
  - active ``maildb`` processes (via ``ps``)
- - attachment-extraction counts
+ - attachment-extraction counts (overall and per content-type bucket)
  - rows currently ``extracting`` and how long they've been stuck
  - recent throughput (docs/min over a window)
  - rough ETA to drain remaining work
@@ -12,10 +12,14 @@ Shipped as a thin library so the CLI layer can wire formatting separately.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from maildb.ingest.extraction import route_content_type
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -39,6 +43,45 @@ class InFlight:
 
 
 @dataclass
+class OrphanProcess:
+    """A multiprocessing.spawn worker whose parent supervisor has died (ppid=1).
+
+    The Apr 2026 dual-supervisor disaster accumulated 152 such orphans
+    consuming ~38 GB before being noticed. Surfacing them in `maildb jobs`
+    catches the problem hours earlier (#69).
+    """
+
+    pid: int
+    pgid: int
+    elapsed: str
+    rss_kb: int
+    command: str
+
+
+@dataclass
+class TypeYield:
+    """Per-content-type extraction counts and yield ratio."""
+
+    bucket: str  # pdf | docx | xlsx | pptx | image | text | html | doc_legacy | xls_legacy | other
+    extracted: int
+    failed: int
+    skipped: int
+    pending: int
+
+    @property
+    def total(self) -> int:
+        return self.extracted + self.failed + self.skipped + self.pending
+
+    @property
+    def yield_pct(self) -> float | None:
+        """extracted / (extracted + failed) * 100, or None if both are 0."""
+        denom = self.extracted + self.failed
+        if denom == 0:
+            return None
+        return self.extracted / denom * 100.0
+
+
+@dataclass
 class JobsSnapshot:
     processes: list[ProcessInfo]
     counts: dict[str, int]
@@ -47,6 +90,8 @@ class JobsSnapshot:
     window_minutes: int
     rate_per_min: float
     eta_for_status: dict[str, int | None]  # pending/failed: seconds or None
+    yield_by_type: list[TypeYield]
+    orphans: list[OrphanProcess]
 
 
 def list_maildb_processes(exclude_pid: int | None = None) -> list[ProcessInfo]:
@@ -133,6 +178,97 @@ def in_flight_rows(pool: ConnectionPool) -> list[InFlight]:
         ]
 
 
+def find_orphan_workers() -> list[OrphanProcess]:
+    """Return multiprocessing.spawn worker processes whose parent has died.
+
+    Heuristic: ppid==1 (init/launchd has adopted them) AND the command
+    contains both ``multiprocessing.spawn`` and ``maildb``. This catches the
+    grandchild leak that prompted issue #59 / PR #60 without false-flagging
+    unrelated init-orphans on the system.
+    """
+    result = subprocess.run(
+        ["/bin/ps", "-eo", "pid,ppid,pgid,rss,etime,args"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    orphans: list[OrphanProcess] = []
+    for raw_line in result.stdout.splitlines()[1:]:  # skip header
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        pid_s, ppid_s, pgid_s, rss_s, etime, args = parts
+        try:
+            pid = int(pid_s)
+            ppid = int(ppid_s)
+            pgid = int(pgid_s)
+            rss = int(rss_s)
+        except ValueError:
+            continue
+        if ppid != 1:
+            continue
+        if "multiprocessing.spawn" not in args:
+            continue
+        if "maildb" not in args:
+            continue
+        orphans.append(OrphanProcess(pid=pid, pgid=pgid, elapsed=etime, rss_kb=rss, command=args))
+    return orphans
+
+
+def kill_orphans(orphans: list[OrphanProcess]) -> list[int]:
+    """SIGKILL each orphan's process group; return the list of pgids attempted.
+
+    Group kill (vs direct pid) is required to reap any grandchildren the
+    orphan worker spawned — same reasoning as ``_killpg_quietly`` in the
+    supervisor. ProcessLookupError on a since-dead orphan is swallowed so a
+    half-gone batch doesn't abort the rest.
+    """
+    attempted: list[int] = []
+    for o in orphans:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(o.pgid, signal.SIGKILL)
+        attempted.append(o.pgid)
+    return attempted
+
+
+def yield_by_content_type(pool: ConnectionPool) -> list[TypeYield]:
+    """Per-bucket extraction counts joined from attachments + attachment_contents.
+
+    Buckets follow ``route_content_type`` (pdf/docx/xlsx/pptx/image/text/html/
+    doc_legacy/xls_legacy); anything unsupported folds into ``other`` so the
+    output covers the full corpus. Sorted by descending total volume.
+    """
+    with pool.connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT a.content_type, ac.status, count(*)
+              FROM attachment_contents ac
+              JOIN attachments a ON a.id = ac.attachment_id
+             GROUP BY a.content_type, ac.status
+            """
+        )
+        rows = cur.fetchall()
+
+    by_bucket: dict[str, dict[str, int]] = {}
+    for ct, status, n in rows:
+        bucket = route_content_type(ct) or "other"
+        slot = by_bucket.setdefault(
+            bucket, {"extracted": 0, "failed": 0, "skipped": 0, "pending": 0}
+        )
+        if status in slot:
+            slot[status] += int(n)
+
+    out = [TypeYield(bucket=b, **counts) for b, counts in by_bucket.items()]
+    out.sort(key=lambda y: y.total, reverse=True)
+    return out
+
+
 def completed_in_window(pool: ConnectionPool, *, window_minutes: int) -> dict[str, int]:
     with pool.connection() as conn:
         cur = conn.execute(
@@ -159,6 +295,8 @@ def snapshot(
     counts = attachment_counts(pool)
     in_flight = in_flight_rows(pool)
     completed = completed_in_window(pool, window_minutes=window_minutes)
+    yield_by_type = yield_by_content_type(pool)
+    orphans = find_orphan_workers()
 
     total_completed = sum(completed.values())
     rate_per_min = total_completed / window_minutes if window_minutes > 0 else 0.0
@@ -179,6 +317,8 @@ def snapshot(
         window_minutes=window_minutes,
         rate_per_min=rate_per_min,
         eta_for_status=eta,
+        yield_by_type=yield_by_type,
+        orphans=orphans,
     )
 
 
@@ -204,6 +344,37 @@ def format_bytes(n: int) -> str:
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
         n //= 1024
     return f"{n}TB"
+
+
+def _render_orphans(orphans: list[OrphanProcess]) -> list[str]:
+    if not orphans:
+        return []
+    lines = ["", "## ⚠ Lingering subprocesses"]
+    for o in orphans:
+        rss_mb = o.rss_kb // 1024
+        lines.append(
+            f"  PID {o.pid}  pgid={o.pgid}  age={o.elapsed}  RSS={rss_mb}MB"
+            "  (orphan — parent died)"
+        )
+    return lines
+
+
+def _render_yield_by_type(yields: list[TypeYield]) -> list[str]:
+    if not yields:
+        return []
+    lines = [
+        "",
+        "## Yield by content-type",
+        f"  {'bucket':<11}  {'extracted':>9}  {'failed':>7}  "
+        f"{'skipped':>7}  {'pending':>7}  {'yield':>6}",
+    ]
+    for y in yields:
+        yield_s = f"{y.yield_pct:.1f}%" if y.yield_pct is not None else "    —"
+        lines.append(
+            f"  {y.bucket:<11}  {y.extracted:>9,}  {y.failed:>7,}  "
+            f"{y.skipped:>7,}  {y.pending:>7,}  {yield_s:>6}"
+        )
+    return lines
 
 
 def render(snap: JobsSnapshot) -> str:
@@ -244,6 +415,9 @@ def render(snap: JobsSnapshot) -> str:
     lines.append(f"  rate:      {snap.rate_per_min:.2f} docs/min")
     if snap.rate_per_min > 0:
         lines.append(f"             {snap.rate_per_min * 60:.1f} docs/hour")
+
+    lines.extend(_render_orphans(snap.orphans))
+    lines.extend(_render_yield_by_type(snap.yield_by_type))
 
     lines.append("")
     lines.append("## ETA")

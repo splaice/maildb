@@ -66,6 +66,36 @@ class ExtractionResult:
 
 _OFFICE_BUCKETS: Final[frozenset[str]] = frozenset({"docx", "xlsx", "pptx"})
 
+# Below these thresholds an image is signature/icon-sized and won't yield useful OCR.
+# Skip them with an explicit reason rather than burning Marker time on an empty result.
+_MIN_IMAGE_DIMENSION_PX: Final[int] = 100
+_MIN_IMAGE_FILESIZE_BYTES: Final[int] = 5 * 1024
+
+
+def _too_small_to_extract(path: Path) -> str | None:
+    """Return a non-empty reason if ``path`` is below useful-OCR thresholds, else None.
+
+    Cheap pre-filter on image attachments — Pillow reads the header without
+    decoding the full pixel buffer (microseconds). Errors fall through so a
+    truly broken image still hits Marker and surfaces a real failure.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size < _MIN_IMAGE_FILESIZE_BYTES:
+        return f"below-minimum-useful-size: {size}B (<{_MIN_IMAGE_FILESIZE_BYTES}B)"
+    try:
+        from PIL import Image  # noqa: PLC0415
+
+        with Image.open(path) as im:
+            w, h = im.size
+    except Exception:
+        return None
+    if w < _MIN_IMAGE_DIMENSION_PX or h < _MIN_IMAGE_DIMENSION_PX:
+        return f"below-minimum-useful-size: {w}x{h}px (<{_MIN_IMAGE_DIMENSION_PX}px)"
+    return None
+
 
 def _marker_convert(path: Path) -> tuple[str, str]:
     """Run Marker on a single file; return (markdown, version_string).
@@ -138,6 +168,11 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
             f"{bucket}: legacy binary format requires LibreOffice pre-conversion "
             "(not implemented in v1)"
         )
+
+    if bucket == "image":
+        reason = _too_small_to_extract(path)
+        if reason is not None:
+            raise ExtractionFailedError(reason)
 
     try:
         markdown, version = _marker_convert(path)

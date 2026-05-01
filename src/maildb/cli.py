@@ -121,8 +121,25 @@ def jobs(
         "--watch",
         help="Refresh every N seconds; 0 means print one snapshot and exit.",
     ),
+    kill_orphans: bool = typer.Option(
+        False,
+        "--kill-orphans",
+        help="SIGKILL each detected orphan worker's process group, then exit.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt for --kill-orphans.",
+    ),
 ) -> None:
     """Status on active maildb jobs: processes, extraction counts, throughput, ETA."""
+    # --kill-orphans is OS-only and must work even when Postgres is down or
+    # connection slots are exhausted — that's precisely when an operator
+    # needs to clear runaway workers. Branch before constructing the pool.
+    if kill_orphans:
+        _kill_orphans_command(yes=yes)
+        return
     settings = Settings()
     pool = create_pool(settings)
     try:
@@ -136,6 +153,22 @@ def jobs(
             time.sleep(watch)
     finally:
         pool.close()
+
+
+def _kill_orphans_command(*, yes: bool) -> None:
+    orphans = jobs_mod.find_orphan_workers()
+    if not orphans:
+        typer.echo("No orphan workers detected.")
+        return
+    typer.echo(f"Found {len(orphans)} orphan worker process(es):")
+    for o in orphans:
+        rss_mb = o.rss_kb // 1024
+        typer.echo(f"  PID {o.pid}  pgid={o.pgid}  age={o.elapsed}  RSS={rss_mb}MB")
+    if not yes and not typer.confirm("Kill all?", default=False):
+        typer.echo("Aborted.")
+        return
+    pgids = jobs_mod.kill_orphans(orphans)
+    typer.echo(f"Sent SIGKILL to process groups: {', '.join(str(p) for p in pgids)}")
 
 
 @ingest_app.command("run")

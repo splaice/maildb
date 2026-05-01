@@ -188,6 +188,62 @@ def test_extract_when_both_marker_and_docling_fail_raises(tmp_path: Path):
     assert "docling" in msg.lower()
 
 
+# --- Tiny-image filter (issue #65) ------------------------------------------
+
+
+def _write_png(path: Path, width: int, height: int) -> None:
+    from PIL import Image  # noqa: PLC0415
+
+    Image.new("RGB", (width, height), color=(255, 0, 0)).save(path, format="PNG")
+
+
+def test_extract_skips_tiny_image_by_dimensions(tmp_path: Path):
+    """Images below 100px on either axis are skipped, not extracted — Marker
+    pipeline is too heavy for content that can't yield useful OCR (signatures,
+    icons, decorative pixels)."""
+    p = tmp_path / "tiny.png"
+    _write_png(p, 50, 50)
+    with (
+        patch("maildb.ingest.extraction._marker_convert") as marker,
+        pytest.raises(ExtractionFailedError, match="below-minimum-useful-size"),
+    ):
+        extract_markdown(p, content_type="image/png")
+    marker.assert_not_called()
+
+
+def test_extract_skips_tiny_image_by_filesize(tmp_path: Path):
+    """Files below 5 KB skip extraction with the same reason — covers
+    decorative gifs/jpegs that pass the dimension check but have no payload."""
+    p = tmp_path / "tiny.gif"
+    p.write_bytes(b"GIF89a" + b"\x00" * 200)  # ~206 bytes
+    with (
+        patch("maildb.ingest.extraction._marker_convert") as marker,
+        pytest.raises(ExtractionFailedError, match="below-minimum-useful-size"),
+    ):
+        extract_markdown(p, content_type="image/gif")
+    marker.assert_not_called()
+
+
+def test_extract_processes_normal_image(tmp_path: Path):
+    """Images that clear both thresholds proceed to Marker as before."""
+    import secrets as _secrets  # noqa: PLC0415
+
+    from PIL import Image  # noqa: PLC0415
+
+    p = tmp_path / "ok.png"
+    # Random pixels defeat PNG compression so the file lands well above 5KB.
+    img = Image.frombytes("RGB", (200, 200), _secrets.token_bytes(200 * 200 * 3))
+    img.save(p, format="PNG")
+    assert p.stat().st_size > 5 * 1024
+    with patch(
+        "maildb.ingest.extraction._marker_convert",
+        return_value=("# extracted", "marker==1.10.2"),
+    ) as marker:
+        result = extract_markdown(p, content_type="image/png")
+    marker.assert_called_once()
+    assert result.markdown.startswith("# extracted")
+
+
 def test_extract_marker_success_for_office_does_not_call_docling(tmp_path: Path):
     """When Marker succeeds, Docling must not be invoked — Marker is primary."""
     p = tmp_path / "doc.docx"

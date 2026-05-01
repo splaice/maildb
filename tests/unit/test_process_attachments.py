@@ -564,6 +564,36 @@ def test_strip_nul_removes_nul_bytes() -> None:
     assert pa._strip_nul(None) is None
 
 
+def test_process_one_routes_below_minimum_image_to_skipped() -> None:
+    """ExtractionFailedError with reason starting 'below-minimum-useful-size'
+    must land as skipped (telemetry honesty), not failed (#65)."""
+    pool = MagicMock()
+    set_status = MagicMock()
+    with (
+        patch.object(
+            pa,
+            "_load_attachment",
+            return_value={
+                "id": 1,
+                "filename": "icon.png",
+                "content_type": "image/png",
+                "storage_path": "a/x",
+            },
+        ),
+        patch.object(
+            pa,
+            "_run_with_timeout",
+            side_effect=pa.ExtractionFailedError("below-minimum-useful-size: 50x50px"),
+        ),
+        patch.object(pa, "_set_status", set_status),
+    ):
+        pa.process_one(pool, 1, attachment_dir=Path("/tmp"))
+    set_status.assert_called_once()
+    _, kwargs = set_status.call_args
+    assert kwargs["status"] == "skipped"
+    assert kwargs["reason"].startswith("below-minimum-useful-size")
+
+
 def test_process_one_strips_nul_before_chunking_and_chunk_insert() -> None:
     """Sanitization must happen at extraction time, not just at _set_status.
 
