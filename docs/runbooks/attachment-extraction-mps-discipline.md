@@ -66,9 +66,39 @@ implemented**. The supervised path currently dispatches to
 ships, CPU-mode (non-MPS) workers can run in parallel safely; MPS-mode
 workers still cannot.
 
+## Logs and runtime ceiling
+
+Each supervisor invocation now writes to its own per-run directory
+under `~/.maildb/logs/<run-id>/` (issues #72, #77):
+
+- `drain.log` — supervisor structlog output
+- `run.json` — start/finish metadata, pid, command args, final counts
+
+`maildb jobs` shows the active run's path under "Active drain log" so
+you can tail it during a run:
+
+```bash
+tail -f $(maildb jobs | grep -A1 'Active drain log' | awk '/log:/ {print $2}')
+```
+
+The 20 most recent run directories are kept; older ones are pruned
+automatically at the next `process_attachments run` / `retry`.
+
+For unattended drains, pass `--max-runtime <seconds>` (issue #73). On
+expiry the supervisor kills the worker cleanly and reverts in-flight
+rows to `pending` so the next session resumes them — useful as a
+sanity ceiling on overnight or scheduled runs:
+
+```bash
+maildb process_attachments run --workers 1 --extract-timeout 300 --max-runtime 28800
+# 8h ceiling; clean exit if it runs over.
+```
+
 ## Related
 
 - Issue #59 — per-supervisor `claimed_by` isolation (fixed in PR #60)
 - Issue #64 — this discipline doc
 - Issue #68 — multi-worker supervised path (future, not for MPS)
+- Issue #72 / #77 — persistent run logs at `~/.maildb/logs/<run-id>/`
+- Issue #73 — `--max-runtime` ceiling
 - Issue #75 — file upstream surya issue for residual MPS bugs

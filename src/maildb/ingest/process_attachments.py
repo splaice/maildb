@@ -479,6 +479,7 @@ def run(
     selector_params: dict[str, Any] | None = None,
     database_url: str | None = None,
     extract_timeout_s: int = 0,
+    max_runtime_s: int = 0,
 ) -> dict[str, int]:
     """Process all matching pending/failed rows.
 
@@ -513,6 +514,7 @@ def run(
                 selector_params=selector_params,
                 database_url=database_url,
                 extract_timeout_s=extract_timeout_s,
+                max_runtime_s=max_runtime_s,
             )
         else:
             _claim_and_process_loop(
@@ -712,6 +714,26 @@ def _killpg_quietly(pid: int, sig: int = signal.SIGKILL) -> None:
         os.killpg(pid, sig)
 
 
+def _revert_in_flight_to_pending(pool: ConnectionPool, *, claimed_by: str) -> int:
+    """Flip the supervisor's in-flight ('extracting') rows back to 'pending'.
+
+    Used when the supervisor exits cleanly under --max-runtime so the
+    interrupted rows pick up on the next session instead of being recorded
+    as failed (issue #73).
+    """
+    with pool.connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE attachment_contents
+               SET status = 'pending', extracted_at = NULL, reason = NULL
+             WHERE status = 'extracting' AND claimed_by = %s
+            """,
+            (claimed_by,),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
 def _run_supervised_single_worker(
     pool: ConnectionPool,
     *,
@@ -721,6 +743,7 @@ def _run_supervised_single_worker(
     selector_params: dict[str, Any] | None,
     database_url: str,
     extract_timeout_s: int,
+    max_runtime_s: int = 0,
 ) -> None:
     """Single-worker run with subprocess-level hard timeout.
 
@@ -747,7 +770,8 @@ def _run_supervised_single_worker(
         See issue #64 and ``docs/runbooks/attachment-extraction-mps-discipline.md``.
     """
     supervisor_id = f"sup-{uuid.uuid4()}"
-    logger.info("supervisor_started", supervisor_id=supervisor_id)
+    start_t = time.monotonic()
+    logger.info("supervisor_started", supervisor_id=supervisor_id, max_runtime_s=max_runtime_s)
 
     while True:
         remaining = _count_selected(
@@ -777,6 +801,22 @@ def _run_supervised_single_worker(
         killed = False
         while worker.is_alive():
             time.sleep(_SUPERVISOR_POLL_S)
+            if max_runtime_s > 0 and (time.monotonic() - start_t) > max_runtime_s:
+                logger.warning(
+                    "max_runtime_exceeded",
+                    supervisor_id=supervisor_id,
+                    max_runtime_s=max_runtime_s,
+                )
+                worker.kill()
+                _killpg_quietly(worker.pid)
+                worker.join(timeout=10)
+                reverted = _revert_in_flight_to_pending(pool, claimed_by=supervisor_id)
+                logger.info(
+                    "max_runtime_clean_exit",
+                    supervisor_id=supervisor_id,
+                    reverted_to_pending=reverted,
+                )
+                return
             stuck = _find_stuck_extracting(pool, extract_timeout_s, claimed_by=supervisor_id)
             if not stuck:
                 continue
