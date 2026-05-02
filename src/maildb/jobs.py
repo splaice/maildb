@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from maildb.ingest.extraction import route_content_type
+from maildb.ingest.run_logs import RunLogDir, find_active_run_log
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -92,6 +93,7 @@ class JobsSnapshot:
     eta_for_status: dict[str, int | None]  # pending/failed: seconds or None
     yield_by_type: list[TypeYield]
     orphans: list[OrphanProcess]
+    active_run_log: RunLogDir | None = None
 
 
 def list_maildb_processes(exclude_pid: int | None = None) -> list[ProcessInfo]:
@@ -297,6 +299,7 @@ def snapshot(
     completed = completed_in_window(pool, window_minutes=window_minutes)
     yield_by_type = yield_by_content_type(pool)
     orphans = find_orphan_workers()
+    active_run_log = find_active_run_log()
 
     total_completed = sum(completed.values())
     rate_per_min = total_completed / window_minutes if window_minutes > 0 else 0.0
@@ -319,6 +322,7 @@ def snapshot(
         eta_for_status=eta,
         yield_by_type=yield_by_type,
         orphans=orphans,
+        active_run_log=active_run_log,
     )
 
 
@@ -344,6 +348,17 @@ def format_bytes(n: int) -> str:
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
         n //= 1024
     return f"{n}TB"
+
+
+def _render_active_run_log(rl: RunLogDir | None) -> list[str]:
+    if rl is None:
+        return []
+    return [
+        "",
+        "## Active drain log",
+        f"  run-id: {rl.run_id}",
+        f"  log:    {rl.drain_log}",
+    ]
 
 
 def _render_orphans(orphans: list[OrphanProcess]) -> list[str]:
@@ -416,6 +431,7 @@ def render(snap: JobsSnapshot) -> str:
     if snap.rate_per_min > 0:
         lines.append(f"             {snap.rate_per_min * 60:.1f} docs/hour")
 
+    lines.extend(_render_active_run_log(snap.active_run_log))
     lines.extend(_render_orphans(snap.orphans))
     lines.extend(_render_yield_by_type(snap.yield_by_type))
 

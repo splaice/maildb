@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
 from maildb import jobs
 from maildb.cli import app
+from maildb.ingest.run_logs import RunLogDir
 
 
 def test_format_duration_buckets():
@@ -117,6 +119,45 @@ def test_snapshot_eta_none_when_no_completions():
 
     assert snap.rate_per_min == 0.0
     assert snap.eta_for_status["pending"] is None
+
+
+def test_render_includes_active_log_path_when_present():
+    """`maildb jobs` should point operators at the live drain log so they can
+    tail it during a run (#72)."""
+    pool = MagicMock()
+    fake_run_log = RunLogDir(
+        run_id="20260501T120000Z-deadbeef",
+        dir=Path("/Users/x/.maildb/logs/20260501T120000Z-deadbeef"),
+        drain_log=Path("/Users/x/.maildb/logs/20260501T120000Z-deadbeef/drain.log"),
+        run_json=Path("/Users/x/.maildb/logs/20260501T120000Z-deadbeef/run.json"),
+    )
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(jobs, "yield_by_content_type", return_value=[]),
+        patch.object(jobs, "find_orphan_workers", return_value=[]),
+        patch.object(jobs, "find_active_run_log", return_value=fake_run_log),
+    ):
+        out = jobs.render(jobs.snapshot(pool, window_minutes=30))
+    assert "Active drain log" in out
+    assert "20260501T120000Z-deadbeef" in out
+
+
+def test_render_omits_active_log_section_when_no_active_run():
+    pool = MagicMock()
+    with (
+        patch.object(jobs, "list_maildb_processes", return_value=[]),
+        patch.object(jobs, "attachment_counts", return_value={}),
+        patch.object(jobs, "in_flight_rows", return_value=[]),
+        patch.object(jobs, "completed_in_window", return_value={}),
+        patch.object(jobs, "yield_by_content_type", return_value=[]),
+        patch.object(jobs, "find_orphan_workers", return_value=[]),
+        patch.object(jobs, "find_active_run_log", return_value=None),
+    ):
+        out = jobs.render(jobs.snapshot(pool, window_minutes=30))
+    assert "Active drain log" not in out
 
 
 def test_find_orphan_workers_detects_spawn_with_ppid_1():

@@ -16,6 +16,7 @@ import typer
 from maildb import jobs as jobs_mod
 from maildb.config import Settings
 from maildb.db import create_hnsw_index_attachment_chunks, create_pool, init_db
+from maildb.ingest import run_logs as run_logs_mod
 from maildb.ingest.orchestrator import (
     backfill_source_account,
     get_status,
@@ -100,6 +101,36 @@ def _configure_logging(settings: Settings | None = None) -> None:
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=False,
     )
+
+
+def _begin_run_log(command_args: list[str]) -> run_logs_mod.RunLogDir:
+    """Allocate a per-run log dir, attach a file logger, prune old runs.
+
+    The dir lives at ``~/.maildb/logs/<run-id>/`` (issue #72/#77). Logging
+    writes flow to ``drain.log`` for the duration; ``run.json`` carries
+    start/finish metadata so post-mortem analysis no longer needs ``grep``
+    across ad-hoc files in the project root.
+    """
+    run_log = run_logs_mod.create_run_log_dir(command_args=command_args)
+    handler = run_logs_mod.attach_file_logger(run_log)
+    run_log_handler[run_log.run_id] = handler
+    run_logs_mod.prune_old_run_dirs()
+    typer.echo(f"Logging to {run_log.dir}")
+    return run_log
+
+
+def _end_run_log(
+    run_log: run_logs_mod.RunLogDir, *, exit_code: int, counts: dict[str, int]
+) -> None:
+    run_logs_mod.finalize_run(run_log, exit_code=exit_code, counts=counts)
+    handler = run_log_handler.pop(run_log.run_id, None)
+    if handler is not None:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+
+
+# Track active file handlers by run_id so we can detach them on exit.
+run_log_handler: dict[str, logging.Handler] = {}
 
 
 @app.command()
@@ -424,6 +455,13 @@ def process_run(
         help="Per-attachment wall-clock ceiling in seconds (0 disables). "
         "Timed-out rows are marked failed with reason prefixed 'timed out after'.",
     ),
+    max_runtime: int = typer.Option(
+        0,
+        "--max-runtime",
+        help="Total wall-clock cap for the supervisor in seconds (0 disables). "
+        "On expiry, the worker is killed cleanly and any in-flight rows are "
+        "reverted to 'pending' so the next session resumes them.",
+    ),
 ) -> None:
     """Process pending (and optionally failed) attachments."""
     selector_sql_parts: list[str] = []
@@ -479,16 +517,23 @@ def process_run(
             typer.echo(f"Would process {n} attachment(s). (--dry-run)")
             return
         settings = Settings()
-        counts = pa_run(
-            pool,
-            attachment_dir=Path(settings.attachment_dir),
-            workers=workers,
-            retry_failed=retry_failed,
-            selector_sql=selector_sql,
-            selector_params=selector_params,
-            database_url=settings.database_url,
-            extract_timeout_s=extract_timeout,
-        )
+        run_log = _begin_run_log(["maildb", "process_attachments", "run", *sys.argv[1:]])
+        try:
+            counts = pa_run(
+                pool,
+                attachment_dir=Path(settings.attachment_dir),
+                workers=workers,
+                retry_failed=retry_failed,
+                selector_sql=selector_sql,
+                selector_params=selector_params,
+                database_url=settings.database_url,
+                extract_timeout_s=extract_timeout,
+                max_runtime_s=max_runtime,
+            )
+            _end_run_log(run_log, exit_code=0, counts=counts)
+        except BaseException:
+            _end_run_log(run_log, exit_code=1, counts={})
+            raise
         typer.echo(
             "Done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
         )
@@ -578,6 +623,12 @@ def process_retry(
         "(reason starts with 'hard-timeout:'). Pair with a larger "
         "--extract-timeout to give them another chance.",
     ),
+    max_runtime: int = typer.Option(
+        0,
+        "--max-runtime",
+        help="Total wall-clock cap for the supervisor in seconds (0 disables). "
+        "On expiry, the worker is killed cleanly and in-flight rows revert to 'pending'.",
+    ),
 ) -> None:
     """Re-process only rows with status='failed'.
 
@@ -599,16 +650,23 @@ def process_retry(
             selector_sql += " AND reason LIKE 'hard-timeout:%%'"
         else:
             selector_sql += " AND (reason IS NULL OR reason NOT LIKE 'hard-timeout:%%')"
-        counts = pa_run(
-            pool,
-            attachment_dir=Path(settings.attachment_dir),
-            workers=workers,
-            retry_failed=True,
-            selector_sql=selector_sql,
-            selector_params={},
-            database_url=settings.database_url,
-            extract_timeout_s=extract_timeout,
-        )
+        run_log = _begin_run_log(["maildb", "process_attachments", "retry", *sys.argv[1:]])
+        try:
+            counts = pa_run(
+                pool,
+                attachment_dir=Path(settings.attachment_dir),
+                workers=workers,
+                retry_failed=True,
+                selector_sql=selector_sql,
+                selector_params={},
+                database_url=settings.database_url,
+                extract_timeout_s=extract_timeout,
+                max_runtime_s=max_runtime,
+            )
+            _end_run_log(run_log, exit_code=0, counts=counts)
+        except BaseException:
+            _end_run_log(run_log, exit_code=1, counts={})
+            raise
         typer.echo(
             "Retry done. extracted={extracted} failed={failed} skipped={skipped}".format(**counts)
         )

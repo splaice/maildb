@@ -548,6 +548,105 @@ def test_supervised_run_threads_unique_claimed_by_uuid() -> None:
     assert find_stuck.call_args.kwargs.get("claimed_by") == sup_id
 
 
+def test_supervised_run_max_runtime_kills_worker_and_reverts_in_flight() -> None:
+    """When wall-clock exceeds --max-runtime, the supervisor kills the worker
+    cleanly and reverts in-flight rows ('extracting' tagged with claimed_by)
+    back to 'pending' so they can resume on the next session (#73)."""
+    pool = MagicMock()
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+    worker.pid = 88
+    fake_ctx.Process.return_value = worker
+
+    times = iter([1000.0, 1000.0, 1100.0, 1100.0, 1100.0])
+
+    def fake_monotonic() -> float:
+        return next(times)
+
+    with (
+        patch.object(pa, "_count_selected", return_value=5),
+        patch.object(pa, "_find_stuck_extracting", return_value=[]),
+        patch.object(pa, "_mp_context", return_value=fake_ctx),
+        patch.object(pa, "_killpg_quietly") as killpg,
+        patch.object(pa, "time") as tmod,
+    ):
+        tmod.sleep = MagicMock()
+        tmod.monotonic = fake_monotonic
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+            max_runtime_s=60,
+        )
+
+    worker.kill.assert_called_once()
+    killpg.assert_called_once_with(88)
+    # Find the UPDATE that flips claimed_by's in-flight rows back to pending.
+    conn = pool.connection.return_value.__enter__.return_value
+    revert_calls = [
+        c
+        for c in conn.execute.call_args_list
+        if "UPDATE attachment_contents" in c.args[0] and "'pending'" in c.args[0]
+    ]
+    assert revert_calls, "expected an UPDATE … SET status='pending' to revert in-flight rows"
+
+
+def test_supervised_run_max_runtime_zero_disables_check() -> None:
+    """max_runtime_s=0 must keep current behavior: no clock-based kill."""
+    pool = MagicMock()
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.side_effect = [True, False]  # poll once, worker exits
+    fake_ctx.Process.return_value = worker
+
+    with (
+        patch.object(pa, "_count_selected", side_effect=[5, 0]),
+        patch.object(pa, "_find_stuck_extracting", return_value=[]),
+        patch.object(pa, "_mp_context", return_value=fake_ctx),
+        patch.object(pa, "time") as tmod,
+    ):
+        tmod.sleep = MagicMock()
+        tmod.monotonic = MagicMock(return_value=10_000.0)  # ridiculous elapsed
+        pa._run_supervised_single_worker(
+            pool,
+            attachment_dir=Path("/tmp"),
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+            max_runtime_s=0,
+        )
+
+    worker.kill.assert_not_called()
+
+
+def test_run_threads_max_runtime_into_supervised_path() -> None:
+    """``pa.run`` must forward ``max_runtime_s`` to the supervisor."""
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = []
+    with (
+        patch.object(pa, "ensure_pending_rows", return_value=0),
+        patch.object(pa, "_reclaim_stale", return_value=0),
+        patch.object(pa, "_run_supervised_single_worker") as sup,
+    ):
+        pa.run(
+            pool,
+            attachment_dir=Path("/tmp"),
+            workers=1,
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+            max_runtime_s=28800,
+        )
+    sup.assert_called_once()
+    assert sup.call_args.kwargs["max_runtime_s"] == 28800
+
+
 def test_killpg_quietly_swallows_lookup_errors() -> None:
     """SIGKILL on a pgid that no longer exists should not raise."""
     with patch("os.killpg", side_effect=ProcessLookupError):
