@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -12,9 +12,6 @@ from maildb.ingest.extraction import (
     extract_markdown,
     route_content_type,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 @pytest.mark.parametrize(
@@ -49,8 +46,8 @@ def test_supported_types_route_to_known_buckets(content_type, expected_bucket):
         "application/zip",
         "video/quicktime",
         "application/octet-stream",
-        "application/ics",
-        "application/json",
+        "application/rtf",
+        "image/svg+xml",
         "",
         None,
     ],
@@ -258,3 +255,209 @@ def test_extract_marker_success_for_office_does_not_call_docling(tmp_path: Path)
         result = extract_markdown(p, content_type=_DOCX)
     docling.assert_not_called()
     assert result.extractor_version.startswith("marker==")
+
+
+# --- Tier 4: MarkItDown integration (issue #83) ----------------------------
+
+_NEW_ROUTES = [
+    ("text/calendar", "calendar"),
+    ("application/ics", "calendar"),
+    ("text/csv", "csv"),
+    ("application/json", "json"),
+    ("application/xml", "xml"),
+    ("text/x-vcard", "vcard"),
+    ("application/x-iwork-pages-sffpages", "pages"),
+]
+
+
+@pytest.mark.parametrize(("content_type", "bucket"), _NEW_ROUTES)
+def test_new_text_buckets_route_correctly(content_type: str, bucket: str):
+    """The Tier 4 MIME types map to dedicated buckets so the CLI --only filter
+    and the yield-by-content-type dashboard can name them distinctly."""
+    assert route_content_type(content_type) == bucket
+
+
+def test_supported_includes_new_buckets():
+    """SUPPORTED is the contract for what extract_markdown can route. New
+    Tier 4 buckets must be in it so callers can opt-in via --only filters."""
+    assert {"calendar", "csv", "json", "xml", "vcard", "pages"} <= SUPPORTED
+
+
+_BUCKET_SUFFIXES = {
+    "calendar": ".ics",
+    "csv": ".csv",
+    "json": ".json",
+    "xml": ".xml",
+    "vcard": ".vcf",
+    "pages": ".pages",
+}
+
+
+@pytest.mark.parametrize(("content_type", "bucket"), _NEW_ROUTES)
+def test_extract_calls_markitdown_for_new_buckets(tmp_path: Path, content_type: str, bucket: str):
+    """For each Tier 4 bucket, extract_markdown dispatches to _markitdown_convert
+    and returns its output tagged with the markitdown version. Marker and
+    Docling are not consulted — these formats are MarkItDown's territory."""
+    p = tmp_path / f"sample{_BUCKET_SUFFIXES[bucket]}"
+    p.write_bytes(b"placeholder")
+    with (
+        patch(
+            "maildb.ingest.extraction._markitdown_convert",
+            return_value=("# md output", "markitdown==0.1.0"),
+        ) as md,
+        patch("maildb.ingest.extraction._marker_convert") as marker,
+        patch("maildb.ingest.extraction._docling_convert") as docling,
+    ):
+        result = extract_markdown(p, content_type=content_type)
+    md.assert_called_once()
+    marker.assert_not_called()
+    docling.assert_not_called()
+    assert result.markdown == "# md output"
+    assert result.extractor_version.startswith("markitdown==")
+
+
+def test_extract_calls_markitdown_for_xls_legacy(tmp_path: Path):
+    """application/vnd.ms-excel was previously raising 'not implemented in v1'.
+    Tier 4 routes it through MarkItDown (which natively converts .xls → markdown
+    tables in seconds) — the spike confirmed multi-sheet .xls files produce
+    clean tables, obsoleting the planned LibreOffice route."""
+    p = tmp_path / "report.xls"
+    p.write_bytes(b"\xd0\xcf\x11\xe0fake")  # OLE2 compound-document magic
+    with patch(
+        "maildb.ingest.extraction._markitdown_convert",
+        return_value=("## Sheet1\n| A | B |", "markitdown==0.1.0"),
+    ) as md:
+        result = extract_markdown(p, content_type="application/vnd.ms-excel")
+    md.assert_called_once()
+    assert "Sheet1" in result.markdown
+    assert result.extractor_version.startswith("markitdown==")
+
+
+def test_extract_doc_legacy_still_raises(tmp_path: Path):
+    """Regression: MarkItDown does not support binary .doc (returns
+    UnsupportedFormatException). doc_legacy must continue to raise so we
+    don't pretend to handle it; LibreOffice/antiword is a separate Tier 5."""
+    p = tmp_path / "old.doc"
+    p.write_bytes(b"\xd0\xcf\x11\xe0fake")
+    with (
+        patch("maildb.ingest.extraction._markitdown_convert") as md,
+        pytest.raises(ExtractionFailedError, match="doc_legacy"),
+    ):
+        extract_markdown(p, content_type="application/msword")
+    md.assert_not_called()
+
+
+def test_extract_markitdown_failure_surfaces_as_extraction_failed(tmp_path: Path):
+    """If MarkItDown raises, the error surfaces as ExtractionFailedError tagged
+    'markitdown:' so ops telemetry can distinguish it from marker:/docling:
+    failures and route follow-up actions accordingly."""
+    p = tmp_path / "thing.csv"
+    p.write_bytes(b"a,b\n1,2\n")
+    with (
+        patch(
+            "maildb.ingest.extraction._markitdown_convert",
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(ExtractionFailedError, match="markitdown:"),
+    ):
+        extract_markdown(p, content_type="text/csv")
+
+
+# --- Tier 4: UTF-8 normalization workaround for #82 ------------------------
+
+
+def test_text_shaped_files_are_utf8_normalized_before_markitdown(tmp_path: Path):
+    """Regression for #82: text-shaped files (.ics/.vcf/.csv/.json/.xml) get
+    normalized to UTF-8 before MarkItDown sees them, so the converter chain's
+    PlainTextConverter (which defaults to ASCII) doesn't crash on common
+    non-ASCII bytes from real calendar exports."""
+    from maildb.ingest.extraction import _markitdown_convert  # noqa: PLC0415
+
+    p = tmp_path / "invite.ics"
+    # \xe2\x80\x99 is the UTF-8 right-single-quotation-mark — exact byte that
+    # crashes upstream.
+    p.write_bytes(b"BEGIN:VCALENDAR\r\nSUMMARY:Q3 \xe2\x80\x99 review\r\nEND:VCALENDAR\r\n")
+
+    captured_calls: list[tuple[str, str | None]] = []
+
+    def fake_run(path_str: str, *, force_charset: str | None = None) -> str:
+        captured_calls.append((path_str, force_charset))
+        # The file MarkItDown sees must decode cleanly as UTF-8.
+        text = Path(path_str).read_text(encoding="utf-8")
+        assert "Q3" in text
+        return "# normalized"
+
+    with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
+        markdown, ver = _markitdown_convert(p)
+
+    assert markdown == "# normalized"
+    assert ver.startswith("markitdown==")
+    assert len(captured_calls) == 1, "_markitdown_run was not called once"
+    captured_path, captured_charset = captured_calls[0]
+    # MarkItDown sees a different (normalized) path than the input.
+    assert captured_path != str(p)
+    assert captured_path.endswith(".ics")
+    # And UTF-8 was forced explicitly — this is the production-bug-catching
+    # assertion that the byte-normalization alone was not.
+    assert captured_charset == "utf-8"
+    # The temp file is cleaned up after the call.
+    assert not Path(captured_path).exists()
+
+
+def test_binary_files_skip_utf8_normalization(tmp_path: Path):
+    """Binary formats (.xls, .pages) must NOT be UTF-8 normalized — decoding
+    and re-encoding bytes would corrupt the format. They pass through to
+    MarkItDown without forcing a charset."""
+    from maildb.ingest.extraction import _markitdown_convert  # noqa: PLC0415
+
+    p = tmp_path / "data.xls"
+    p.write_bytes(b"\xd0\xcf\x11\xe0fake")  # OLE2 magic, not valid UTF-8
+
+    captured_calls: list[tuple[str, str | None]] = []
+
+    def fake_run(path_str: str, *, force_charset: str | None = None) -> str:
+        captured_calls.append((path_str, force_charset))
+        return "# xls content"
+
+    with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
+        _markitdown_convert(p)
+
+    assert captured_calls == [(str(p), None)]
+
+
+def test_markitdown_run_text_passes_explicit_utf8_streaminfo(tmp_path: Path):
+    """End-to-end against real MarkItDown: when force_charset='utf-8' is set,
+    a tiny ICS containing a non-ASCII byte parses without crashing — even
+    though auto-detection on small input might settle on ASCII. This is the
+    direct regression test for #82."""
+    from maildb.ingest.extraction import _markitdown_run  # noqa: PLC0415
+
+    p = tmp_path / "x.ics"
+    p.write_bytes(b"BEGIN:VCALENDAR\r\nSUMMARY:Q3 \xe2\x80\x99 review\r\nEND:VCALENDAR\r\n")
+    md = _markitdown_run(str(p), force_charset="utf-8")
+    assert "Q3" in md or "VCALENDAR" in md
+
+
+def test_normalize_to_utf8_temp_replaces_invalid_bytes(tmp_path: Path):
+    """The UTF-8 normalizer round-trips valid UTF-8 unchanged and substitutes
+    U+FFFD for genuinely invalid byte sequences (errors='replace' contract)."""
+    from maildb.ingest.extraction import _normalize_to_utf8_temp  # noqa: PLC0415
+
+    valid = tmp_path / "valid.ics"
+    valid.write_bytes("Q3 \u2019 review".encode())
+    out1 = _normalize_to_utf8_temp(valid)
+    try:
+        assert out1.read_text(encoding="utf-8") == "Q3 \u2019 review"
+    finally:
+        out1.unlink(missing_ok=True)
+
+    invalid = tmp_path / "bad.ics"
+    invalid.write_bytes(b"hello\xffworld")
+    out2 = _normalize_to_utf8_temp(invalid)
+    try:
+        text = out2.read_text(encoding="utf-8")
+        assert "hello" in text
+        assert "world" in text
+        assert "�" in text
+    finally:
+        out2.unlink(missing_ok=True)
