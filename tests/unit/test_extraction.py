@@ -380,7 +380,12 @@ def test_text_shaped_files_are_utf8_normalized_before_markitdown(tmp_path: Path)
 
     captured_calls: list[tuple[str, str | None]] = []
 
-    def fake_run(path_str: str, *, force_charset: str | None = None) -> str:
+    def fake_run(
+        path_str: str,
+        *,
+        force_charset: str | None = None,
+        force_extension: str | None = None,
+    ) -> str:
         captured_calls.append((path_str, force_charset))
         # The file MarkItDown sees must decode cleanly as UTF-8.
         text = Path(path_str).read_text(encoding="utf-8")
@@ -388,7 +393,7 @@ def test_text_shaped_files_are_utf8_normalized_before_markitdown(tmp_path: Path)
         return "# normalized"
 
     with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
-        markdown, ver = _markitdown_convert(p)
+        markdown, ver = _markitdown_convert(p, "calendar")
 
     assert markdown == "# normalized"
     assert ver.startswith("markitdown==")
@@ -415,12 +420,17 @@ def test_binary_files_skip_utf8_normalization(tmp_path: Path):
 
     captured_calls: list[tuple[str, str | None]] = []
 
-    def fake_run(path_str: str, *, force_charset: str | None = None) -> str:
+    def fake_run(
+        path_str: str,
+        *,
+        force_charset: str | None = None,
+        force_extension: str | None = None,
+    ) -> str:
         captured_calls.append((path_str, force_charset))
         return "# xls content"
 
     with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
-        _markitdown_convert(p)
+        _markitdown_convert(p, "xls_legacy")
 
     assert captured_calls == [(str(p), None)]
 
@@ -436,6 +446,130 @@ def test_markitdown_run_text_passes_explicit_utf8_streaminfo(tmp_path: Path):
     p.write_bytes(b"BEGIN:VCALENDAR\r\nSUMMARY:Q3 \xe2\x80\x99 review\r\nEND:VCALENDAR\r\n")
     md = _markitdown_run(str(p), force_charset="utf-8")
     assert "Q3" in md or "VCALENDAR" in md
+
+
+# --- PR #84 review fix: dispatch by bucket, not by file suffix ------------
+
+
+def test_markitdown_convert_applies_workaround_for_mime_routed_files(tmp_path: Path):
+    """PR #84 review finding: the UTF-8 workaround was keyed on path.suffix,
+    but extract_markdown routes by MIME content_type. An attachment with
+    content_type='text/calendar' but a non-ICS filename (e.g. 'invite.dat')
+    skipped the workaround and crashed on the first non-ASCII byte. The fix
+    drives the workaround off the bucket regardless of input filename."""
+    from maildb.ingest.extraction import _markitdown_convert  # noqa: PLC0415
+
+    p = tmp_path / "invite.dat"  # deliberately wrong-shaped suffix
+    p.write_bytes(b"BEGIN:VCALENDAR\r\nSUMMARY:Q3 \xe2\x80\x99 review\r\nEND:VCALENDAR\r\n")
+
+    captured: list[tuple[str, str | None, str | None]] = []
+
+    def fake_run(
+        path_str: str,
+        *,
+        force_charset: str | None = None,
+        force_extension: str | None = None,
+    ) -> str:
+        captured.append((path_str, force_charset, force_extension))
+        return "# ok"
+
+    with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
+        _markitdown_convert(p, "calendar")
+
+    assert len(captured) == 1
+    captured_path, charset, ext = captured[0]
+    # Temp file uses bucket-canonical suffix, not the misleading input suffix.
+    assert captured_path.endswith(".ics")
+    # Workaround applied regardless of input filename.
+    assert charset == "utf-8"
+    # Explicit extension passed to MarkItDown so converter routing is robust.
+    assert ext == ".ics"
+
+
+@pytest.mark.parametrize(
+    ("bucket", "expected_suffix"),
+    [
+        ("calendar", ".ics"),
+        ("csv", ".csv"),
+        ("json", ".json"),
+        ("xml", ".xml"),
+        ("vcard", ".vcf"),
+    ],
+)
+def test_markitdown_convert_uses_bucket_canonical_suffix_for_text_buckets(
+    tmp_path: Path, bucket: str, expected_suffix: str
+):
+    """For every text-shaped bucket, the workaround applies regardless of
+    input filename: temp file gets the canonical suffix, charset is forced
+    to utf-8, and extension is passed through to MarkItDown explicitly."""
+    from maildb.ingest.extraction import _markitdown_convert  # noqa: PLC0415
+
+    p = tmp_path / "wrongname.bin"
+    p.write_bytes(b"placeholder")
+
+    captured: list[tuple[str, str | None, str | None]] = []
+
+    def fake_run(
+        path_str: str,
+        *,
+        force_charset: str | None = None,
+        force_extension: str | None = None,
+    ) -> str:
+        captured.append((path_str, force_charset, force_extension))
+        return "# ok"
+
+    with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
+        _markitdown_convert(p, bucket)
+
+    captured_path, charset, ext = captured[0]
+    assert captured_path.endswith(expected_suffix)
+    assert charset == "utf-8"
+    assert ext == expected_suffix
+
+
+def test_markitdown_convert_binary_buckets_unaffected(tmp_path: Path):
+    """Binary buckets (xls_legacy, pages) must continue to pass through to
+    MarkItDown without forcing charset or extension — the workaround would
+    corrupt their bytes."""
+    from maildb.ingest.extraction import _markitdown_convert  # noqa: PLC0415
+
+    p = tmp_path / "data.xls"
+    p.write_bytes(b"\xd0\xcf\x11\xe0fake")
+
+    captured: list[tuple[str, str | None, str | None]] = []
+
+    def fake_run(
+        path_str: str,
+        *,
+        force_charset: str | None = None,
+        force_extension: str | None = None,
+    ) -> str:
+        captured.append((path_str, force_charset, force_extension))
+        return "# ok"
+
+    with patch("maildb.ingest.extraction._markitdown_run", side_effect=fake_run):
+        _markitdown_convert(p, "xls_legacy")
+
+    assert captured == [(str(p), None, None)]
+
+
+def test_extract_markdown_passes_bucket_to_markitdown_convert(tmp_path: Path):
+    """extract_markdown invokes _markitdown_convert with the resolved bucket
+    so the suffix-independent workaround can fire correctly. Without this,
+    MIME-routed files skip the #82 workaround (PR #84 review finding)."""
+    p = tmp_path / "weird_name.dat"
+    p.write_bytes(b"placeholder")
+
+    captured: list[tuple[Path, str]] = []
+
+    def fake_convert(path: Path, bucket: str) -> tuple[str, str]:
+        captured.append((path, bucket))
+        return ("# md", "markitdown==0.1.0")
+
+    with patch("maildb.ingest.extraction._markitdown_convert", side_effect=fake_convert):
+        extract_markdown(p, content_type="text/calendar")
+
+    assert captured == [(p, "calendar")]
 
 
 def test_normalize_to_utf8_temp_replaces_invalid_bytes(tmp_path: Path):

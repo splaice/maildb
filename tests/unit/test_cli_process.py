@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from maildb.cli import app
@@ -92,6 +93,58 @@ def test_run_with_only_pdf(tmp_path):
     assert result.exit_code == 0
     kwargs = mock_run.call_args.kwargs
     assert "pdf" in str(kwargs["selector_params"].values())  # content_types list includes pdf MIME
+
+
+# --- PR #84 review fix: --only must accept the new Tier 4 buckets --------
+
+
+def test_cli_bucket_filter_includes_new_tier4_buckets():
+    """PR #84 review finding: extraction.SUPPORTED gained calendar/csv/json/
+    xml/vcard/pages but cli._BUCKET_TO_CONTENT_TYPES wasn't updated, so
+    --only on those buckets was rejected. Verify the mapping now covers them."""
+    from maildb.cli import _BUCKET_TO_CONTENT_TYPES  # noqa: PLC0415
+
+    assert {"calendar", "csv", "json", "xml", "vcard", "pages"} <= set(_BUCKET_TO_CONTENT_TYPES)
+    # Each bucket must list at least one MIME, and the MIMEs must be the
+    # canonical ones routed to that bucket in extraction.py.
+    assert "text/calendar" in _BUCKET_TO_CONTENT_TYPES["calendar"]
+    assert "application/ics" in _BUCKET_TO_CONTENT_TYPES["calendar"]
+    assert "text/csv" in _BUCKET_TO_CONTENT_TYPES["csv"]
+    assert "application/json" in _BUCKET_TO_CONTENT_TYPES["json"]
+    assert "application/xml" in _BUCKET_TO_CONTENT_TYPES["xml"]
+    assert "text/x-vcard" in _BUCKET_TO_CONTENT_TYPES["vcard"]
+    assert "application/x-iwork-pages-sffpages" in _BUCKET_TO_CONTENT_TYPES["pages"]
+
+
+@pytest.mark.parametrize(
+    ("only_bucket", "expected_mime"),
+    [
+        ("calendar", "text/calendar"),
+        ("csv", "text/csv"),
+        ("json", "application/json"),
+        ("xml", "application/xml"),
+        ("vcard", "text/x-vcard"),
+        ("pages", "application/x-iwork-pages-sffpages"),
+    ],
+)
+def test_run_with_only_new_tier4_bucket_dispatches(tmp_path, only_bucket: str, expected_mime: str):
+    """`--only <new_bucket>` must pass parameter validation and propagate the
+    correct content_types into selector_params (PR #84 review finding)."""
+    with (
+        patch("maildb.cli._build_process_pool") as mock_pool,
+        patch("maildb.cli.pa_run") as mock_run,
+    ):
+        pool_instance = MagicMock()
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)
+        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
+        mock_pool.return_value = pool_instance
+        mock_run.return_value = {"extracted": 0, "failed": 0, "skipped": 0}
+        result = runner.invoke(app, ["process_attachments", "run", "--only", only_bucket])
+    assert result.exit_code == 0, f"--only {only_bucket} rejected: {result.stdout}"
+    kwargs = mock_run.call_args.kwargs
+    types = kwargs["selector_params"].get("content_types", [])
+    assert expected_mime in types
 
 
 def test_run_with_ids(tmp_path):

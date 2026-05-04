@@ -84,12 +84,25 @@ _MARKITDOWN_BUCKETS: Final[frozenset[str]] = frozenset(
     {"calendar", "csv", "json", "xml", "vcard", "pages", "xls_legacy"}
 )
 
-# Suffixes that need UTF-8 normalization before MarkItDown sees them — its
-# PlainTextConverter defaults to ASCII and crashes on common non-ASCII bytes
-# (e.g. UTF-8 smart quotes in calendar invites). See issue #82.
-_MARKITDOWN_TEXT_SUFFIXES: Final[frozenset[str]] = frozenset(
-    {".ics", ".vcs", ".vcf", ".csv", ".json", ".xml"}
+# Buckets whose content is text and needs the #82 workaround: UTF-8 byte
+# normalization plus an explicit StreamInfo(charset='utf-8') so MarkItDown
+# doesn't auto-classify ASCII-front-loaded files as ASCII and crash on the
+# first non-ASCII byte. Driven by bucket (not suffix) so MIME-routed files
+# without a matching extension still get the fix.
+_MARKITDOWN_TEXT_BUCKETS: Final[frozenset[str]] = frozenset(
+    {"calendar", "csv", "json", "xml", "vcard"}
 )
+
+# Canonical suffix per text bucket — used for the UTF-8-normalized temp file
+# (so MarkItDown's converter routing has a stable signal) and as the explicit
+# extension hint passed via StreamInfo. Independent of the input filename.
+_MARKITDOWN_BUCKET_SUFFIX: Final[dict[str, str]] = {
+    "calendar": ".ics",
+    "csv": ".csv",
+    "json": ".json",
+    "xml": ".xml",
+    "vcard": ".vcf",
+}
 
 # Below these thresholds an image is signature/icon-sized and won't yield useful OCR.
 # Skip them with an explicit reason rather than burning Marker time on an empty result.
@@ -138,35 +151,43 @@ def _marker_convert(path: Path) -> tuple[str, str]:
     return text, f"marker=={getattr(marker, '__version__', 'unknown')}"
 
 
-def _normalize_to_utf8_temp(path: Path) -> Path:
+def _normalize_to_utf8_temp(path: Path, *, suffix: str | None = None) -> Path:
     """Decode bytes as UTF-8 with errors='replace' and write to a temp file.
 
     Workaround for MarkItDown PlainTextConverter ASCII default (#82) — files
     containing common non-ASCII bytes (smart quotes, em-dashes) crash unless
     pre-normalized. Invalid bytes become U+FFFD; valid UTF-8 round-trips.
+    The temp-file suffix defaults to the input's suffix; callers can pass
+    ``suffix`` to override (used for MIME-routed files where the on-disk
+    filename doesn't reflect the actual content shape — PR #84 review fix).
     Caller owns the returned path and must unlink when done.
     """
     import tempfile  # noqa: PLC0415
 
     text = path.read_bytes().decode("utf-8", errors="replace")
-    fd, name = tempfile.mkstemp(suffix=path.suffix)
+    fd, name = tempfile.mkstemp(suffix=suffix or path.suffix)
     os.close(fd)
     out = Path(name)
     out.write_text(text, encoding="utf-8")
     return out
 
 
-def _markitdown_run(file_path_str: str, *, force_charset: str | None = None) -> str:
+def _markitdown_run(
+    file_path_str: str,
+    *,
+    force_charset: str | None = None,
+    force_extension: str | None = None,
+) -> str:
     """Invoke MarkItDown on a path string; isolated for test patching.
 
-    When ``force_charset`` is set, opens the file as a binary stream and
-    passes an explicit ``StreamInfo(charset=...)`` via ``convert_stream``.
-    This bypasses MarkItDown's auto-charset detection, which only samples
-    the first 4 KB of the file — a fatal heuristic for .ics exports where
-    30 KB of ASCII timezone metadata precedes the first non-ASCII byte
-    (#82). Mirrors the ``_marker_convert`` / ``_docling_convert`` wrapper
-    pattern so tests can mock the heavy import without bringing the dep
-    into scope.
+    When ``force_charset`` or ``force_extension`` is set, opens the file as
+    a binary stream and passes an explicit ``StreamInfo`` via
+    ``convert_stream``. The explicit charset bypasses MarkItDown's
+    4 KB-sample auto-detection (fatal for ASCII-front-loaded ICS — #82); the
+    explicit extension overrides the on-disk filename so MIME-routed files
+    pick the right converter (PR #84 review fix). Mirrors the
+    ``_marker_convert`` / ``_docling_convert`` wrapper pattern so tests can
+    mock the heavy import without bringing the dep into scope.
     """
     from markitdown import (  # type: ignore[import-untyped]  # noqa: PLC0415
         MarkItDown,
@@ -174,34 +195,45 @@ def _markitdown_run(file_path_str: str, *, force_charset: str | None = None) -> 
     )
 
     md = MarkItDown()
-    if force_charset is None:
+    if force_charset is None and force_extension is None:
         return md.convert(file_path_str).markdown or ""
     p = Path(file_path_str)
     with p.open("rb") as f:
         result = md.convert_stream(
             f,
-            stream_info=StreamInfo(extension=p.suffix, charset=force_charset),
+            stream_info=StreamInfo(
+                extension=force_extension or p.suffix,
+                charset=force_charset,
+            ),
         )
     return result.markdown or ""
 
 
-def _markitdown_convert(path: Path) -> tuple[str, str]:
+def _markitdown_convert(path: Path, bucket: str) -> tuple[str, str]:
     """Run MarkItDown on a single file; return (markdown, version_string).
 
     Used for content types Marker doesn't natively handle (ical, csv, json,
-    xml, vcard, .pages, .xls). For text-shaped suffixes the file is UTF-8
-    normalized to a temp file *and* MarkItDown is forced to use UTF-8 for
-    decoding via an explicit ``StreamInfo`` — both are needed (#82). The
-    temp-file step substitutes U+FFFD for genuinely-invalid bytes; the
-    explicit charset bypasses the 4 KB-sample auto-detection that would
-    otherwise misclassify an ASCII-front-loaded ICS as ASCII.
+    xml, vcard, .pages, .xls). Dispatch is by *bucket* — not by file suffix
+    — so MIME-routed attachments (e.g. ``content_type='text/calendar'`` with
+    a generic filename like ``invite.dat``) still receive the #82 workaround
+    (PR #84 review fix). For text buckets the file is UTF-8 normalized to a
+    temp file with the bucket-canonical suffix *and* MarkItDown is forced to
+    use UTF-8 via an explicit ``StreamInfo`` — both are needed: the temp-file
+    step substitutes U+FFFD for genuinely-invalid bytes; the explicit charset
+    bypasses the 4 KB-sample auto-detection that would otherwise misclassify
+    an ASCII-front-loaded ICS as ASCII.
     """
     from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
 
-    if path.suffix.lower() in _MARKITDOWN_TEXT_SUFFIXES:
-        normalized = _normalize_to_utf8_temp(path)
+    if bucket in _MARKITDOWN_TEXT_BUCKETS:
+        forced_suffix = _MARKITDOWN_BUCKET_SUFFIX[bucket]
+        normalized = _normalize_to_utf8_temp(path, suffix=forced_suffix)
         try:
-            markdown = _markitdown_run(str(normalized), force_charset="utf-8")
+            markdown = _markitdown_run(
+                str(normalized),
+                force_charset="utf-8",
+                force_extension=forced_suffix,
+            )
         finally:
             normalized.unlink(missing_ok=True)
     else:
@@ -272,10 +304,12 @@ def extract_markdown(path: Path, *, content_type: str | None) -> ExtractionResul
 
     # Tier 4 (#83): MarkItDown handles content types Marker doesn't —
     # ical/csv/json/xml/vcard/.pages and notably .xls (which it converts to
-    # multi-sheet markdown tables natively).
+    # multi-sheet markdown tables natively). Bucket is passed through so the
+    # text-bucket workaround for #82 fires regardless of filename suffix
+    # (PR #84 review fix).
     if bucket in _MARKITDOWN_BUCKETS:
         try:
-            markdown, ver = _markitdown_convert(path)
+            markdown, ver = _markitdown_convert(path, bucket)
         except Exception as exc:
             raise ExtractionFailedError(f"markitdown: {exc}") from exc
         return ExtractionResult(markdown=markdown, extractor_version=ver)
