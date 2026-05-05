@@ -422,6 +422,15 @@ _BUCKET_TO_CONTENT_TYPES: dict[str, list[str]] = {
     ],
     "text": ["text/plain"],
     "html": ["text/html"],
+    # Tier 4 (#83): new MarkItDown-routed buckets. Mirrors the route map in
+    # extraction.py so `--only <bucket>` can target the new content types
+    # for drains and retries.
+    "calendar": ["text/calendar", "application/ics"],
+    "csv": ["text/csv"],
+    "json": ["application/json"],
+    "xml": ["application/xml"],
+    "vcard": ["text/x-vcard"],
+    "pages": ["application/x-iwork-pages-sffpages"],
 }
 
 

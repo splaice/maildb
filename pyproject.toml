@@ -16,6 +16,7 @@ dependencies = [
     "marker-pdf>=1.2.0",
     "tokenizers>=0.20",
     "docling>=2.92.0",
+    "markitdown[xls]>=0.1.5",
 ]
 
 [project.scripts]
