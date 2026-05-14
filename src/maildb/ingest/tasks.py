@@ -96,36 +96,65 @@ def fail_task(pool: ConnectionPool, task_id: int, *, error: str) -> None:
         conn.commit()
 
 
-def reset_failed_tasks(pool: ConnectionPool, *, phase: str, max_retries: int = 3) -> int:
-    """Reset failed tasks with retries remaining back to pending. Returns count."""
+def reset_failed_tasks(
+    pool: ConnectionPool,
+    *,
+    phase: str,
+    max_retries: int = 3,
+    import_id: Any = None,
+) -> int:
+    """Reset failed tasks with retries remaining back to pending. Returns count.
+
+    If `import_id` is given, only that import's tasks are touched — required
+    when multiple accounts share the queue so a prior import's failures don't
+    get retried under the wrong account.
+    """
     with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """UPDATE ingest_tasks
-               SET status = 'pending', worker_id = NULL, error_message = NULL
-               WHERE phase = %(phase)s AND status = 'failed' AND retry_count < %(max_retries)s""",
-            {"phase": phase, "max_retries": max_retries},
+        sql = (
+            "UPDATE ingest_tasks "
+            "SET status = 'pending', worker_id = NULL, error_message = NULL "
+            "WHERE phase = %(phase)s AND status = 'failed' "
+            "AND retry_count < %(max_retries)s"
         )
+        params: dict[str, Any] = {"phase": phase, "max_retries": max_retries}
+        if import_id is not None:
+            sql += " AND import_id = %(import_id)s"
+            params["import_id"] = import_id
+        cur.execute(sql, params)
         conn.commit()
         return cur.rowcount
 
 
-def get_phase_status(pool: ConnectionPool, phase: str) -> dict[str, int]:
-    """Get counts by status for a phase."""
+def get_phase_status(
+    pool: ConnectionPool,
+    phase: str,
+    *,
+    import_id: Any = None,
+) -> dict[str, int]:
+    """Get counts by status for a phase.
+
+    If `import_id` is given, counts are scoped to that import only. Required
+    when the orchestrator is deciding whether the *current* import has work
+    left in a phase; otherwise prior imports' completed rows mask the answer.
+    """
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """SELECT
-                   count(*) FILTER (WHERE status = 'pending') AS pending,
-                   count(*) FILTER (WHERE status = 'in_progress') AS in_progress,
-                   count(*) FILTER (WHERE status = 'completed') AS completed,
-                   count(*) FILTER (WHERE status = 'failed') AS failed,
-                   count(*) AS total,
-                   coalesce(sum(messages_total), 0) AS messages_total,
-                   coalesce(sum(messages_inserted), 0) AS messages_inserted,
-                   coalesce(sum(messages_skipped), 0) AS messages_skipped,
-                   coalesce(sum(attachments_extracted), 0) AS attachments_extracted
-               FROM ingest_tasks
-               WHERE phase = %(phase)s""",
-            {"phase": phase},
+        sql = (
+            "SELECT "
+            "count(*) FILTER (WHERE status = 'pending') AS pending, "
+            "count(*) FILTER (WHERE status = 'in_progress') AS in_progress, "
+            "count(*) FILTER (WHERE status = 'completed') AS completed, "
+            "count(*) FILTER (WHERE status = 'failed') AS failed, "
+            "count(*) AS total, "
+            "coalesce(sum(messages_total), 0) AS messages_total, "
+            "coalesce(sum(messages_inserted), 0) AS messages_inserted, "
+            "coalesce(sum(messages_skipped), 0) AS messages_skipped, "
+            "coalesce(sum(attachments_extracted), 0) AS attachments_extracted "
+            "FROM ingest_tasks WHERE phase = %(phase)s"
         )
+        params: dict[str, Any] = {"phase": phase}
+        if import_id is not None:
+            sql += " AND import_id = %(import_id)s"
+            params["import_id"] = import_id
+        cur.execute(sql, params)
         row = cur.fetchone()
         return dict(row)  # type: ignore[arg-type]

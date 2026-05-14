@@ -147,17 +147,31 @@ def run_pipeline(
 
     try:
         try:
+            # Adopt a still-running imports row or create one. The orchestrator's
+            # per-phase progress decisions all scope to this import_id so a
+            # prior account's completed tasks don't fool the planner into
+            # thinking the current run has nothing left to do.
+            import_id, _was_created = _resume_or_create_import(
+                pool,
+                source_account=source_account,
+                source_file=str(mbox_path),
+                force_new_import=force_new_import,
+            )
+            import_row_created = True
+
             # Phase 1: Split — may early-return via recursive restart.
-            # The imports row is NOT inserted yet: on restart, the recursive
-            # call will own its own row. This prevents orphaning the outer
-            # row in status='running' forever.
-            split_status = get_phase_status(pool, "split")
+            split_status = get_phase_status(pool, "split", import_id=import_id)
             if split_status["total"] > 0 and split_status["completed"] == 0:
                 logger.info("split_incomplete_restarting")
                 with pool.connection() as conn:
-                    conn.execute("DELETE FROM ingest_tasks WHERE phase IN ('split', 'parse')")
+                    conn.execute(
+                        "DELETE FROM ingest_tasks "
+                        "WHERE phase IN ('split', 'parse') AND import_id = %(id)s",
+                        {"id": import_id},
+                    )
                     conn.commit()
                 pool.close()
+                # The 'running' imports row stays; recursion will adopt it.
                 return run_pipeline(
                     mbox_path=mbox_path,
                     database_url=database_url,
@@ -174,17 +188,6 @@ def run_pipeline(
                     skip_embed=skip_embed,
                     force_new_import=False,
                 )
-
-            # Restart check passed — adopt a still-running row or create one.
-            # Once we have the import_id, we "own" it for this run, so
-            # any failure below should mark it failed.
-            import_id, _was_created = _resume_or_create_import(
-                pool,
-                source_account=source_account,
-                source_file=str(mbox_path),
-                force_new_import=force_new_import,
-            )
-            import_row_created = True
 
             if split_status["total"] == 0:
                 logger.info("phase_start", phase="split")
@@ -203,8 +206,8 @@ def run_pipeline(
                 logger.info("phase_complete", phase="split", chunks=len(chunks))
 
             # Phase 2: Parse
-            reset_failed_tasks(pool, phase="parse")
-            parse_status = get_phase_status(pool, "parse")
+            reset_failed_tasks(pool, phase="parse", import_id=import_id)
+            parse_status = get_phase_status(pool, "parse", import_id=import_id)
             if parse_status["pending"] > 0 or parse_status["in_progress"] > 0:
                 logger.info("phase_start", phase="parse", pending=parse_status["pending"])
                 drop_non_unique_indexes(pool)
@@ -226,7 +229,7 @@ def run_pipeline(
 
                 logger.info("phase_complete", phase="parse")
 
-            parse_status = get_phase_status(pool, "parse")
+            parse_status = get_phase_status(pool, "parse", import_id=import_id)
             if parse_status["failed"] > 0:
                 logger.error("parse_phase_has_permanent_failures", failed=parse_status["failed"])
                 msg = (
@@ -236,7 +239,7 @@ def run_pipeline(
                 raise RuntimeError(msg)  # noqa: TRY301
 
             # Phase 3: Index
-            index_status = get_phase_status(pool, "index")
+            index_status = get_phase_status(pool, "index", import_id=import_id)
             if index_status["completed"] == 0:
                 logger.info("phase_start", phase="index")
                 index_task = create_task(pool, phase="index", import_id=import_id)
@@ -250,7 +253,7 @@ def run_pipeline(
                 if unembedded > 0:
                     logger.info("phase_start", phase="embed", unembedded=unembedded)
 
-                    embed_status = get_phase_status(pool, "embed")
+                    embed_status = get_phase_status(pool, "embed", import_id=import_id)
                     if embed_status["in_progress"] == 0:
                         embed_task = create_task(pool, phase="embed", import_id=import_id)
                         task_id = embed_task["id"]
