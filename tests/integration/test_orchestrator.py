@@ -285,6 +285,10 @@ def test_run_pipeline_adopts_orphan_running_import(test_pool, test_settings, tmp
 def test_run_pipeline_same_mbox_two_accounts_creates_join_rows(test_pool, test_settings, tmp_path):
     """Ingesting the same mbox under two different accounts produces one
     emails row per message but two email_accounts rows per message.
+
+    Regression: the per-phase status checks must be scoped to the current
+    import_id, otherwise the second account's run sees the first run's
+    completed split/parse/index tasks and no-ops without ingesting.
     """
     mbox = FIXTURES / "sample.mbox"
     common = dict(  # noqa: C408
@@ -297,8 +301,8 @@ def test_run_pipeline_same_mbox_two_accounts_creates_join_rows(test_pool, test_s
         skip_embed=True,
     )
     run_pipeline(source_account="a@example.com", **common)
-    # Wipe parse tasks so the second account reprocesses every chunk.
-    reset_pipeline(test_pool, phase="parse")
+    # Second run, same mbox, different account — no reset_pipeline between.
+    # The orchestrator must detect this is a fresh import and execute every phase.
     run_pipeline(source_account="b@example.com", **common)
 
     with test_pool.connection() as conn:
@@ -311,8 +315,68 @@ def test_run_pipeline_same_mbox_two_accounts_creates_join_rows(test_pool, test_s
             "WHERE source_account = 'b@example.com'"
         )
         b_tagged = cur.fetchone()[0]
-    assert ea_count == email_count * 2  # Every email tagged under both.
-    assert b_tagged == email_count
+        cur = conn.execute(
+            "SELECT count(DISTINCT email_id) FROM email_accounts "
+            "WHERE source_account = 'a@example.com'"
+        )
+        a_tagged = cur.fetchone()[0]
+    assert email_count > 0, "sample.mbox should have produced rows"
+    assert a_tagged == email_count, "every email should be tagged under a@"
+    assert b_tagged == email_count, "every email should be tagged under b@"
+    assert ea_count == email_count * 2, "every email tagged under both accounts"
+
+
+def test_run_pipeline_two_accounts_two_mboxes_both_ingest(test_pool, test_settings, tmp_path):
+    """Two distinct mboxes under two distinct accounts both ingest fully.
+
+    This mirrors the real-world add-a-new-account scenario: an existing
+    DB with one account's import already completed, then a second account
+    runs against its own (different) mbox file. Both imports must produce
+    their own emails + email_accounts rows.
+    """
+    common = dict(  # noqa: C408
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=2,
+        skip_embed=True,
+    )
+    # First mbox: the shared fixture. Second mbox: a copy with rewritten
+    # message-ids (and their references) so emails do not dedup across
+    # accounts. Every sample.mbox message-id starts with "<msg" so a
+    # single prefix-substitution gives disjoint ids.
+    mbox_a = FIXTURES / "sample.mbox"
+    mbox_b = tmp_path / "sample_b.mbox"
+    mbox_b.write_bytes(mbox_a.read_bytes().replace(b"<msg", b"<b-msg"))
+
+    run_pipeline(mbox_path=mbox_a, source_account="a@example.com", **common)
+    run_pipeline(mbox_path=mbox_b, source_account="b@example.com", **common)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT count(*) FROM email_accounts WHERE source_account = 'a@example.com'"
+        )
+        a_count = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT count(*) FROM email_accounts WHERE source_account = 'b@example.com'"
+        )
+        b_count = cur.fetchone()[0]
+        cur = conn.execute("SELECT count(*) FROM emails")
+        total_emails = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT messages_inserted FROM imports WHERE source_account = 'a@example.com'"
+        )
+        a_inserted = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT messages_inserted FROM imports WHERE source_account = 'b@example.com'"
+        )
+        b_inserted = cur.fetchone()[0]
+    assert a_count > 0, "account a should have email_accounts rows"
+    assert b_count > 0, "account b should have email_accounts rows"
+    assert a_count == b_count, "both mboxes have the same message count"
+    assert total_emails == a_count + b_count, "no dedup expected (distinct message_ids)"
+    assert a_inserted > 0 and b_inserted > 0, "imports rows reflect actual work"
 
 
 def test_run_pipeline_force_new_import(test_pool, test_settings, tmp_path):
