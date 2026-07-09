@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -10,6 +11,34 @@ import pytest
 from maildb.maildb import MailDB
 
 pytestmark = pytest.mark.integration
+
+_DIM = 768
+# Query embedding used by the mock client in search_all RRF tests: unit e0.
+_QUERY_VEC = [1.0] + [0.0] * (_DIM - 1)
+
+
+def _vec_with_cosine(sim: float, dim: int = _DIM) -> list[float]:
+    """Unit vector with cosine similarity `sim` against [1, 0, 0, ...]."""
+    orth = math.sqrt(max(0.0, 1.0 - sim * sim))
+    return [sim, orth] + [0.0] * (dim - 2)
+
+
+def _seed_email_with_embedding(
+    test_pool,
+    *,
+    message_id: str,
+    subject: str,
+    embedding: list[float],
+) -> None:
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                   date, embedding, source_account, created_at)
+               VALUES (gen_random_uuid(), %s, 't', %s, 'ceo@acme.com',
+                       %s, %s, 'sa@ex.com', now())""",
+            (message_id, subject, datetime(2025, 1, 1, tzinfo=UTC), str(embedding)),
+        )
+        conn.commit()
 
 
 def _seed_attachment_chunk(
@@ -330,3 +359,132 @@ def test_search_all_merges_email_and_attachment_hits(test_pool, test_settings):
     assert total >= 2
     sources = {r.source for r in results}
     assert sources == {"email", "attachment"}
+
+
+def test_search_all_rank_fusion_prevents_crowding(test_pool, test_settings):
+    """Attachments with uniformly higher cosine scores must not crowd out emails.
+
+    Live failure mode: short dense chunks all outscore whole-email embeddings, so
+    raw-similarity merge returns only attachments. RRF interleaves by own-rank;
+    with limit=4 the top-ranked email lands at position 2 (1-indexed).
+    """
+    # Four attachment chunks, all higher similarity than both emails.
+    for i, sim in enumerate([0.99, 0.95, 0.90, 0.85]):
+        _seed_attachment_chunk(
+            test_pool,
+            sha256=f"crowd-att-{i}",
+            filename=f"crowd-{i}.pdf",
+            chunk_text=f"Boilerplate lease clause chunk {i}",
+            embedding=_vec_with_cosine(sim),
+        )
+    # Two emails with lower similarities.
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<crowd-email-1@ex.com>",
+        subject="My apartment lease terms",
+        embedding=_vec_with_cosine(0.50),
+    )
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<crowd-email-2@ex.com>",
+        subject="Lease renewal discussion",
+        embedding=_vec_with_cosine(0.40),
+    )
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = list(_QUERY_VEC)
+
+    results, _ = db.search_all(query="lease agreement terms", limit=4)
+
+    assert len(results) == 4
+    # Top-ranked email at 1-indexed position 2 (equal RRF rank, lower raw sim loses
+    # the first slot to the top attachment).
+    assert results[1].source == "email"
+    assert results[1].email is not None
+    assert results[1].email.message_id == "<crowd-email-1@ex.com>"
+    assert any(r.source == "email" for r in results)
+
+    # Per-result similarity remains raw cosine from its source, not the fusion score.
+    # Fusion scores are ~1/61 ≈ 0.016; raw cosines here are ≥ 0.40.
+    for r in results:
+        assert r.similarity > 0.3
+        # Fusion score upper bound for rank 1: 1/61
+        assert r.similarity != pytest.approx(1.0 / 61)
+
+
+def test_search_all_empty_source_is_noop(test_pool, test_settings):
+    """With no attachment chunks, fusion order equals pure email search order."""
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<noop-email-1@ex.com>",
+        subject="High match email",
+        embedding=_vec_with_cosine(0.90),
+    )
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<noop-email-2@ex.com>",
+        subject="Medium match email",
+        embedding=_vec_with_cosine(0.70),
+    )
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<noop-email-3@ex.com>",
+        subject="Lower match email",
+        embedding=_vec_with_cosine(0.50),
+    )
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = list(_QUERY_VEC)
+
+    email_only, _ = db.search(query="match email")
+    fused, _ = db.search_all(query="match email")
+
+    assert [r.email.message_id for r in email_only] == [
+        r.email.message_id for r in fused if r.email is not None
+    ]
+    assert all(r.source == "email" for r in fused)
+    # Raw similarities preserved (not fusion scores).
+    for r in fused:
+        assert r.similarity > 0.3
+
+
+def test_search_all_deterministic(test_pool, test_settings):
+    """Same fused search twice yields identical result sequences."""
+    for i, sim in enumerate([0.95, 0.80, 0.70]):
+        _seed_attachment_chunk(
+            test_pool,
+            sha256=f"det-att-{i}",
+            filename=f"det-{i}.pdf",
+            chunk_text=f"Deterministic chunk {i}",
+            embedding=_vec_with_cosine(sim),
+        )
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<det-email-1@ex.com>",
+        subject="Deterministic email high",
+        embedding=_vec_with_cosine(0.88),
+    )
+    _seed_email_with_embedding(
+        test_pool,
+        message_id="<det-email-2@ex.com>",
+        subject="Deterministic email low",
+        embedding=_vec_with_cosine(0.55),
+    )
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = list(_QUERY_VEC)
+
+    first, _ = db.search_all(query="deterministic", limit=10)
+    second, _ = db.search_all(query="deterministic", limit=10)
+
+    def _key(r):
+        if r.source == "email":
+            assert r.email is not None
+            return (r.source, r.similarity, r.email.message_id)
+        assert r.attachment_result is not None
+        return (r.source, r.similarity, r.attachment_result.chunk.id)
+
+    assert [_key(r) for r in first] == [_key(r) for r in second]
