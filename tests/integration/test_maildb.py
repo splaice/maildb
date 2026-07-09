@@ -702,6 +702,57 @@ def test_topics_with_sender_domain(test_pool, seed_advanced) -> None:  # type: i
     assert all(e.sender_address == "bob@corp.com" for e in topics)
 
 
+def test_topics_with_filters_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a = uuid4()
+    iid_b = uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 'topics-account', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (iid, acct) in enumerate([(iid_a, "a@example.com"), (iid_b, "b@example.com")]):
+            eid = uuid4()
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                       sender_domain, recipients, date, body_text, embedding,
+                       source_account, import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'topics-account-thread', 'Topic',
+                       'bob@corp.com', 'corp.com', %(recipients)s, now(),
+                       %(body)s, %(embedding)s, %(acct)s, %(iid)s, now())""",
+                {
+                    "id": eid,
+                    "mid": f"topics-account-{n}@corp.com",
+                    "recipients": json.dumps({"to": ["alice@example.com"], "cc": [], "bcc": []}),
+                    "body": f"topic body {n}",
+                    "embedding": [float(n + 1)] + [0.0] * 767,
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    a_only, a_total = db.topics_with(sender="bob@corp.com", account="a@example.com", limit=5)
+    assert {e.message_id for e in a_only} == {"topics-account-0@corp.com"}
+    assert a_total == 1
+
+    unscoped, unscoped_total = db.topics_with(sender="bob@corp.com", limit=5)
+    none_scoped, none_scoped_total = db.topics_with(sender="bob@corp.com", account=None, limit=5)
+    assert {e.message_id for e in unscoped} == {
+        "topics-account-0@corp.com",
+        "topics-account-1@corp.com",
+    }
+    assert [e.message_id for e in none_scoped] == [e.message_id for e in unscoped]
+    assert none_scoped_total == unscoped_total == 2
+
+
 def test_topics_with_no_args_raises(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
     """topics_with() with neither sender nor sender_domain should raise ValueError."""
     db = MailDB._from_pool(test_pool)
@@ -1177,6 +1228,56 @@ def test_correspondence_limit(test_pool, seed_advanced) -> None:
     db = MailDB._from_pool(test_pool)
     results, _ = db.correspondence(address="bob@corp.com", limit=1)
     assert len(results) == 1
+
+
+def test_correspondence_filters_by_account(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    iid_a = uuid4()
+    iid_b = uuid4()
+    with test_pool.connection() as conn:
+        for iid, acct in [(iid_a, "a@example.com"), (iid_b, "b@example.com")]:
+            conn.execute(
+                "INSERT INTO imports (id, source_account, source_file, status) "
+                "VALUES (%(id)s, %(acct)s, 'correspondence-account', 'completed')",
+                {"id": iid, "acct": acct},
+            )
+        for n, (iid, acct) in enumerate([(iid_a, "a@example.com"), (iid_b, "b@example.com")]):
+            eid = uuid4()
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, subject, sender_address,
+                       sender_domain, recipients, date, body_text, source_account,
+                       import_id, created_at)
+                   VALUES (%(id)s, %(mid)s, 'correspondence-account-thread',
+                       'Correspondence', 'bob@corp.com', 'corp.com', %(recipients)s,
+                       now(), %(body)s, %(acct)s, %(iid)s, now())""",
+                {
+                    "id": eid,
+                    "mid": f"correspondence-account-{n}@corp.com",
+                    "recipients": json.dumps({"to": ["alice@example.com"], "cc": [], "bcc": []}),
+                    "body": f"correspondence body {n}",
+                    "acct": acct,
+                    "iid": iid,
+                },
+            )
+            conn.execute(
+                "INSERT INTO email_accounts (email_id, source_account, import_id) "
+                "VALUES (%(eid)s, %(acct)s, %(iid)s)",
+                {"eid": eid, "acct": acct, "iid": iid},
+            )
+        conn.commit()
+
+    a_only, a_total = db.correspondence(address="bob@corp.com", account="a@example.com")
+    assert {e.message_id for e in a_only} == {"correspondence-account-0@corp.com"}
+    assert a_total == 1
+
+    unscoped, unscoped_total = db.correspondence(address="bob@corp.com")
+    none_scoped, none_scoped_total = db.correspondence(address="bob@corp.com", account=None)
+    assert {e.message_id for e in unscoped} == {
+        "correspondence-account-0@corp.com",
+        "correspondence-account-1@corp.com",
+    }
+    assert [e.message_id for e in none_scoped] == [e.message_id for e in unscoped]
+    assert none_scoped_total == unscoped_total == 2
 
 
 # ---------------------------------------------------------------------------

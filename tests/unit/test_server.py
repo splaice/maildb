@@ -351,7 +351,14 @@ def test_get_attachment_markdown_tool_passes_account_through() -> None:
     mock_db.get_attachment_markdown.return_value = "# text"
     ctx = MagicMock()
     ctx.request_context.lifespan_context.db = mock_db
-    assert server.get_attachment_markdown(ctx, attachment_id=7, account="work@ex.com") == "# text"
+    result = server.get_attachment_markdown(ctx, attachment_id=7, account="work@ex.com")
+    assert result == {
+        "attachment_id": 7,
+        "text": "# text",
+        "total_chars": 6,
+        "offset": 0,
+        "truncated": False,
+    }
     mock_db.get_attachment_markdown.assert_called_with(7, account="work@ex.com")
 
 
