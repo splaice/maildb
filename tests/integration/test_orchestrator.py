@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 from pathlib import Path
 from uuid import uuid4
 
@@ -5,7 +6,7 @@ import pytest
 
 from maildb.ingest import orchestrator
 from maildb.ingest.orchestrator import count_unembedded, get_status, reset_pipeline, run_pipeline
-from maildb.ingest.tasks import complete_task, create_task
+from maildb.ingest.tasks import claim_task, complete_task, create_task
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -40,6 +41,112 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
         assert cur.fetchone()[0] > 0
+
+
+def test_run_pipeline_reclaims_stale_parse_task(test_pool, test_settings, tmp_path):
+    mbox = FIXTURES / "sample.mbox"
+    import_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'stale@example.com', %(file)s, 'running')""",
+            {"id": import_id, "file": str(mbox)},
+        )
+        conn.commit()
+    split_task = create_task(test_pool, phase="split", import_id=import_id)
+    complete_task(test_pool, split_task["id"], messages_total=1)
+    parse_task = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path=str(mbox),
+        import_id=import_id,
+    )
+    claimed = claim_task(
+        test_pool,
+        phase="parse",
+        worker_id="dead-worker",
+        import_id=import_id,
+    )
+    assert claimed["id"] == parse_task["id"]
+
+    run_pipeline(
+        mbox_path=mbox,
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        tmp_dir=tmp_path / "chunks",
+        chunk_size_bytes=50 * 1024 * 1024,
+        parse_workers=1,
+        skip_embed=True,
+        source_account="stale@example.com",
+    )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status FROM ingest_tasks WHERE id = %(id)s",
+            {"id": parse_task["id"]},
+        )
+        assert cur.fetchone()[0] == "completed"
+        cur = conn.execute(
+            "SELECT count(*) FROM emails WHERE import_id = %(id)s", {"id": import_id}
+        )
+        assert cur.fetchone()[0] > 0
+        cur = conn.execute("SELECT status FROM imports WHERE id = %(id)s", {"id": import_id})
+        assert cur.fetchone()[0] == "completed"
+
+
+def test_run_pipeline_raises_when_parse_tasks_remain_in_progress(
+    test_pool, test_settings, tmp_path, monkeypatch
+):
+    class ClaimingExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, fn, **kwargs):
+            claim_task(
+                test_pool,
+                phase="parse",
+                worker_id="stalled-worker",
+                import_id=kwargs.get("import_id"),
+            )
+            future = Future()
+            future.set_result(0)
+            return future
+
+    mbox = FIXTURES / "sample.mbox"
+    import_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status)
+               VALUES (%(id)s, 'stalled@example.com', %(file)s, 'running')""",
+            {"id": import_id, "file": str(mbox)},
+        )
+        conn.commit()
+    split_task = create_task(test_pool, phase="split", import_id=import_id)
+    complete_task(test_pool, split_task["id"], messages_total=1)
+    create_task(test_pool, phase="parse", chunk_path=str(mbox), import_id=import_id)
+    monkeypatch.setattr(orchestrator, "ProcessPoolExecutor", ClaimingExecutor)
+
+    with pytest.raises(RuntimeError, match="in progress"):
+        run_pipeline(
+            mbox_path=mbox,
+            database_url=test_settings.database_url,
+            attachment_dir=tmp_path / "attachments",
+            tmp_dir=tmp_path / "chunks",
+            chunk_size_bytes=50 * 1024 * 1024,
+            parse_workers=1,
+            skip_embed=True,
+            source_account="stalled@example.com",
+        )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT status FROM imports WHERE id = %(id)s", {"id": import_id})
+        assert cur.fetchone()[0] == "failed"
 
 
 def test_embed_resumes_after_completion(test_pool):

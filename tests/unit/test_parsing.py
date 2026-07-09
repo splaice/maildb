@@ -16,6 +16,20 @@ def test_parse_mbox_yields_all_messages() -> None:
     assert len(messages) == 10
 
 
+def test_parse_mbox_missing_file_raises_without_creating(tmp_path: Path) -> None:
+    mbox_path = tmp_path / "missing.mbox"
+
+    try:
+        list(parse_mbox(mbox_path))
+    except FileNotFoundError as exc:
+        assert str(mbox_path) in str(exc)
+    else:
+        msg = "Expected parse_mbox to raise FileNotFoundError"
+        raise AssertionError(msg)
+
+    assert not mbox_path.exists()
+
+
 def test_parse_message_extracts_message_id() -> None:
     messages = list(parse_mbox(FIXTURES / "sample.mbox"))
     assert messages[0]["message_id"] == "msg001@example.com"

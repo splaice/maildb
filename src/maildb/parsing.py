@@ -243,7 +243,10 @@ def parse_message(msg: mailbox.mboxMessage) -> dict[str, Any] | None:
 def parse_mbox(mbox_path: Path | str) -> Iterator[dict[str, Any]]:
     """Parse all messages from an mbox file, yielding structured dictionaries."""
     mbox_path = Path(mbox_path)
-    mbox_file = mailbox.mbox(str(mbox_path))
+    if not mbox_path.exists():
+        message = f"Mbox file does not exist: {mbox_path}"
+        raise FileNotFoundError(message)
+    mbox_file = mailbox.mbox(str(mbox_path), create=False)
 
     for msg in mbox_file:
         try:
