@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -83,6 +84,25 @@ def test_search_attachments_returns_matching_chunk(test_pool, test_settings):
     assert hit.similarity > 0
 
 
+def test_search_attachments_total_counts_seen_results(test_pool, test_settings):
+    for i in range(3):
+        _seed_attachment_chunk(
+            test_pool,
+            sha256=f"total{i}",
+            filename=f"total-{i}.pdf",
+            chunk_text=f"Total semantics chunk {i}",
+            embedding=[0.1] * 768,
+        )
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = [0.1] * 768
+
+    results, total = db.search_attachments(query="total semantics", limit=1, offset=1)
+
+    assert len(results) == 1
+    assert total == 1 + len(results)
+
+
 def test_search_attachments_filters_by_content_type(test_pool, test_settings):
     _seed_attachment_chunk(
         test_pool,
@@ -103,6 +123,31 @@ def test_search_attachments_filters_by_content_type(test_pool, test_settings):
     db._embedding_client.embed.return_value = [0.1] * 768
     results, _ = db.search_attachments(query="content", content_type="application/pdf")
     assert all(r.content_type == "application/pdf" for r in results)
+
+
+def test_search_attachments_filters_by_cc_recipient(test_pool, test_settings):
+    att_id, _ = _seed_attachment_chunk(
+        test_pool,
+        sha256="rcptcc",
+        filename="cc.pdf",
+        chunk_text="Visible through cc recipient.",
+        email_ids=["<att-cc@ex.com>"],
+    )
+    with test_pool.connection() as conn:
+        conn.execute(
+            "UPDATE emails SET recipients = %s WHERE message_id = '<att-cc@ex.com>'",
+            (json.dumps({"to": [], "cc": ["cc-recipient@example.com"], "bcc": []}),),
+        )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = [0.1] * 768
+    results, _ = db.search_attachments(
+        query="cc recipient",
+        recipient="cc-recipient@example.com",
+    )
+    assert any(result.attachment_id == att_id for result in results)
 
 
 def test_search_attachments_honors_email_level_account_filter(test_pool, test_settings):

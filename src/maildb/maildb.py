@@ -46,6 +46,22 @@ SELECT_COLS = """
 """
 
 
+def _order_clause(order: str, *, qualifier: str = "") -> str:
+    """Return the deterministic SQL ORDER BY clause for a validated public order."""
+    if order not in VALID_ORDERS:
+        msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
+        raise ValueError(msg)
+
+    prefix = f"{qualifier}." if qualifier else ""
+    if order == "date DESC":
+        return f"{prefix}date DESC NULLS LAST, {prefix}id"
+    if order == "date ASC":
+        return f"{prefix}date ASC NULLS FIRST, {prefix}id"
+    if order == "sender_address DESC":
+        return f"{prefix}sender_address DESC, {prefix}id"
+    return f"{prefix}sender_address ASC, {prefix}id"
+
+
 def _query_dicts(
     pool: ConnectionPool,
     sql: str,
@@ -55,6 +71,27 @@ def _query_dicts(
     logger.debug("sql_execute", sql=sql, params=params)
     t0 = time.monotonic()
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        rows = [dict(row) for row in cur.fetchall()]
+    elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.debug("sql_complete", rows=len(rows), elapsed_ms=elapsed_ms)
+    return rows
+
+
+def _query_dicts_with_hnsw_ef_search(
+    pool: ConnectionPool,
+    sql: str,
+    params: dict[str, Any],
+    *,
+    ef_search: str,
+) -> list[dict[str, Any]]:
+    """Execute a vector query after raising transaction-local HNSW search breadth."""
+    logger.debug("sql_execute", sql=sql, params=params, ef_search=ef_search)
+    t0 = time.monotonic()
+    with pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT set_config('hnsw.ef_search', %(ef_search)s, true)", {"ef_search": ef_search}
+        )
         cur.execute(sql, params)
         rows = [dict(row) for row in cur.fetchall()]
     elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -162,11 +199,11 @@ class MailDB:
             params["sender_domain"] = sender_domain
         if recipient is not None:
             conditions.append(
-                "(recipients->'to' @> %(recipient_json)s "
-                "OR recipients->'cc' @> %(recipient_json)s "
-                "OR recipients->'bcc' @> %(recipient_json)s)"
+                "(recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
             )
-            params["recipient_json"] = json.dumps([recipient])
+            params["recipient_arr"] = json.dumps([recipient])
         if after is not None:
             conditions.append("date >= %(after)s")
             params["after"] = after
@@ -247,9 +284,7 @@ class MailDB:
         account: str | None = None,
     ) -> tuple[list[Email], int]:
         """Structured query with dynamic WHERE clauses. Returns (emails, total_count)."""
-        if order not in VALID_ORDERS:
-            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
-            raise ValueError(msg)
+        order_sql = _order_clause(order)
 
         conditions, params = self._build_filters(
             sender=sender,
@@ -268,7 +303,7 @@ class MailDB:
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        query = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s OFFSET %(offset)s"
+        query = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
         params["limit"] = limit
         params["offset"] = offset
 
@@ -298,7 +333,11 @@ class MailDB:
         direct_only: bool = False,
         account: str | None = None,
     ) -> tuple[list[SearchResult], int]:
-        """Semantic search with optional structured filters. Returns (results, total_count)."""
+        """Semantic search with optional structured filters.
+
+        Returns total as an approximate count of results seen so far
+        (offset + rows returned), not an exact match count.
+        """
         query_embedding = self._embedding_client.embed(query)
 
         conditions, params = self._build_filters(
@@ -322,8 +361,7 @@ class MailDB:
         where = " AND ".join(conditions)
         sql = f"""
             SELECT {SELECT_COLS},
-                   1 - (embedding <=> %(query_embedding)s::vector) AS similarity,
-                   COUNT(*) OVER() AS _total
+                   1 - (embedding <=> %(query_embedding)s::vector) AS similarity
             FROM emails
             WHERE {where}
             ORDER BY embedding <=> %(query_embedding)s::vector
@@ -332,10 +370,13 @@ class MailDB:
         params["limit"] = limit
         params["offset"] = offset
 
-        rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
+        rows = _query_dicts_with_hnsw_ef_search(
+            self._pool,
+            sql,
+            params,
+            ef_search=str(max(40, limit + offset)),
+        )
+        total = offset + len(rows)
         return [
             SearchResult(
                 email=Email.from_row(row),
@@ -631,7 +672,7 @@ class MailDB:
             raise ValueError(msg)
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC LIMIT 500"
+        sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT 500"
 
         rows = _query_dicts(self._pool, sql, params)
         if not rows:
@@ -697,7 +738,7 @@ class MailDB:
                 SELECT {SELECT_COLS} FROM emails
                 WHERE message_id IN ({placeholders})
                   AND embedding IS NOT NULL
-                ORDER BY date DESC
+                ORDER BY date DESC NULLS LAST, id
             """
             rows = _query_dicts(self._pool, sql, params)
         else:
@@ -705,7 +746,7 @@ class MailDB:
             sql = f"""
                 SELECT {SELECT_COLS} FROM emails
                 WHERE {where_sql} AND embedding IS NOT NULL
-                ORDER BY date DESC LIMIT 500
+                ORDER BY date DESC NULLS LAST, id LIMIT 500
             """
             rows = _query_dicts(self._pool, sql, params)
 
@@ -828,7 +869,7 @@ class MailDB:
                         AND reply.sender_address = ANY(%(user_emails)s)
                         AND reply.date > e.date
                   )
-                ORDER BY e.date DESC
+                ORDER BY e.date DESC NULLS LAST, e.id
                 LIMIT %(limit)s OFFSET %(offset)s
             """
         else:
@@ -851,13 +892,12 @@ class MailDB:
                 params["account"] = account
 
             if recipient:
-                recipient_json = json.dumps([recipient])
                 conditions.append(
-                    "(e.recipients->'to' @> %(recipient_json)s"
-                    " OR e.recipients->'cc' @> %(recipient_json)s"
-                    " OR e.recipients->'bcc' @> %(recipient_json)s)"
+                    "(e.recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb)"
+                    " OR e.recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb)"
+                    " OR e.recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
                 )
-                params["recipient_json"] = recipient_json
+                params["recipient_arr"] = json.dumps([recipient])
                 not_exists = """
                     AND NOT EXISTS (
                         SELECT 1 FROM emails reply
@@ -886,7 +926,7 @@ class MailDB:
                 FROM emails e
                 WHERE {where}
                   {not_exists}
-                ORDER BY e.date DESC
+                ORDER BY e.date DESC NULLS LAST, e.id
                 LIMIT %(limit)s OFFSET %(offset)s
             """
 
@@ -910,19 +950,17 @@ class MailDB:
         Returns emails where address is sender OR is in recipients (to/cc/bcc).
         Default chronological order, higher limit than find().
         """
-        if order not in VALID_ORDERS:
-            msg = f"Invalid order '{order}'. Must be one of: {', '.join(sorted(VALID_ORDERS))}"
-            raise ValueError(msg)
+        order_sql = _order_clause(order)
 
         conditions: list[str] = [
             "(sender_address = %(address)s "
-            "OR recipients->'to' @> %(address_json)s "
-            "OR recipients->'cc' @> %(address_json)s "
-            "OR recipients->'bcc' @> %(address_json)s)"
+            "OR recipients @> jsonb_build_object('to', %(address_arr)s::jsonb) "
+            "OR recipients @> jsonb_build_object('cc', %(address_arr)s::jsonb) "
+            "OR recipients @> jsonb_build_object('bcc', %(address_arr)s::jsonb))"
         ]
         params: dict[str, Any] = {
             "address": address,
-            "address_json": json.dumps([address]),
+            "address_arr": json.dumps([address]),
             "limit": limit,
             "offset": offset,
         }
@@ -935,7 +973,7 @@ class MailDB:
             params["before"] = before
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order} LIMIT %(limit)s OFFSET %(offset)s"
+        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
 
         rows = _query_dicts(self._pool, sql, params)
         total = rows[0]["_total"] if rows else 0
@@ -996,7 +1034,7 @@ class MailDB:
         conditions.extend(rcpt_conditions)
         params.update(rcpt_params)
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY date DESC LIMIT %(limit)s OFFSET %(offset)s"
+        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT %(limit)s OFFSET %(offset)s"
         rows = _query_dicts(self._pool, sql, params)
         total = rows[0]["_total"] if rows else 0
         for row in rows:
@@ -1022,7 +1060,11 @@ class MailDB:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[AttachmentSearchResult], int]:
-        """Semantic search over attachment chunk embeddings."""
+        """Semantic search over attachment chunk embeddings.
+
+        Returns total as an approximate count of results seen so far
+        (offset + rows returned), not an exact match count.
+        """
         query_embedding = self._embedding_client.embed(query)
 
         # Build email-level conditions directly with `e.` prefixes — safer than
@@ -1039,11 +1081,11 @@ class MailDB:
             params["sender_domain"] = sender_domain
         if recipient is not None:
             conditions.append(
-                "(e.recipients->'to' @> %(recipient_json)s "
-                "OR e.recipients->'cc' @> %(recipient_json)s "
-                "OR e.recipients->'bcc' @> %(recipient_json)s)"
+                "(e.recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb) "
+                "OR e.recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb) "
+                "OR e.recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
             )
-            params["recipient_json"] = json.dumps([recipient])
+            params["recipient_arr"] = json.dumps([recipient])
         if after is not None:
             conditions.append("e.date >= %(after)s")
             params["after"] = after
@@ -1108,8 +1150,7 @@ class MailDB:
                    (SELECT COALESCE(array_agg(e2.message_id), ARRAY[]::text[])
                       FROM email_attachments ea2
                       JOIN emails e2 ON e2.id = ea2.email_id
-                     WHERE ea2.attachment_id = ac.attachment_id) AS email_message_ids,
-                   COUNT(*) OVER() AS _total
+                     WHERE ea2.attachment_id = ac.attachment_id) AS email_message_ids
             FROM attachment_chunks ac
             JOIN attachments a ON a.id = ac.attachment_id
             JOIN attachment_contents co
@@ -1122,8 +1163,13 @@ class MailDB:
             LIMIT %(limit)s OFFSET %(offset)s
         """
 
-        rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
+        rows = _query_dicts_with_hnsw_ef_search(
+            self._pool,
+            sql,
+            params,
+            ef_search=str(max(40, limit + offset)),
+        )
+        total = offset + len(rows)
         results = []
         for row in rows:
             chunk = AttachmentChunk(
@@ -1191,8 +1237,12 @@ class MailDB:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[UnifiedSearchResult], int]:
-        """Run both email and attachment searches, merge by similarity."""
-        over_fetch = max(2 * (limit + offset), limit + offset)
+        """Run both email and attachment searches, merge by similarity.
+
+        The returned total is a lower-bound approximation over the merged
+        over-fetched results, not an exact count across both corpora.
+        """
+        over_fetch = 2 * (limit + offset)
         email_hits, _ = self.search(
             query,
             sender=sender,

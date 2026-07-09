@@ -6,6 +6,8 @@ CREATE INDEX IF NOT EXISTS idx_email_in_reply_to ON emails (in_reply_to);
 CREATE INDEX IF NOT EXISTS idx_email_has_attachment ON emails (has_attachment) WHERE has_attachment = TRUE;
 CREATE INDEX IF NOT EXISTS idx_email_labels ON emails USING GIN (labels);
 CREATE INDEX IF NOT EXISTS idx_email_recipients ON emails USING GIN (recipients);
+CREATE INDEX IF NOT EXISTS idx_email_body_trgm ON emails USING gin (body_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_email_subject_trgm ON emails USING gin (subject gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_email_thread_sender_date ON emails (thread_id, sender_address, date);
 CREATE INDEX IF NOT EXISTS idx_email_attachments_email_id ON email_attachments (email_id);
 CREATE INDEX IF NOT EXISTS idx_email_attachments_attachment_id ON email_attachments (attachment_id);

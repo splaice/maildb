@@ -19,6 +19,8 @@ DROP_INDEXES = [
     "idx_email_has_attachment",
     "idx_email_labels",
     "idx_email_recipients",
+    "idx_email_body_trgm",
+    "idx_email_subject_trgm",
     "idx_email_embedding",
     "idx_email_thread_sender_date",
     "idx_email_attachments_email_id",
