@@ -1,4 +1,4 @@
-"""Unified maildb CLI — `serve`, `ingest run/status/reset/migrate`."""
+"""Unified maildb CLI — `serve`, `ingest run/status/reset/migrate/repair-threads`."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from maildb.ingest.process_attachments import (
 from maildb.ingest.process_attachments import (
     sweep_empty_extractions as pa_sweep_empty_extractions,
 )
+from maildb.ingest.threads import repair_thread_ids
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -363,6 +364,19 @@ def ingest_migrate(
     finally:
         pool.close()
     typer.echo(f"Backfilled {result['rows_updated']} rows with source_account={account}")
+
+
+@ingest_app.command("repair-threads")
+def ingest_repair_threads() -> None:
+    """Backfill repaired thread_id values across existing emails."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        updated = repair_thread_ids(pool)
+    finally:
+        pool.close()
+    typer.echo(f"Thread repair complete. updated={updated}")
 
 
 process_app = typer.Typer(

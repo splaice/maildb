@@ -50,6 +50,13 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
         assert cur.fetchone()[0] > 0
+        cur = conn.execute(
+            """SELECT count(DISTINCT thread_id)
+               FROM emails
+               WHERE message_id = ANY(%(ids)s)""",
+            {"ids": ["msg001@example.com", "msg002@example.com", "msg003@example.com"]},
+        )
+        assert cur.fetchone()[0] == 1
 
 
 def test_run_pipeline_reclaims_stale_parse_task(test_pool, test_settings, tmp_path):
