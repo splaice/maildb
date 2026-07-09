@@ -18,6 +18,9 @@ def split_mbox(
 ) -> list[Path]:
     """Split an mbox file into chunks of approximately chunk_size_bytes.
 
+    The caller must pass a per-import output_dir because this function clears
+    and recreates it before writing chunks.
+
     Returns list of chunk file paths.
     """
     mbox_path = Path(mbox_path)

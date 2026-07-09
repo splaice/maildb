@@ -64,6 +64,7 @@ def process_chunk(
     *,
     database_url: str,
     attachment_dir: Path | str,
+    import_id: Any,
 ) -> int:
     """Claim and process chunks in a loop until no work remains. Returns chunks processed."""
     attachment_dir = Path(attachment_dir)
@@ -76,22 +77,22 @@ def process_chunk(
 
     try:
         while True:
-            claimed = claim_task(pool, phase="parse", worker_id=worker_id)
+            claimed = claim_task(pool, phase="parse", worker_id=worker_id, import_id=import_id)
             if claimed is None:
                 break
             task_id = claimed["id"]
             chunk_path = claimed["chunk_path"]
-            import_id = claimed["import_id"]
-            if import_id not in account_cache:
-                account_cache[import_id] = _lookup_source_account(pool, import_id)
-            source_account = account_cache[import_id]
+            task_import_id = claimed["import_id"]
+            if task_import_id not in account_cache:
+                account_cache[task_import_id] = _lookup_source_account(pool, task_import_id)
+            source_account = account_cache[task_import_id]
             try:
                 _process_single_chunk(
                     pool,
                     task_id,
                     chunk_path,
                     attachment_dir,
-                    import_id=import_id,
+                    import_id=task_import_id,
                     source_account=source_account,
                 )
                 chunks_processed += 1

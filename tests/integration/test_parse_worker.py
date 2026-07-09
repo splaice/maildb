@@ -5,9 +5,10 @@ from uuid import uuid4
 
 import pytest
 
+from maildb.ingest import tasks as ingest_tasks
 from maildb.ingest.orchestrator import run_pipeline
 from maildb.ingest.parse import process_chunk
-from maildb.ingest.tasks import create_task, get_phase_status
+from maildb.ingest.tasks import claim_task, create_task, get_phase_status
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -39,6 +40,7 @@ def test_process_chunk_inserts_emails(test_pool, test_settings, tmp_path):
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",
+        import_id=import_id,
     )
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
@@ -88,6 +90,7 @@ def test_process_chunk_skips_bad_rows(test_pool, test_settings, tmp_path):
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",
+        import_id=import_id,
     )
     status = get_phase_status(test_pool, "parse")
     assert status["completed"] == 1
@@ -108,9 +111,90 @@ def test_process_chunk_handles_failure(test_pool, test_settings, tmp_path):
     process_chunk(
         database_url=test_settings.database_url,
         attachment_dir=tmp_path / "attachments",
+        import_id=import_id,
     )
     status = get_phase_status(test_pool, "parse")
     assert status["failed"] == 1
+
+
+def test_claim_task_with_import_id_only_claims_that_import(test_pool):
+    import_a = _insert_import(test_pool, account="a@example.com")
+    import_b = _insert_import(test_pool, account="b@example.com")
+    task_a = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/tmp/a.mbox",
+        import_id=import_a,
+    )
+    task_b = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/tmp/b.mbox",
+        import_id=import_b,
+    )
+
+    claimed = claim_task(
+        test_pool,
+        phase="parse",
+        worker_id="worker-a",
+        import_id=import_a,
+    )
+
+    assert claimed is not None
+    assert claimed["id"] == task_a["id"]
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status FROM ingest_tasks WHERE id = %(id)s",
+            {"id": task_b["id"]},
+        )
+        assert cur.fetchone()[0] == "pending"
+
+
+def test_reset_stale_in_progress_only_resets_given_import(test_pool):
+    import_a = _insert_import(test_pool, account="a@example.com")
+    import_b = _insert_import(test_pool, account="b@example.com")
+    stale_a = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/tmp/a-stale.mbox",
+        import_id=import_a,
+    )
+    stale_b = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/tmp/b-stale.mbox",
+        import_id=import_b,
+    )
+    pending_a = create_task(
+        test_pool,
+        phase="parse",
+        chunk_path="/tmp/a-pending.mbox",
+        import_id=import_a,
+    )
+    index_a = create_task(test_pool, phase="index", import_id=import_a)
+
+    claim_task(test_pool, phase="parse", worker_id="worker-a", import_id=import_a)
+    claim_task(test_pool, phase="parse", worker_id="worker-b", import_id=import_b)
+    claim_task(test_pool, phase="index", worker_id="worker-index", import_id=import_a)
+
+    count = ingest_tasks.reset_stale_in_progress(
+        test_pool,
+        phase="parse",
+        import_id=import_a,
+    )
+
+    assert count == 1
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT id, status, worker_id, started_at FROM ingest_tasks "
+            "WHERE id = ANY(%(ids)s) ORDER BY id",
+            {"ids": [stale_a["id"], stale_b["id"], pending_a["id"], index_a["id"]]},
+        )
+        rows = {row[0]: row[1:] for row in cur.fetchall()}
+    assert rows[stale_a["id"]] == ("pending", None, None)
+    assert rows[stale_b["id"]][0] == "in_progress"
+    assert rows[pending_a["id"]][0] == "pending"
+    assert rows[index_a["id"]][0] == "in_progress"
 
 
 def test_parse_increments_reference_count(test_pool, test_settings, tmp_path):

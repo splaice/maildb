@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
 from psycopg_pool import ConnectionPool
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 from maildb.ingest.embed import embed_worker
 from maildb.ingest.index import create_hnsw_index, drop_non_unique_indexes, run_index_phase
 from maildb.ingest.parse import process_chunk
 from maildb.ingest.split import split_mbox
-from maildb.ingest.tasks import complete_task, create_task, get_phase_status, reset_failed_tasks
+from maildb.ingest.tasks import (
+    complete_task,
+    create_task,
+    get_phase_status,
+    reset_failed_tasks,
+    reset_stale_in_progress,
+)
 
 logger = structlog.get_logger()
 
@@ -193,7 +197,9 @@ def run_pipeline(
                 logger.info("phase_start", phase="split")
                 split_task = create_task(pool, phase="split", import_id=import_id)
                 chunks = split_mbox(
-                    mbox_path, output_dir=tmp_dir, chunk_size_bytes=chunk_size_bytes
+                    mbox_path,
+                    output_dir=Path(tmp_dir) / str(import_id),
+                    chunk_size_bytes=chunk_size_bytes,
                 )
                 for chunk_path in chunks:
                     create_task(
@@ -207,6 +213,9 @@ def run_pipeline(
 
             # Phase 2: Parse
             reset_failed_tasks(pool, phase="parse", import_id=import_id)
+            reclaimed = reset_stale_in_progress(pool, phase="parse", import_id=import_id)
+            if reclaimed > 0:
+                logger.info("stale_tasks_reclaimed", phase="parse", count=reclaimed)
             parse_status = get_phase_status(pool, "parse", import_id=import_id)
             if parse_status["pending"] > 0 or parse_status["in_progress"] > 0:
                 logger.info("phase_start", phase="parse", pending=parse_status["pending"])
@@ -218,6 +227,7 @@ def run_pipeline(
                             process_chunk,
                             database_url=database_url,
                             attachment_dir=attachment_dir,
+                            import_id=import_id,
                         )
                         for _ in range(parse_workers)
                     ]
@@ -235,6 +245,16 @@ def run_pipeline(
                 msg = (
                     f"Parse phase has {parse_status['failed']} permanently failed tasks. "
                     "Fix errors and retry."
+                )
+                raise RuntimeError(msg)  # noqa: TRY301
+            if parse_status["in_progress"] > 0:
+                logger.error(
+                    "parse_phase_has_in_progress_tasks",
+                    in_progress=parse_status["in_progress"],
+                )
+                msg = (
+                    f"Parse phase has {parse_status['in_progress']} tasks still in progress "
+                    "after workers exited. Retry the import."
                 )
                 raise RuntimeError(msg)  # noqa: TRY301
 

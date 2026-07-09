@@ -33,21 +33,25 @@ def claim_task(
     *,
     phase: str,
     worker_id: str,
+    import_id: Any = None,
 ) -> dict[str, Any] | None:
     """Atomically claim the next pending task for a phase. Returns None if no work."""
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """UPDATE ingest_tasks
+        sql = """UPDATE ingest_tasks
                SET status = 'in_progress', worker_id = %(worker_id)s, started_at = now()
                WHERE id = (
                    SELECT id FROM ingest_tasks
-                   WHERE phase = %(phase)s AND status = 'pending'
+                   WHERE phase = %(phase)s AND status = 'pending'"""
+        params: dict[str, Any] = {"phase": phase, "worker_id": worker_id}
+        if import_id is not None:
+            sql += " AND import_id = %(import_id)s"
+            params["import_id"] = import_id
+        sql += """
                    LIMIT 1
                    FOR UPDATE SKIP LOCKED
                )
-               RETURNING *""",
-            {"phase": phase, "worker_id": worker_id},
-        )
+               RETURNING *"""
+        cur.execute(sql, params)
         row = cur.fetchone()
         conn.commit()
         return dict(row) if row else None
@@ -121,6 +125,26 @@ def reset_failed_tasks(
             sql += " AND import_id = %(import_id)s"
             params["import_id"] = import_id
         cur.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
+
+
+def reset_stale_in_progress(
+    pool: ConnectionPool,
+    *,
+    phase: str,
+    import_id: Any,
+) -> int:
+    """Reset in-progress tasks for one import back to pending. Returns count."""
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE ingest_tasks
+               SET status = 'pending', worker_id = NULL, started_at = NULL
+               WHERE phase = %(phase)s
+                 AND status = 'in_progress'
+                 AND import_id = %(import_id)s""",
+            {"phase": phase, "import_id": import_id},
+        )
         conn.commit()
         return cur.rowcount
 
