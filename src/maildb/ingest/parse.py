@@ -157,12 +157,11 @@ def _process_single_chunk(
     source_account: str,
 ) -> None:
     """Process a single chunk file: parse, extract attachments, insert into DB."""
-    messages = list(parse_mbox(chunk_path))
     email_rows: list[dict] = []
     attachment_meta: list[dict] = []  # {email_id, sha256, filename}
     unique_hashes: dict[str, dict] = {}  # sha256 -> attachment row data
 
-    for msg in messages:
+    for msg in parse_mbox(chunk_path):
         email_id = uuid4()
 
         email_rows.append(
@@ -210,6 +209,7 @@ def _process_single_chunk(
                     "filename": att["filename"],
                 }
             )
+        msg.pop("_attachments_with_data", None)
 
     # Insert rows individually so one bad row doesn't kill the chunk.
     # Use savepoints to isolate failures — rollback to the savepoint keeps
@@ -265,7 +265,7 @@ def _process_single_chunk(
     complete_task(
         pool,
         task_id,
-        messages_total=len(messages),
+        messages_total=len(email_rows),
         messages_inserted=inserted,
         messages_skipped=skipped + errored,
         attachments_extracted=len(unique_hashes),

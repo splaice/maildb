@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import email.header
 import mailbox as mb
+from email.message import Message
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -182,6 +184,78 @@ def test_no_gmail_labels_returns_empty() -> None:
     messages = list(parse_mbox(FIXTURES / "sample.mbox"))
     msg = messages[0]  # msg001 — no Gmail labels
     assert msg["labels"] == []
+
+
+def test_parse_message_decodes_rfc2047_subject_and_from() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<encoded-word-test@example.com>"
+    msg["From"] = "=?UTF-8?Q?Gr=C3=BC=C3=9Fe?= <x@y.com>"
+    msg["To"] = "to@example.com"
+    msg["Subject"] = "=?UTF-8?B?R3LDvMOfZQ==?="
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+
+    result = parse_message(mb.mboxMessage(msg))
+
+    assert result is not None
+    assert result["subject"] == "Grüße"
+    assert result["sender_name"] == "Grüße"
+
+
+def test_parse_message_keeps_malformed_encoded_word_as_string() -> None:
+    msg = MIMEText("body")
+    msg["Message-ID"] = "<malformed-encoded-word-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "to@example.com"
+    msg["Subject"] = "=?bogus-charset?B?????="
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+
+    result = parse_message(mb.mboxMessage(msg))
+
+    assert result is not None
+    assert isinstance(result["subject"], str)
+
+
+def test_parse_message_decodes_non_multipart_body_charset() -> None:
+    msg = MIMEText("café", "plain", "iso-8859-1")
+    msg["Message-ID"] = "<latin1-body-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "to@example.com"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+
+    result = parse_message(mb.mboxMessage(msg))
+
+    assert result is not None
+    assert result["body_text"] == "café"
+
+
+def test_parse_message_decodes_multipart_body_charset() -> None:
+    msg = MIMEMultipart()
+    msg["Message-ID"] = "<multipart-latin1-body-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "to@example.com"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    msg.attach(MIMEText("café", "plain", "iso-8859-1"))
+
+    result = parse_message(mb.mboxMessage(msg))
+
+    assert result is not None
+    assert result["body_text"] == "café"
+
+
+def test_parse_message_bogus_charset_falls_back_to_utf8() -> None:
+    msg = Message()
+    msg["Message-ID"] = "<bogus-charset-body-test@example.com>"
+    msg["From"] = "test@example.com"
+    msg["To"] = "to@example.com"
+    msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    msg["Content-Type"] = "text/plain; charset=not-a-real-charset"
+    msg["Content-Transfer-Encoding"] = "8bit"
+    msg.set_payload("café".encode())
+
+    result = parse_message(mb.mboxMessage(msg))
+
+    assert result is not None
+    assert result["body_text"] == "café"
 
 
 def _make_msg_with_header(name: str, value: object) -> mb.mboxMessage:
