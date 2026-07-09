@@ -31,6 +31,7 @@ def _insert_import(pool, account: str = "test@example.com"):
 
 def test_process_chunk_inserts_emails(test_pool, test_settings, tmp_path):
     import_id = _insert_import(test_pool)
+    attachment_dir = tmp_path / "attachments"
     create_task(
         test_pool,
         phase="parse",
@@ -39,13 +40,20 @@ def test_process_chunk_inserts_emails(test_pool, test_settings, tmp_path):
     )
     process_chunk(
         database_url=test_settings.database_url,
-        attachment_dir=tmp_path / "attachments",
+        attachment_dir=attachment_dir,
         import_id=import_id,
     )
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
         count = cur.fetchone()[0]
-    assert count > 0
+        cur = conn.execute("SELECT storage_path FROM attachments")
+        attachment_paths = [row[0] for row in cur.fetchall()]
+        cur = conn.execute("SELECT count(*) FROM email_attachments")
+        email_attachment_count = cur.fetchone()[0]
+    assert count == 10
+    assert attachment_paths
+    assert all((attachment_dir / path).exists() for path in attachment_paths)
+    assert email_attachment_count == len(attachment_paths)
     status = get_phase_status(test_pool, "parse")
     assert status["completed"] == 1
 

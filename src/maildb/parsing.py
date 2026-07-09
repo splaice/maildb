@@ -1,6 +1,7 @@
 # src/maildb/parsing.py
 from __future__ import annotations
 
+import email.header
 import email.utils
 import mailbox
 import re
@@ -67,6 +68,10 @@ def _safe_header(msg: mailbox.mboxMessage, name: str) -> str | None:
     except Exception:
         logger.warning("header_decode_failed", header=name)
         return None
+    try:  # noqa: SIM105
+        result = str(email.header.make_header(email.header.decode_header(result)))
+    except Exception:  # noqa: S110
+        pass  # keep the raw string — malformed encoded-words must never lose the header
     return result.replace("\x00", "")
 
 
@@ -88,6 +93,14 @@ def _derive_thread_id(message_id: str, references: list[str], in_reply_to: str |
     return message_id
 
 
+def _decode_payload(payload: bytes, part: mailbox.mboxMessage | Any) -> str:
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
 def _extract_body(msg: mailbox.mboxMessage) -> tuple[str | None, str | None]:
     text_body: str | None = None
     html_body: str | None = None
@@ -101,16 +114,16 @@ def _extract_body(msg: mailbox.mboxMessage) -> tuple[str | None, str | None]:
             if content_type == "text/plain" and text_body is None:
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
-                    text_body = payload.decode("utf-8", errors="replace")
+                    text_body = _decode_payload(payload, part)
             elif content_type == "text/html" and html_body is None:
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
-                    html_body = payload.decode("utf-8", errors="replace")
+                    html_body = _decode_payload(payload, part)
     else:
         content_type = msg.get_content_type()
         payload = msg.get_payload(decode=True)
         if isinstance(payload, bytes):
-            decoded = payload.decode("utf-8", errors="replace")
+            decoded = _decode_payload(payload, msg)
             if content_type == "text/html":
                 html_body = decoded
             else:
