@@ -197,13 +197,15 @@ def parse_query(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     select_aliases: set[str] = set()
     alias_exprs: dict[str, str] = {}
-    select_exprs = _resolve_select(
-        spec.get("select"), allowed, has_group_by, select_aliases, alias_exprs
-    )
+    raw_select = spec.get("select")
+    has_aggregates = any(any(agg in item for agg in _AGGREGATES) for item in raw_select or [])
+    select_exprs = _resolve_select(raw_select, allowed, has_group_by, select_aliases, alias_exprs)
     where_sql = _resolve_where(spec.get("where"), allowed, acc)
     group_sql = _resolve_group_by(spec.get("group_by"), allowed, select_aliases, alias_exprs)
     having_sql = _resolve_having(spec.get("having"), allowed, select_aliases, acc, alias_exprs)
-    order_sql = _resolve_order_by(spec.get("order_by"), allowed, select_aliases, has_group_by)
+    order_sql = _resolve_order_by(
+        spec.get("order_by"), allowed, select_aliases, has_group_by, has_aggregates
+    )
     limit_sql = _resolve_limit(spec.get("limit", 50), spec.get("offset", 0))
 
     table = "source" if source != "emails" else "emails"
@@ -342,9 +344,10 @@ def _resolve_order_by(
     allowed: set[str],
     select_aliases: set[str],
     has_group_by: bool,
+    has_aggregates: bool,
 ) -> str:
     if not order_by:
-        return "" if has_group_by else " ORDER BY date DESC"
+        return "" if (has_group_by or has_aggregates) else " ORDER BY date DESC"
     parts: list[str] = []
     for item in order_by:
         col = item["field"]
@@ -490,12 +493,10 @@ def _build_where(
     """
     # Boolean combinators
     if "and" in where:
-        parts = [_build_where(sub, allowed, acc) for sub in where["and"]]
-        return f"({' AND '.join(parts)})"
+        return _build_where_combinator("and", where["and"], "AND", allowed, acc)
 
     if "or" in where:
-        parts = [_build_where(sub, allowed, acc) for sub in where["or"]]
-        return f"({' OR '.join(parts)})"
+        return _build_where_combinator("or", where["or"], "OR", allowed, acc)
 
     if "not" in where:
         inner = _build_where(where["not"], allowed, acc)
@@ -544,3 +545,17 @@ def _build_where(
     sql_op = _OP_SQL[op]
     pname = acc.add(value)
     return f"{field} {sql_op} %({pname})s"
+
+
+def _build_where_combinator(
+    key: str,
+    conditions: list[dict[str, Any]],
+    joiner: str,
+    allowed: set[str],
+    acc: _ParamAccumulator,
+) -> str:
+    if not conditions:
+        msg = f"'{key}' requires at least one condition"
+        raise ValueError(msg)
+    parts = [_build_where(sub, allowed, acc) for sub in conditions]
+    return f"({f' {joiner} '.join(parts)})"
