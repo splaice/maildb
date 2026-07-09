@@ -38,6 +38,8 @@ VALID_ORDERS = {
     "sender_address DESC",
 }
 
+VALID_CONTACT_KINDS = frozenset({"human", "organization", "automated", "mailing_list", "unknown"})
+
 # Standard reciprocal-rank-fusion constant; higher values flatten the rank penalty.
 RRF_K = 60
 
@@ -1196,6 +1198,257 @@ class MailDB:
                 )
             )
         return results, total
+
+    # --- Contacts address book ---
+
+    def contacts_search(
+        self,
+        *,
+        query: str | None = None,
+        kind: str | None = None,
+        tag: str | None = None,
+        min_human_probability: float | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Search the contacts address book. Returns (contacts, total_count).
+
+        Joins contacts ← contact_addresses (aggregated per contact). Excludes
+        contacts whose every address is the user. Order is by total message
+        volume DESC, then last_seen DESC NULLS LAST, then id.
+        """
+        conditions: list[str] = ["NOT only_user"]
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+        if kind is not None:
+            conditions.append("kind = %(kind)s")
+            params["kind"] = kind
+        if tag is not None:
+            conditions.append("%(tag)s = ANY(tags)")
+            params["tag"] = tag
+        if min_human_probability is not None:
+            conditions.append("human_probability >= %(min_human_probability)s")
+            params["min_human_probability"] = min_human_probability
+        if query is not None:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params["query_pattern"] = f"%{escaped}%"
+            conditions.append(
+                "("
+                "display_name ILIKE %(query_pattern)s ESCAPE '\\' "
+                "OR EXISTS ("
+                "  SELECT 1 FROM unnest(name_variants) AS nv "
+                "  WHERE nv ILIKE %(query_pattern)s ESCAPE '\\'"
+                ") "
+                "OR EXISTS ("
+                "  SELECT 1 FROM unnest(addresses) AS addr "
+                "  WHERE addr ILIKE %(query_pattern)s ESCAPE '\\'"
+                ")"
+                ")"
+            )
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            WITH contact_stats AS (
+                SELECT
+                    c.id,
+                    c.display_name,
+                    c.kind,
+                    c.kind_source,
+                    c.tags,
+                    c.human_probability,
+                    array_agg(DISTINCT ca.address ORDER BY ca.address) AS addresses,
+                    coalesce(
+                        (
+                            SELECT array_agg(DISTINCT v ORDER BY v)
+                              FROM contact_addresses ca2
+                              LEFT JOIN LATERAL unnest(ca2.name_variants) AS v ON TRUE
+                             WHERE ca2.contact_id = c.id AND v IS NOT NULL
+                        ),
+                        '{{}}'::text[]
+                    ) AS name_variants,
+                    coalesce(sum(ca.messages_from), 0)::int AS messages_from,
+                    coalesce(sum(ca.messages_to), 0)::int AS messages_to,
+                    min(ca.first_seen) AS first_seen,
+                    max(ca.last_seen) AS last_seen,
+                    bool_and(ca.is_user) AS only_user
+                  FROM contacts c
+                  JOIN contact_addresses ca ON ca.contact_id = c.id
+                 GROUP BY c.id
+            )
+            SELECT
+                id, display_name, kind, kind_source, tags, human_probability,
+                addresses, name_variants, messages_from, messages_to,
+                first_seen, last_seen,
+                COUNT(*) OVER() AS _total
+              FROM contact_stats
+             WHERE {where}
+             ORDER BY (messages_from + messages_to) DESC,
+                      last_seen DESC NULLS LAST,
+                      id
+             LIMIT %(limit)s OFFSET %(offset)s
+        """
+        rows = _query_dicts(self._pool, sql, params)
+        total = rows[0]["_total"] if rows else 0
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            row.pop("_total", None)
+            results.append(self._format_contact_row(row, full=False))
+        return results, total
+
+    def get_contact(
+        self,
+        *,
+        address: str | None = None,
+        contact_id: UUID | str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a full contact card by address or contact_id.
+
+        Exactly one of address/contact_id is required. Address lookup is
+        normalized to lowercase. Returns None if not found.
+        """
+        if (address is None) == (contact_id is None):
+            msg = "Exactly one of address or contact_id is required"
+            raise ValueError(msg)
+
+        if address is not None:
+            params: dict[str, Any] = {"address": address.lower().strip()}
+            id_filter = """
+                c.id = (
+                    SELECT ca0.contact_id FROM contact_addresses ca0
+                     WHERE ca0.address = %(address)s
+                )
+            """
+        else:
+            params = {"contact_id": contact_id}
+            id_filter = "c.id = %(contact_id)s"
+
+        sql = f"""
+            SELECT
+                c.id,
+                c.display_name,
+                c.kind,
+                c.kind_source,
+                c.tags,
+                c.notes,
+                c.metadata,
+                c.human_probability,
+                c.classification_signals,
+                c.classified_at,
+                array_agg(DISTINCT ca.address ORDER BY ca.address) AS addresses,
+                coalesce(
+                    (
+                        SELECT array_agg(DISTINCT v ORDER BY v)
+                          FROM contact_addresses ca2
+                          LEFT JOIN LATERAL unnest(ca2.name_variants) AS v ON TRUE
+                         WHERE ca2.contact_id = c.id AND v IS NOT NULL
+                    ),
+                    '{{}}'::text[]
+                ) AS name_variants,
+                coalesce(sum(ca.messages_from), 0)::int AS messages_from,
+                coalesce(sum(ca.messages_to), 0)::int AS messages_to,
+                min(ca.first_seen) AS first_seen,
+                max(ca.last_seen) AS last_seen
+              FROM contacts c
+              JOIN contact_addresses ca ON ca.contact_id = c.id
+             WHERE {id_filter}
+             GROUP BY c.id
+        """
+        row = _query_one_dict(self._pool, sql, params)
+        if row is None:
+            return None
+        return self._format_contact_row(row, full=True)
+
+    def update_contact(
+        self,
+        *,
+        contact_id: UUID | str,
+        kind: str | None = None,
+        tags: list[str] | None = None,
+        notes: str | None = None,
+        display_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Curation-only write for a single contact.
+
+        Updates only the provided fields. Setting kind also sets
+        kind_source='manual'. Raises ValueError if the kind is invalid or the
+        contact does not exist.
+        """
+        if kind is not None and kind not in VALID_CONTACT_KINDS:
+            msg = (
+                f"Invalid kind {kind!r}. Must be one of: {', '.join(sorted(VALID_CONTACT_KINDS))}"
+            )
+            raise ValueError(msg)
+
+        sets: list[str] = []
+        params: dict[str, Any] = {"contact_id": contact_id}
+        if kind is not None:
+            sets.append("kind = %(kind)s")
+            sets.append("kind_source = 'manual'")
+            params["kind"] = kind
+        if tags is not None:
+            sets.append("tags = %(tags)s")
+            params["tags"] = tags
+        if notes is not None:
+            sets.append("notes = %(notes)s")
+            params["notes"] = notes
+        if display_name is not None:
+            sets.append("display_name = %(display_name)s")
+            params["display_name"] = display_name
+
+        if sets:
+            sets.append("updated_at = now()")
+            sql = f"""
+                UPDATE contacts
+                   SET {", ".join(sets)}
+                 WHERE id = %(contact_id)s
+             RETURNING id
+            """
+            row = _query_one_dict(self._pool, sql, params)
+            if row is None:
+                msg = f"Contact {contact_id} does not exist"
+                raise ValueError(msg)
+        else:
+            # No fields to update — still verify existence.
+            exists = _query_one_dict(
+                self._pool,
+                "SELECT id FROM contacts WHERE id = %(contact_id)s",
+                params,
+            )
+            if exists is None:
+                msg = f"Contact {contact_id} does not exist"
+                raise ValueError(msg)
+
+        card = self.get_contact(contact_id=contact_id)
+        if card is None:
+            msg = f"Contact {contact_id} does not exist"
+            raise ValueError(msg)
+        return card
+
+    @staticmethod
+    def _format_contact_row(row: dict[str, Any], *, full: bool) -> dict[str, Any]:
+        """Normalize a contact row to the public dict shape."""
+        out: dict[str, Any] = {
+            "id": str(row["id"]) if row.get("id") is not None else None,
+            "display_name": row.get("display_name"),
+            "kind": row.get("kind"),
+            "kind_source": row.get("kind_source"),
+            "tags": list(row["tags"]) if row.get("tags") is not None else [],
+            "human_probability": row.get("human_probability"),
+            "addresses": list(row["addresses"]) if row.get("addresses") is not None else [],
+            "name_variants": (
+                list(row["name_variants"]) if row.get("name_variants") is not None else []
+            ),
+            "messages_from": row.get("messages_from") or 0,
+            "messages_to": row.get("messages_to") or 0,
+            "first_seen": row.get("first_seen"),
+            "last_seen": row.get("last_seen"),
+        }
+        if full:
+            out["notes"] = row.get("notes")
+            out["metadata"] = row.get("metadata") if row.get("metadata") is not None else {}
+            out["classification_signals"] = row.get("classification_signals")
+            out["classified_at"] = row.get("classified_at")
+        return out
 
     def get_attachment_markdown(
         self, attachment_id: int, *, account: str | None = None

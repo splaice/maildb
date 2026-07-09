@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
+
 from maildb import server
 from maildb.models import (
     AccountSummary,
@@ -380,3 +382,115 @@ def test_search_all_passes_recipient_count_filters_through() -> None:
     assert kwargs["max_cc"] == 0
     assert kwargs["max_recipients"] == 3
     assert kwargs["direct_only"] is True
+
+
+def test_contacts_tool_passes_params_and_uses_envelope() -> None:
+    mock_db = MagicMock()
+    mock_db.contacts_search.return_value = (
+        [
+            {
+                "id": "c1",
+                "display_name": "Alice",
+                "kind": "unknown",
+                "kind_source": "heuristic",
+                "tags": [],
+                "human_probability": 0.7,
+                "addresses": ["alice@x.com"],
+                "name_variants": ["Alice"],
+                "messages_from": 3,
+                "messages_to": 0,
+                "first_seen": None,
+                "last_seen": None,
+            }
+        ],
+        1,
+    )
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.contacts(
+        ctx,
+        query="Alice",
+        kind="human",
+        tag="vip",
+        min_human_probability=0.5,
+        limit=10,
+        offset=5,
+    )
+    kwargs = mock_db.contacts_search.call_args.kwargs
+    assert kwargs["query"] == "Alice"
+    assert kwargs["kind"] == "human"
+    assert kwargs["tag"] == "vip"
+    assert kwargs["min_human_probability"] == 0.5
+    assert kwargs["limit"] == 10
+    assert kwargs["offset"] == 5
+    assert result["total"] == 1
+    assert result["offset"] == 5
+    assert result["limit"] == 10
+    assert len(result["results"]) == 1
+    assert result["results"][0]["display_name"] == "Alice"
+
+
+def test_get_contact_tool_passes_params() -> None:
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = {
+        "id": "c1",
+        "display_name": "Alice",
+        "notes": None,
+        "metadata": {},
+        "classification_signals": None,
+        "classified_at": None,
+        "addresses": ["alice@x.com"],
+    }
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.get_contact(ctx, address="alice@x.com")
+    mock_db.get_contact.assert_called_once_with(address="alice@x.com", contact_id=None)
+    assert result is not None
+    assert result["id"] == "c1"
+
+    mock_db.reset_mock()
+    mock_db.get_contact.return_value = {"id": "c1"}
+    server.get_contact(ctx, contact_id="c1")
+    mock_db.get_contact.assert_called_once_with(address=None, contact_id="c1")
+
+
+def test_update_contact_tool_passes_params() -> None:
+    mock_db = MagicMock()
+    mock_db.update_contact.return_value = {
+        "id": "c1",
+        "kind": "human",
+        "kind_source": "manual",
+        "tags": ["vip"],
+        "notes": "n",
+        "display_name": "Alice",
+    }
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.update_contact(
+        ctx,
+        contact_id="c1",
+        kind="human",
+        tags=["vip"],
+        notes="n",
+        display_name="Alice",
+    )
+    kwargs = mock_db.update_contact.call_args.kwargs
+    assert kwargs["contact_id"] == "c1"
+    assert kwargs["kind"] == "human"
+    assert kwargs["tags"] == ["vip"]
+    assert kwargs["notes"] == "n"
+    assert kwargs["display_name"] == "Alice"
+    assert result["kind_source"] == "manual"
+
+
+def test_update_contact_tool_surfaces_value_error() -> None:
+    mock_db = MagicMock()
+    mock_db.update_contact.side_effect = ValueError("Invalid kind 'robot'")
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    with pytest.raises(ValueError, match="Invalid kind"):
+        server.update_contact(ctx, contact_id="c1", kind="robot")
