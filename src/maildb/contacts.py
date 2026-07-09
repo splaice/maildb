@@ -125,9 +125,26 @@ def build_contacts(
         if not touched:
             return {"addresses": 0, "contacts_created": 0, "contact_ids": []}
 
-        # Full-corpus stats for touched addresses.
+        # Stage full-corpus stats for touched addresses, then apply set-based.
+        conn.execute(
+            """CREATE TEMP TABLE contacts_staging (
+                   address text PRIMARY KEY,
+                   new_contact_id uuid NOT NULL DEFAULT gen_random_uuid(),
+                   top_name text,
+                   name_variants text[],
+                   is_user boolean,
+                   first_seen timestamptz,
+                   last_seen timestamptz,
+                   messages_from int,
+                   messages_to int
+               ) ON COMMIT DROP"""
+        )
         cur = conn.execute(
             """
+            INSERT INTO contacts_staging (
+                address, top_name, name_variants, is_user,
+                first_seen, last_seen, messages_from, messages_to
+            )
             WITH touched AS (
                 SELECT unnest(%(addrs)s::text[]) AS address
             ),
@@ -207,13 +224,13 @@ def build_contacts(
                   ) rs ON rs.address = t.address
             )
             SELECT t.address,
-                   coalesce(nv.name_variants, '{}'::text[]) AS name_variants,
                    tn.top_name,
-                   coalesce(fs.messages_from, 0) AS messages_from,
-                   coalesce(ts.messages_to, 0) AS messages_to,
+                   coalesce(nv.name_variants, '{}'::text[]) AS name_variants,
+                   (t.address = ANY(%(user_emails)s)) AS is_user,
                    db.first_seen,
                    db.last_seen,
-                   (t.address = ANY(%(user_emails)s)) AS is_user
+                   coalesce(fs.messages_from, 0) AS messages_from,
+                   coalesce(ts.messages_to, 0) AS messages_to
               FROM touched t
               LEFT JOIN name_variants nv ON nv.address = t.address
               LEFT JOIN top_names tn ON tn.address = t.address
@@ -223,99 +240,64 @@ def build_contacts(
             """,
             {"addrs": touched, "user_emails": user_ids},
         )
-        rows = cur.fetchall()
+        addresses_count = max(cur.rowcount, 0)
 
-        contacts_created = 0
-        contact_ids: list[UUID] = []
-        for (
-            address,
-            name_variants,
-            top_name,
-            messages_from,
-            messages_to,
-            first_seen,
-            last_seen,
-            is_user,
-        ) in rows:
-            existing = conn.execute(
-                "SELECT contact_id FROM contact_addresses WHERE address = %(addr)s",
-                {"addr": address},
-            ).fetchone()
-            if existing is None:
-                inserted = conn.execute(
-                    """INSERT INTO contacts (display_name)
-                       VALUES (%(display_name)s)
-                       RETURNING id""",
-                    {"display_name": top_name},
-                ).fetchone()
-                if inserted is None:
-                    msg = "INSERT INTO contacts RETURNING id produced no row"
-                    raise RuntimeError(msg)
-                contact_id = inserted[0]
-                conn.execute(
-                    """INSERT INTO contact_addresses (
-                           address, contact_id, name_variants, is_user,
-                           first_seen, last_seen, messages_from, messages_to
-                       ) VALUES (
-                           %(address)s, %(contact_id)s, %(name_variants)s, %(is_user)s,
-                           %(first_seen)s, %(last_seen)s, %(messages_from)s, %(messages_to)s
-                       )""",
-                    {
-                        "address": address,
-                        "contact_id": contact_id,
-                        "name_variants": name_variants or [],
-                        "is_user": is_user,
-                        "first_seen": first_seen,
-                        "last_seen": last_seen,
-                        "messages_from": messages_from,
-                        "messages_to": messages_to,
-                    },
-                )
-                contacts_created += 1
-                contact_ids.append(contact_id)
-            else:
-                contact_id = existing[0]
-                conn.execute(
-                    """UPDATE contact_addresses
-                          SET name_variants = %(name_variants)s,
-                              is_user = %(is_user)s,
-                              first_seen = %(first_seen)s,
-                              last_seen = %(last_seen)s,
-                              messages_from = %(messages_from)s,
-                              messages_to = %(messages_to)s
-                        WHERE address = %(address)s""",
-                    {
-                        "address": address,
-                        "name_variants": name_variants or [],
-                        "is_user": is_user,
-                        "first_seen": first_seen,
-                        "last_seen": last_seen,
-                        "messages_from": messages_from,
-                        "messages_to": messages_to,
-                    },
-                )
-                contact_ids.append(contact_id)
+        # (c) refresh stats on existing address rows first
+        conn.execute(
+            """UPDATE contact_addresses ca
+                  SET name_variants = s.name_variants,
+                      is_user = s.is_user,
+                      first_seen = s.first_seen,
+                      last_seen = s.last_seen,
+                      messages_from = s.messages_from,
+                      messages_to = s.messages_to
+                 FROM contacts_staging s
+                WHERE ca.address = s.address"""
+        )
+        # (a) new singleton contacts for addresses not yet in contact_addresses
+        cur = conn.execute(
+            """INSERT INTO contacts (id, display_name)
+               SELECT s.new_contact_id, s.top_name
+                 FROM contacts_staging s
+                WHERE NOT EXISTS (
+                          SELECT 1 FROM contact_addresses ca
+                           WHERE ca.address = s.address
+                      )"""
+        )
+        contacts_created = max(cur.rowcount, 0)
+        # (b) matching address rows for those new contacts
+        conn.execute(
+            """INSERT INTO contact_addresses (
+                   address, contact_id, name_variants, is_user,
+                   first_seen, last_seen, messages_from, messages_to
+               )
+               SELECT s.address, s.new_contact_id, s.name_variants, s.is_user,
+                      s.first_seen, s.last_seen, s.messages_from, s.messages_to
+                 FROM contacts_staging s
+                WHERE NOT EXISTS (
+                          SELECT 1 FROM contact_addresses ca
+                           WHERE ca.address = s.address
+                      )"""
+        )
 
+        cur = conn.execute(
+            """SELECT DISTINCT ca.contact_id
+                 FROM contacts_staging s
+                 JOIN contact_addresses ca ON ca.address = s.address"""
+        )
+        contact_ids = [row[0] for row in cur.fetchall()]
         conn.commit()
-
-    # Dedupe contact_ids while preserving order
-    seen_ids: set[UUID] = set()
-    unique_ids: list[UUID] = []
-    for cid in contact_ids:
-        if cid not in seen_ids:
-            seen_ids.add(cid)
-            unique_ids.append(cid)
 
     logger.info(
         "contacts_built",
-        addresses=len(rows),
+        addresses=addresses_count,
         contacts_created=contacts_created,
         import_id=str(import_id) if import_id else None,
     )
     return {
-        "addresses": len(rows),
+        "addresses": addresses_count,
         "contacts_created": contacts_created,
-        "contact_ids": unique_ids,
+        "contact_ids": contact_ids,
     }
 
 
@@ -420,7 +402,7 @@ def classify_contacts(
             )
         rows = cur.fetchall()
 
-        classified = 0
+        updates: list[dict[str, Any]] = []
         for (
             contact_id,
             only_user,
@@ -437,20 +419,25 @@ def classify_contacts(
                 name_variants=list(name_variants or []),
                 addresses=list(addresses or []),
             )
-            conn.execute(
-                """UPDATE contacts
-                      SET human_probability = %(prob)s,
-                          classification_signals = %(signals)s::jsonb,
-                          classified_at = now(),
-                          updated_at = now()
-                    WHERE id = %(id)s""",
+            updates.append(
                 {
                     "prob": probability,
                     "signals": json.dumps(signals),
                     "id": contact_id,
-                },
+                }
             )
-            classified += 1
+        if updates:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """UPDATE contacts
+                          SET human_probability = %(prob)s,
+                              classification_signals = %(signals)s::jsonb,
+                              classified_at = now(),
+                              updated_at = now()
+                        WHERE id = %(id)s""",
+                    updates,
+                )
+        classified = len(updates)
         conn.commit()
 
     logger.info("contacts_classified", count=classified)
