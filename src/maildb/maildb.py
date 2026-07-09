@@ -651,12 +651,20 @@ class MailDB:
         *,
         sender: str | None = None,
         sender_domain: str | None = None,
+        account: str | None = None,
         limit: int = 5,
         offset: int = 0,
     ) -> tuple[list[Email], int]:
         """Representative emails spanning different topics with a contact. Returns (emails, total_count).
 
         Uses greedy farthest-point selection on embeddings.
+
+        Args:
+            sender: Exact sender email address.
+            sender_domain: Sender domain to match.
+            account: Scope to a single source_account. Omit to query across all accounts.
+            limit: Max results to return.
+            offset: Skip first N results.
         """
         conditions: list[str] = ["embedding IS NOT NULL"]
         params: dict[str, Any] = {}
@@ -670,6 +678,10 @@ class MailDB:
         else:
             msg = "Either sender or sender_domain must be provided"
             raise ValueError(msg)
+
+        account_conditions, account_params = self._build_filters(account=account)
+        conditions.extend(account_conditions)
+        params.update(account_params)
 
         where = " AND ".join(conditions)
         sql = f"SELECT {SELECT_COLS} FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT 500"
@@ -942,6 +954,7 @@ class MailDB:
         address: str,
         after: str | None = None,
         before: str | None = None,
+        account: str | None = None,
         limit: int = 500,
         offset: int = 0,
         order: str = "date ASC",
@@ -949,6 +962,15 @@ class MailDB:
         """All emails exchanged with a specific person. Returns (emails, total_count).
         Returns emails where address is sender OR is in recipients (to/cc/bcc).
         Default chronological order, higher limit than find().
+
+        Args:
+            address: Email address to match as sender or recipient.
+            after: Only include emails on or after this date.
+            before: Only include emails before this date.
+            account: Scope to a single source_account. Omit to query across all accounts.
+            limit: Max results to return.
+            offset: Skip first N results.
+            order: Result ordering.
         """
         order_sql = _order_clause(order)
 
@@ -971,6 +993,10 @@ class MailDB:
         if before:
             conditions.append("date < %(before)s")
             params["before"] = before
+
+        account_conditions, account_params = self._build_filters(account=account)
+        conditions.extend(account_conditions)
+        params.update(account_params)
 
         where = " AND ".join(conditions)
         sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"

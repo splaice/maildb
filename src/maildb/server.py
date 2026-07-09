@@ -102,6 +102,19 @@ SERIALIZABLE_EMAIL_FIELDS = frozenset(
 DEFAULT_LIST_FIELDS = SERIALIZABLE_EMAIL_FIELDS - {"body_text"}
 
 
+def _validate_fields(fields: list[str] | None) -> frozenset[str] | None:
+    """Validate a fields projection. Raises ValueError on unknown names."""
+    if not fields:
+        return None
+    unknown = set(fields) - SERIALIZABLE_EMAIL_FIELDS
+    if unknown:
+        msg = (
+            f"Unknown fields {sorted(unknown)}; valid fields: {sorted(SERIALIZABLE_EMAIL_FIELDS)}"
+        )
+        raise ValueError(msg)
+    return frozenset(fields)
+
+
 def _serialize_email(
     email: Any,
     fields: frozenset[str] | None = None,
@@ -257,7 +270,7 @@ def find(
         direct_only=direct_only,
         account=account,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -321,7 +334,7 @@ def search(
         direct_only=direct_only,
         account=account,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_search_result(sr, valid) for sr in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -337,7 +350,8 @@ def get_thread(
 
     Parameters:
       thread_id: the thread identifier (from an email's thread_id field)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
+        Pass ["body_text", ...] to include body content.
 
     Returns list of email dicts ordered by date ASC.
 
@@ -345,7 +359,7 @@ def get_thread(
     """
     db = _get_db(ctx)
     results = db.get_thread(thread_id)
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     return [_serialize_email(e, valid) for e in results]
 
 
@@ -360,7 +374,8 @@ def get_thread_for(
 
     Parameters:
       message_id: the RFC 2822 Message-ID of any email in the thread
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
+        Pass ["body_text", ...] to include body content.
 
     Returns list of email dicts (the full thread) ordered by date ASC. Empty list if not found.
 
@@ -368,7 +383,7 @@ def get_thread_for(
     """
     db = _get_db(ctx)
     results = db.get_thread_for(message_id)
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     return [_serialize_email(e, valid) for e in results]
 
 
@@ -396,7 +411,8 @@ def top_contacts(
       limit: max results (default 10)
       offset: skip first N results for pagination (default 0)
 
-    Returns list of {address: str, count: int} (or {domain: str, count: int} when group_by="domain").
+    Returns {total, offset, limit, results: [{address: str, count: int}, ...]}
+    (or {domain: str, count: int} results when group_by="domain").
 
     Example: top_contacts(group_by="domain", exclude_domains=["mycompany.com"], direction="outbound")
     """
@@ -419,6 +435,7 @@ def topics_with(
     ctx: Context,
     sender: str | None = None,
     sender_domain: str | None = None,
+    account: str | None = None,
     limit: int = 5,
     offset: int = 0,
     fields: list[str] | None = None,
@@ -430,19 +447,26 @@ def topics_with(
     Parameters:
       sender: exact email address (e.g. "bob@acme.com")
       sender_domain: domain to match (e.g. "acme.com") — provide sender OR sender_domain
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: number of diverse representatives (default 5)
       offset: skip first N results for pagination (default 0)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
+        Pass ["body_text", ...] to include body content.
 
-    Returns list of email dicts maximizing topic diversity.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
     Example: topics_with(sender="bob@corp.com", limit=5)
     """
     db = _get_db(ctx)
     results, total = db.topics_with(
-        sender=sender, sender_domain=sender_domain, limit=limit, offset=offset
+        sender=sender,
+        sender_domain=sender_domain,
+        account=account,
+        limit=limit,
+        offset=offset,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -501,7 +525,7 @@ def unreplied(
         offset=offset,
         account=account,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -513,6 +537,7 @@ def correspondence(
     address: str,
     after: str | None = None,
     before: str | None = None,
+    account: str | None = None,
     limit: int = 500,
     offset: int = 0,
     order: str = "date ASC",
@@ -523,6 +548,8 @@ def correspondence(
     Parameters:
       address: the person's email address (required)
       after, before: ISO date range filters
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
       limit: max results (default 500, higher for full relationship history)
       offset: skip first N results for pagination (default 0)
       order: "date ASC" (default, chronological) or "date DESC"
@@ -534,9 +561,15 @@ def correspondence(
     """
     db = _get_db(ctx)
     results, total = db.correspondence(
-        address=address, after=after, before=before, limit=limit, offset=offset, order=order
+        address=address,
+        after=after,
+        before=before,
+        account=account,
+        limit=limit,
+        offset=offset,
+        order=order,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -593,7 +626,7 @@ def mention_search(
         direct_only=direct_only,
         account=account,
     )
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -617,15 +650,16 @@ def cluster(
       message_ids: explicit list of message_id strings (for chaining with other tools)
       limit: number of diverse representatives (default 5)
       offset: skip first N results for pagination (default 0)
-      fields: list of field names to return (default: all)
+      fields: list of field names to return. Default returns headers + body_length (no body_text).
+        Pass ["body_text", ...] to include body content.
 
-    Returns list of email dicts maximizing topic diversity via farthest-point selection.
+    Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
 
     Example: cluster(where={"and": [{"field": "sender_domain", "eq": "stripe.com"}, {"field": "date", "gte": "2024-01-01"}]}, limit=5)
     """
     db = _get_db(ctx)
     results, total = db.cluster(where=where, message_ids=message_ids, limit=limit, offset=offset)
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
     return _wrap_response(serialized, total=total, offset=offset, limit=limit)
 
@@ -652,7 +686,7 @@ def long_threads(
       limit: maximum number of threads to return (default 50)
       offset: skip first N results for pagination (default 0)
 
-    Returns list of {thread_id, message_count, first_date, last_date, participants[]}.
+    Returns {total, offset, limit, results: [{thread_id, message_count, first_date, last_date, participants[]}, ...]}.
 
     Example: long_threads(min_messages=10, participant="alice@example.com")
     """
@@ -719,11 +753,13 @@ def get_emails(
     """
     db = _get_db(ctx)
     results = db.get_emails(ids)
-    valid = frozenset(fields) & SERIALIZABLE_EMAIL_FIELDS if fields else None
+    valid = _validate_fields(fields)
     # For get_emails, include body_text by default (unlike list tools)
     serialized = [
         _serialize_email(
-            e, fields=valid or SERIALIZABLE_EMAIL_FIELDS, body_max_chars=body_max_chars
+            e,
+            fields=valid if valid is not None else SERIALIZABLE_EMAIL_FIELDS,
+            body_max_chars=body_max_chars,
         )
         for e in results
     ]
@@ -853,15 +889,42 @@ def search_all(
 @mcp.tool()
 @log_tool
 def get_attachment_markdown(
-    ctx: Context, attachment_id: int, account: str | None = None
-) -> str | None:
-    """Return the full extracted markdown for an attachment, or null if not extracted.
+    ctx: Context,
+    attachment_id: int,
+    account: str | None = None,
+    max_chars: int = 20000,
+    offset: int = 0,
+) -> dict[str, Any] | None:
+    """Return extracted markdown for an attachment, or null if not extracted.
+
+    Parameters:
+      attachment_id: attachment row id
+      account: limit results to this source account (e.g. "you@gmail.com").
+        Omit to query across all accounts.
+      max_chars: truncate markdown text to N characters (default 20000; 0 = full text).
+        When truncated, truncated=true is returned.
+      offset: skip first N characters for paging (default 0).
 
     When `account` is given, the attachment must be referenced by at least one email
     attributed to that account; otherwise returns null.
+
+    Returns {attachment_id, text, total_chars, offset, truncated}.
     """
     db = _get_db(ctx)
-    return db.get_attachment_markdown(attachment_id, account=account)
+    markdown = db.get_attachment_markdown(attachment_id, account=account)
+    if markdown is None:
+        return None
+
+    total_chars = len(markdown)
+    text = markdown[offset:] if max_chars == 0 else markdown[offset : offset + max_chars]
+    truncated = offset + len(text) < total_chars
+    return {
+        "attachment_id": attachment_id,
+        "text": text,
+        "total_chars": total_chars,
+        "offset": offset,
+        "truncated": truncated,
+    }
 
 
 @mcp.tool()
