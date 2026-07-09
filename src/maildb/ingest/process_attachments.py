@@ -258,6 +258,7 @@ def _claim_row(
     selector_sql: str = "",
     selector_params: dict[str, Any] | None = None,
     claimed_by: str | None = None,
+    exclude_ids: list[int] | None = None,
 ) -> int | None:
     """Atomically move one row to 'extracting' and return its attachment_id.
 
@@ -267,11 +268,15 @@ def _claim_row(
     in-flight rows as hard-timeout (see issue #59).
     """
     states = "('pending','failed')" if retry_failed else "('pending')"
+    exclude_sql = ""
+    if exclude_ids:
+        exclude_sql = "AND attachment_id != ALL(%(_exclude_ids)s)"
     sql = f"""
         WITH claimed AS (
             SELECT attachment_id FROM attachment_contents
              WHERE status IN {states}
                {selector_sql}
+               {exclude_sql}
              ORDER BY attachment_id
              LIMIT 1
              FOR UPDATE SKIP LOCKED
@@ -284,7 +289,9 @@ def _claim_row(
          WHERE attachment_id IN (SELECT attachment_id FROM claimed)
         RETURNING attachment_id
     """
-    params = {"claimed_by": claimed_by, **(selector_params or {})}
+    params: dict[str, Any] = {"claimed_by": claimed_by, **(selector_params or {})}
+    if exclude_ids:
+        params["_exclude_ids"] = list(exclude_ids)
     with pool.connection() as conn:
         cur = conn.execute(sql, params)
         row = cur.fetchone()
@@ -408,6 +415,9 @@ def _claim_and_process_loop(
     claimed_by: str | None = None,
 ) -> None:
     """Claim rows one at a time via SKIP LOCKED and process until none remain."""
+    # Per worker session only: with multiple workers, a failed row can be tried
+    # once by each subprocess, which bounds retries without global coordination.
+    attempted_failed: list[int] = []
     while True:
         attachment_id = _claim_row(
             pool,
@@ -415,6 +425,7 @@ def _claim_and_process_loop(
             selector_sql=selector_sql,
             selector_params=selector_params,
             claimed_by=claimed_by,
+            exclude_ids=attempted_failed,
         )
         if attachment_id is None:
             return
@@ -427,6 +438,14 @@ def _claim_and_process_loop(
             )
         except Exception as exc:
             _set_status(pool, attachment_id, status="failed", reason=str(exc))
+        with pool.connection() as conn:
+            cur = conn.execute(
+                "SELECT status FROM attachment_contents WHERE attachment_id = %s",
+                (attachment_id,),
+            )
+            row = cur.fetchone()
+        if row is not None and row[0] == "failed":
+            attempted_failed.append(attachment_id)
 
 
 def _subprocess_worker(
@@ -491,8 +510,17 @@ def run(
     ``extract_timeout_s`` caps wall-clock time per attachment inside
     extract_markdown; 0 disables the cap. Timed-out rows are marked ``failed``
     with a reason prefixed ``"timed out after "`` so they can be queried and
-    retried as a distinct group.
+    retried as a distinct group. Returned counts are scoped to rows touched
+    during this run.
     """
+    with pool.connection() as conn:
+        cur = conn.execute("SELECT now()")
+        row = cur.fetchone()
+        if row is None:
+            msg = "database did not return run start time"
+            raise RuntimeError(msg)
+        run_start = row[0]
+
     ensure_pending_rows(pool)
     _reclaim_stale(pool)
 
@@ -546,7 +574,14 @@ def run(
                 f.result()
 
     with pool.connection() as conn:
-        cur = conn.execute("SELECT status, count(*) FROM attachment_contents GROUP BY status")
+        cur = conn.execute(
+            """
+            SELECT status, count(*) FROM attachment_contents
+             WHERE extracted_at >= %(run_start)s
+             GROUP BY status
+            """,
+            {"run_start": run_start},
+        )
         for status, n in cur.fetchall():
             if status in counts:
                 counts[status] = n
@@ -836,10 +871,23 @@ def _run_supervised_single_worker(
                     status="failed",
                     reason=f"hard-timeout: killed after {extract_timeout_s}s",
                 )
+            reverted = _revert_in_flight_to_pending(pool, claimed_by=supervisor_id)
+            logger.info(
+                "stuck_worker_in_flight_reverted",
+                supervisor_id=supervisor_id,
+                reverted_to_pending=reverted,
+            )
             killed = True
             break
 
         if not killed:
             worker.join()
+            reverted = _revert_in_flight_to_pending(pool, claimed_by=supervisor_id)
+            if reverted:
+                logger.info(
+                    "worker_exit_in_flight_reverted",
+                    supervisor_id=supervisor_id,
+                    reverted_to_pending=reverted,
+                )
             # Worker exited on its own — either work is done or it hit an unrecoverable
             # error. Outer loop re-checks remaining; exits when 0.
