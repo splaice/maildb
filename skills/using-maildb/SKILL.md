@@ -78,6 +78,7 @@ All list tools return a wrapper with pagination metadata:
 ```
 
 - `total` — full count matching filters (ignoring limit/offset)
+- For semantic tools (`search`, `search_attachments`, `search_all`), `total` is approximate (`offset + returned`, or a lower bound), not an exact count.
 - `results` — the email objects (headers + `body_length`, no `body_text` by default)
 
 **Exceptions:** `get_thread` and `get_thread_for` return flat lists. `query` returns flat lists.
@@ -88,13 +89,16 @@ All list tools return a wrapper with pagination metadata:
 
 | Tool | Use When |
 |------|----------|
-| `find(sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels, max_to, max_cc, max_recipients, direct_only, limit, offset, order, fields)` | Exact attribute filtering |
-| `search(query, ...same filters as find..., limit, offset, fields)` | Natural language topic search (needs Ollama) |
+| `find(sender, sender_domain, recipient, after, before, has_attachment, subject_contains, labels, max_to, max_cc, max_recipients, direct_only, account, limit, offset, order, fields)` | Exact attribute filtering |
+| `search(query, ...same filters as find..., account, limit, offset, fields)` | Natural language topic search (needs Ollama); approximate total |
 | `get_emails(ids, body_max_chars, fields)` | Fetch full emails by message_id — includes `body_text` by default |
 | `get_thread(thread_id, fields)` | Full conversation by thread ID |
 | `get_thread_for(message_id, fields)` | Find thread containing a message |
-| `correspondence(address, after, before, limit, offset, order, fields)` | Bidirectional email history with a person |
-| `mention_search(text, sender, sender_domain, after, before, max_to, max_cc, max_recipients, direct_only, limit, offset, fields)` | Keyword search in body/subject (no Ollama) |
+| `correspondence(address, after, before, account, limit, offset, order, fields)` | Bidirectional email history with a person |
+| `mention_search(text, sender, sender_domain, after, before, max_to, max_cc, max_recipients, direct_only, account, limit, offset, fields)` | Keyword search in body/subject (no Ollama) |
+| `search_attachments(query, sender, sender_domain, recipient, after, before, labels, max_to, max_cc, max_recipients, direct_only, account, content_type, limit, offset)` | Semantic search over extracted attachment chunks; approximate total |
+| `search_all(query, ...email/recipient/account filters..., limit, offset)` | Unified semantic search across emails and extracted attachments; approximate total |
+| `get_attachment_markdown(attachment_id, account, max_chars, offset)` | Fetch extracted attachment markdown; page with `max_chars` + `offset` |
 
 ### Analysis
 
@@ -107,9 +111,16 @@ All list tools return a wrapper with pagination metadata:
 | `cluster(where or message_ids, limit, offset, fields)` | Diverse topic extraction from any subset | No |
 | `query(spec)` | DSL: aggregation, grouping, custom selects | No |
 
+### Account & Import Metadata
+
+| Tool | Use When |
+|------|----------|
+| `accounts()` | Discover source accounts and counts before using `account=...` |
+| `import_history(account, limit, offset)` | Inspect ingest sessions, inserted/skipped counts, and status |
+
 ### Recipient Count Filters
 
-Available on `find`, `search`, `mention_search`, `unreplied`, `correspondence`:
+Available on `find`, `search`, `mention_search`, `unreplied`, `search_attachments`, and `search_all`. `correspondence` does not support recipient-count filters; it supports `address`, date range, `account`, pagination, order, and fields.
 
 | Parameter | Type | Effect |
 |-----------|------|--------|
@@ -130,6 +141,7 @@ Available on `find`, `search`, `mention_search`, `unreplied`, `correspondence`:
 | `after` | str | ISO date, inclusive (e.g. `"2025-01-01"`) |
 | `before` | str | ISO date, exclusive |
 | `order` | str | `"date DESC"`, `"date ASC"`, `"sender_address ASC"`, `"sender_address DESC"` |
+| `account` | str | Scope to one source account; omit to search across all accounts |
 
 ### Default vs Explicit Fields
 
@@ -219,9 +231,10 @@ cluster(message_ids=ids, limit=5, fields=["subject", "body_text", "date"])
 
 - **No Python imports needed.** All interactions via MCP tools. Responses are JSON dicts.
 - **Headers by default.** List tools exclude `body_text` and include `body_length` instead. Use `get_emails` for bodies.
-- **`total` tells you the full count.** Check `result["total"]` to know if you've fetched everything or need to paginate.
-- **`user_email` required** for `unreplied` and `top_contacts`. Set via `MAILDB_USER_EMAIL` env var.
+- **`total` tells you the full count for non-semantic list tools.** Semantic totals are approximate; paginate until an empty or short page.
+- **`user_email` required** for `unreplied` and `top_contacts`. Set via `MAILDB_USER_EMAILS` env var.
 - **`search` needs Ollama running.** `find`, `mention_search`, and `correspondence` work without it.
+- **Attachment search needs extraction first.** Run `maildb process_attachments run`; then use `search_attachments`, `search_all`, and `get_attachment_markdown`.
 - **`query` DSL** has a 5s timeout and 1000-row hard cap. Returns flat lists (no wrapper).
 - **`cluster` chains well** with other tools via `message_ids` — pass IDs from any prior result.
 - **Null-date emails** (e.g. Google Chat transcripts) are excluded from `unreplied` results automatically.

@@ -56,6 +56,9 @@ def test_process_chunk_inserts_emails(test_pool, test_settings, tmp_path):
     assert email_attachment_count == len(attachment_paths)
     status = get_phase_status(test_pool, "parse")
     assert status["completed"] == 1
+    assert status["messages_total"] == 10
+    assert status["messages_inserted"] == 10
+    assert status["messages_skipped"] == 0
 
 
 def _create_mbox_with_bad_message(tmp_path):
@@ -72,11 +75,12 @@ def _create_mbox_with_bad_message(tmp_path):
     mbox.add(good)
 
     bad = MIMEText("Bad body text")
-    bad["Message-ID"] = f"<{'x' * 5000}@example.com>"
+    bad["Message-ID"] = "<bad@example.com>"
     bad["From"] = "alice@example.com"
     bad["To"] = "bob@example.com"
     bad["Subject"] = "Bad message"
     bad["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+    bad.set_payload("Bad body text with a PostgreSQL poison null: \x00")
     mbox.add(bad)
 
     good2 = MIMEText("Also good")
@@ -105,7 +109,59 @@ def test_process_chunk_skips_bad_rows(test_pool, test_settings, tmp_path):
     with test_pool.connection() as conn:
         cur = conn.execute("SELECT count(*) FROM emails")
         count = cur.fetchone()[0]
-    assert count >= 1
+        cur = conn.execute("SELECT count(*) FROM email_accounts")
+        account_count = cur.fetchone()[0]
+    assert count == 2
+    assert account_count == 2
+    assert status["messages_total"] == 3
+    assert status["messages_inserted"] == 2
+    assert status["messages_skipped"] == 1
+
+
+def _create_mbox(tmp_path: Path, filename: str, message_ids: list[str]) -> Path:
+    mbox_path = tmp_path / filename
+    mbox = mb.mbox(str(mbox_path))
+    for idx, message_id in enumerate(message_ids):
+        msg = MIMEText(f"Body {idx}")
+        msg["Message-ID"] = f"<{message_id}>"
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = f"Message {idx}"
+        msg["Date"] = "Mon, 10 Mar 2025 10:00:00 +0000"
+        mbox.add(msg)
+    mbox.close()
+    return mbox_path
+
+
+def test_process_chunk_preserves_duplicate_accounting(test_pool, test_settings, tmp_path):
+    import_id = _insert_import(test_pool)
+    chunk_a = _create_mbox(
+        tmp_path,
+        "duplicates-a.mbox",
+        ["dup@example.com", "dup@example.com"],
+    )
+    chunk_b = _create_mbox(tmp_path, "duplicates-b.mbox", ["dup@example.com"])
+    create_task(test_pool, phase="parse", chunk_path=str(chunk_a), import_id=import_id)
+    create_task(test_pool, phase="parse", chunk_path=str(chunk_b), import_id=import_id)
+
+    process_chunk(
+        database_url=test_settings.database_url,
+        attachment_dir=tmp_path / "attachments",
+        import_id=import_id,
+    )
+
+    status = get_phase_status(test_pool, "parse")
+    with test_pool.connection() as conn:
+        cur = conn.execute("SELECT count(*) FROM emails")
+        email_count = cur.fetchone()[0]
+        cur = conn.execute("SELECT count(*) FROM email_accounts")
+        account_count = cur.fetchone()[0]
+    assert status["completed"] == 2
+    assert status["messages_total"] == 3
+    assert status["messages_inserted"] == 1
+    assert status["messages_skipped"] == 2
+    assert email_count == 1
+    assert account_count == 1
 
 
 def test_process_chunk_handles_failure(test_pool, test_settings, tmp_path):

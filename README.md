@@ -60,6 +60,21 @@ uv run maildb ingest reset --yes           # skip the confirmation prompt
 
 Embedding is the slowest phase (~20 messages/second with 4 Ollama workers). A 50 GB mbox with ~840K messages takes roughly 12 hours to embed on an M1 Max.
 
+### Attachment extraction
+
+Run attachment extraction after ingest if you want attachment search tools to return data:
+
+```bash
+uv run maildb process_attachments run
+uv run maildb process_attachments status
+```
+
+For long drains, follow `docs/runbooks/attachment-extraction-mps-discipline.md`. The MCP tools `search_attachments`, `search_all`, and `get_attachment_markdown` only return extracted attachment content after this pipeline runs.
+
+### Monitoring
+
+Use `uv run maildb jobs` for a snapshot, or `uv run maildb jobs --watch 5` for live process, throughput, and orphan-worker monitoring.
+
 ### Migrating an existing database
 
 If you have a pre-existing database without account tagging, run:
@@ -73,6 +88,8 @@ This tags every untagged email with the given account. It's idempotent and only 
 ## Running the MCP server
 
 ```bash
+uv run maildb serve
+# Compatibility no-arg entry point:
 uv run python -m maildb
 ```
 
@@ -94,10 +111,13 @@ All settings are controlled via environment variables (prefixed `MAILDB_`) or a 
 
 MailDB ships with a `using-maildb` skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). The skill teaches Claude how to choose the right MCP tool, construct filters, and paginate through results when querying your email.
 
-Install it by adding the skill path to your Claude Code settings:
+Install it by copying or symlinking the skill directory into Claude Code's skills directory:
 
 ```bash
-claude skill add /path/to/maildb/skills/using-maildb
+mkdir -p ~/.claude/skills
+ln -s /path/to/maildb/skills/using-maildb ~/.claude/skills/using-maildb
+# Or copy it instead:
+cp -R /path/to/maildb/skills/using-maildb ~/.claude/skills/
 ```
 
 Once installed, Claude Code will automatically invoke the skill whenever you ask it to search, retrieve, or analyze your email.
