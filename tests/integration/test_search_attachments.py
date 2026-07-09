@@ -150,6 +150,15 @@ def test_search_attachments_filters_by_cc_recipient(test_pool, test_settings):
     assert any(result.attachment_id == att_id for result in results)
 
 
+def test_search_attachments_direct_only_conflicts_with_max_to(test_pool, test_settings):
+    db = MailDB._from_pool(test_pool, config=test_settings)
+    db._embedding_client = MagicMock()
+    db._embedding_client.embed.return_value = [0.1] * 768
+
+    with pytest.raises(ValueError, match="direct_only"):
+        db.search_attachments(query="anything", direct_only=True, max_to=2)
+
+
 def test_search_attachments_honors_email_level_account_filter(test_pool, test_settings):
     # Account A carries attachment X; Account B has a different one.
     iid_a = uuid4()

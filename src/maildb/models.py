@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime  # noqa: TC003  (runtime import for dataclass fields)
 from typing import Any, Literal
 from uuid import UUID  # noqa: TC003  (runtime import for dataclass fields)
@@ -46,13 +46,13 @@ class Email:
     recipients: Recipients | None
     date: datetime | None
     body_text: str | None
-    body_html: str | None
+    body_html: str | None = field(default=None, kw_only=True)
     has_attachment: bool
     attachments: list[Attachment]
     labels: list[str]
     in_reply_to: str | None
     references: list[str]
-    embedding: list[float] | None
+    embedding: list[float] | None = field(default=None, kw_only=True)
     source_account: str | None
     import_id: UUID | None
     created_at: datetime

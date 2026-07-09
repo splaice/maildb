@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+import numpy as np
 import structlog
 from psycopg.rows import dict_row
 
@@ -42,6 +42,13 @@ SELECT_COLS = """
     id, message_id, thread_id, subject, sender_name, sender_address,
     sender_domain, recipients, date, body_text, body_html, has_attachment,
     attachments, labels, in_reply_to, "references", embedding,
+    source_account, import_id, created_at
+"""
+
+LIST_COLS = """
+    id, message_id, thread_id, subject, sender_name, sender_address,
+    sender_domain, recipients, date, body_text, has_attachment,
+    attachments, labels, in_reply_to, "references",
     source_account, import_id, created_at
 """
 
@@ -176,6 +183,7 @@ class MailDB:
         max_recipients: int | None = None,
         direct_only: bool = False,
         account: str | None = None,
+        column_prefix: str = "",
     ) -> tuple[list[str], dict[str, Any]]:
         """Build WHERE-clause conditions and params from common filter kwargs."""
         if direct_only and (max_to is not None or max_cc is not None):
@@ -190,58 +198,59 @@ class MailDB:
         params: dict[str, Any] = {}
 
         if sender is not None:
-            conditions.append("sender_address = %(sender)s")
+            conditions.append(f"{column_prefix}sender_address = %(sender)s")
             params["sender"] = sender
         if sender_domain is not None:
-            conditions.append("sender_domain = %(sender_domain)s")
+            conditions.append(f"{column_prefix}sender_domain = %(sender_domain)s")
             params["sender_domain"] = sender_domain
         if recipient is not None:
             conditions.append(
-                "(recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb) "
-                "OR recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb) "
-                "OR recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
+                f"({column_prefix}recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb) "
+                f"OR {column_prefix}recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb) "
+                f"OR {column_prefix}recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
             )
             params["recipient_arr"] = json.dumps([recipient])
         if after is not None:
-            conditions.append("date >= %(after)s")
+            conditions.append(f"{column_prefix}date >= %(after)s")
             params["after"] = after
         if before is not None:
-            conditions.append("date < %(before)s")
+            conditions.append(f"{column_prefix}date < %(before)s")
             params["before"] = before
         if has_attachment is not None:
-            conditions.append("has_attachment = %(has_attachment)s")
+            conditions.append(f"{column_prefix}has_attachment = %(has_attachment)s")
             params["has_attachment"] = has_attachment
         if subject_contains is not None:
-            conditions.append("subject ILIKE %(subject_pattern)s ESCAPE '\\'")
+            conditions.append(f"{column_prefix}subject ILIKE %(subject_pattern)s ESCAPE '\\'")
             escaped = (
                 subject_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             )
             params["subject_pattern"] = f"%{escaped}%"
         if labels is not None:
-            conditions.append("labels @> %(labels)s")
+            conditions.append(f"{column_prefix}labels @> %(labels)s")
             params["labels"] = labels
         if max_to is not None:
             conditions.append(
-                "jsonb_array_length(COALESCE(recipients->'to', '[]'::jsonb)) <= %(max_to)s"
+                f"jsonb_array_length(COALESCE({column_prefix}recipients->'to', '[]'::jsonb)) <= %(max_to)s"
             )
             params["max_to"] = max_to
         if max_cc is not None:
             conditions.append(
-                "jsonb_array_length(COALESCE(recipients->'cc', '[]'::jsonb)) <= %(max_cc)s"
+                f"jsonb_array_length(COALESCE({column_prefix}recipients->'cc', '[]'::jsonb)) <= %(max_cc)s"
             )
             params["max_cc"] = max_cc
         if max_recipients is not None:
             conditions.append(
-                "(jsonb_array_length(COALESCE(recipients->'to', '[]'::jsonb))"
-                " + jsonb_array_length(COALESCE(recipients->'cc', '[]'::jsonb))"
-                " + jsonb_array_length(COALESCE(recipients->'bcc', '[]'::jsonb))"
+                f"(jsonb_array_length(COALESCE({column_prefix}recipients->'to', '[]'::jsonb))"
+                f" + jsonb_array_length(COALESCE({column_prefix}recipients->'cc', '[]'::jsonb))"
+                f" + jsonb_array_length(COALESCE({column_prefix}recipients->'bcc', '[]'::jsonb))"
                 ") <= %(max_recipients)s"
             )
             params["max_recipients"] = max_recipients
         if account is not None:
+            email_id_ref = f"{column_prefix}id" if column_prefix else "emails.id"
             conditions.append(
                 "EXISTS (SELECT 1 FROM email_accounts ea "
-                "WHERE ea.email_id = emails.id AND ea.source_account = %(account)s)"
+                f"WHERE ea.email_id = {email_id_ref} AND ea.source_account = %(account)s)"
             )
             params["account"] = account
 
@@ -253,7 +262,7 @@ class MailDB:
             return []
         placeholders = ", ".join(f"%(mid_{i})s" for i in range(len(message_ids)))
         params: dict[str, Any] = {f"mid_{i}": mid for i, mid in enumerate(message_ids)}
-        sql = f"SELECT {SELECT_COLS} FROM emails WHERE message_id IN ({placeholders})"
+        sql = f"SELECT {LIST_COLS} FROM emails WHERE message_id IN ({placeholders})"
         rows = _query_dicts(self._pool, sql, params)
         emails_by_id: dict[str, Email] = {}
         for row in rows:
@@ -301,7 +310,7 @@ class MailDB:
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        query = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        query = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
         params["limit"] = limit
         params["offset"] = offset
 
@@ -358,7 +367,7 @@ class MailDB:
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT {SELECT_COLS},
+            SELECT {LIST_COLS},
                    1 - (embedding <=> %(query_embedding)s::vector) AS similarity
             FROM emails
             WHERE {where}
@@ -386,7 +395,7 @@ class MailDB:
     def get_thread(self, thread_id: str) -> list[Email]:
         """Retrieve all messages in a thread, ordered by date."""
         sql = f"""
-            SELECT {SELECT_COLS}
+            SELECT {LIST_COLS}
             FROM emails
             WHERE thread_id = %(thread_id)s
             ORDER BY date ASC
@@ -695,27 +704,50 @@ class MailDB:
         """Greedy farthest-point selection on embeddings for diverse topic extraction."""
         if len(emails) <= limit:
             return emails
-        selected: list[Email] = [emails[0]]
-        remaining = list(emails[1:])
-        while len(selected) < limit and remaining:
-            best_idx = -1
-            best_dist = -1.0
-            for i, candidate in enumerate(remaining):
-                if candidate.embedding is None:
-                    continue
-                min_dist = float("inf")
-                for sel in selected:
-                    if sel.embedding is None:
-                        continue
-                    dist = MailDB._cosine_distance(candidate.embedding, sel.embedding)
-                    min_dist = min(min_dist, dist)
-                if min_dist > best_dist:
-                    best_dist = min_dist
-                    best_idx = i
-            if best_idx < 0:
+
+        first_embedding = next((email.embedding for email in emails if email.embedding), None)
+        if first_embedding is None:
+            return emails[:1]
+
+        vectors = np.zeros((len(emails), len(first_embedding)), dtype=np.float32)
+        has_embedding = np.zeros(len(emails), dtype=bool)
+        for i, email in enumerate(emails):
+            if email.embedding is None:
+                continue
+            vectors[i] = np.asarray(email.embedding, dtype=np.float32)
+            has_embedding[i] = True
+
+        norms = np.linalg.norm(vectors, axis=1)
+        positive_norm = norms > 0
+        normalized = np.zeros_like(vectors)
+        np.divide(vectors, norms[:, None], out=normalized, where=positive_norm[:, None])
+
+        def distances_to(selected_idx: int) -> np.ndarray:
+            if not positive_norm[selected_idx]:
+                distances = np.zeros(len(emails), dtype=np.float32)
+                distances[~has_embedding] = -np.inf
+                return distances
+            distances = np.asarray(1.0 - normalized @ normalized[selected_idx], dtype=np.float32)
+            distances[~positive_norm] = 0.0
+            distances[~has_embedding] = -np.inf
+            return distances
+
+        selected_indices = [0]
+        selected_mask = np.zeros(len(emails), dtype=bool)
+        selected_mask[0] = True
+        min_distances = distances_to(0)
+        min_distances[selected_mask] = -np.inf
+
+        while len(selected_indices) < limit:
+            best_idx = int(np.argmax(min_distances))
+            if np.isneginf(min_distances[best_idx]):
                 break
-            selected.append(remaining.pop(best_idx))
-        return selected
+            selected_indices.append(best_idx)
+            selected_mask[best_idx] = True
+            min_distances = np.minimum(min_distances, distances_to(best_idx))
+            min_distances[selected_mask] = -np.inf
+
+        return [emails[i] for i in selected_indices]
 
     def cluster(
         self,
@@ -763,16 +795,6 @@ class MailDB:
             return [], 0
         selected = self._farthest_point_select(emails, limit + offset)
         return selected[offset:], total
-
-    @staticmethod
-    def _cosine_distance(a: list[float], b: list[float]) -> float:
-        """Compute cosine distance between two vectors."""
-        dot = sum(x * y for x, y in zip(a, b, strict=True))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(x * x for x in b))
-        if norm_a == 0 or norm_b == 0:
-            return 1.0
-        return 1.0 - dot / (norm_a * norm_b)
 
     def unreplied(
         self,
@@ -833,8 +855,8 @@ class MailDB:
 
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
-            e.sender_domain, e.recipients, e.date, e.body_text, e.body_html, e.has_attachment,
-            e.attachments, e.labels, e.in_reply_to, e."references", e.embedding,
+            e.sender_domain, e.recipients, e.date, e.body_text, e.has_attachment,
+            e.attachments, e.labels, e.in_reply_to, e."references",
             e.source_account, e.import_id, e.created_at
         """
 
@@ -994,7 +1016,7 @@ class MailDB:
         params.update(account_params)
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        sql = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
 
         rows = _query_dicts(self._pool, sql, params)
         total = rows[0]["_total"] if rows else 0
@@ -1055,7 +1077,7 @@ class MailDB:
         conditions.extend(rcpt_conditions)
         params.update(rcpt_params)
         where = " AND ".join(conditions)
-        sql = f"SELECT {SELECT_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT %(limit)s OFFSET %(offset)s"
+        sql = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT %(limit)s OFFSET %(offset)s"
         rows = _query_dicts(self._pool, sql, params)
         total = rows[0]["_total"] if rows else 0
         for row in rows:
@@ -1088,63 +1110,20 @@ class MailDB:
         """
         query_embedding = self._embedding_client.embed(query)
 
-        # Build email-level conditions directly with `e.` prefixes — safer than
-        # trying to rewrite the output of `_build_filters`, which already qualifies
-        # some columns (e.g. `ea.source_account` for the account-EXISTS clause) that
-        # would collide with naive string substitution.
-        conditions: list[str] = []
-        params: dict[str, Any] = {}
-        if sender is not None:
-            conditions.append("e.sender_address = %(sender)s")
-            params["sender"] = sender
-        if sender_domain is not None:
-            conditions.append("e.sender_domain = %(sender_domain)s")
-            params["sender_domain"] = sender_domain
-        if recipient is not None:
-            conditions.append(
-                "(e.recipients @> jsonb_build_object('to', %(recipient_arr)s::jsonb) "
-                "OR e.recipients @> jsonb_build_object('cc', %(recipient_arr)s::jsonb) "
-                "OR e.recipients @> jsonb_build_object('bcc', %(recipient_arr)s::jsonb))"
-            )
-            params["recipient_arr"] = json.dumps([recipient])
-        if after is not None:
-            conditions.append("e.date >= %(after)s")
-            params["after"] = after
-        if before is not None:
-            conditions.append("e.date < %(before)s")
-            params["before"] = before
-        if labels is not None:
-            conditions.append("e.labels @> %(labels)s")
-            params["labels"] = labels
-        if direct_only and (max_to is not None or max_cc is not None):
-            msg = "Cannot combine direct_only with max_to or max_cc"
-            raise ValueError(msg)
-        if direct_only:
-            max_to, max_cc = 1, 0
-        if max_to is not None:
-            conditions.append(
-                "jsonb_array_length(COALESCE(e.recipients->'to', '[]'::jsonb)) <= %(max_to)s"
-            )
-            params["max_to"] = max_to
-        if max_cc is not None:
-            conditions.append(
-                "jsonb_array_length(COALESCE(e.recipients->'cc', '[]'::jsonb)) <= %(max_cc)s"
-            )
-            params["max_cc"] = max_cc
-        if max_recipients is not None:
-            conditions.append(
-                "(jsonb_array_length(COALESCE(e.recipients->'to', '[]'::jsonb))"
-                " + jsonb_array_length(COALESCE(e.recipients->'cc', '[]'::jsonb))"
-                " + jsonb_array_length(COALESCE(e.recipients->'bcc', '[]'::jsonb))"
-                ") <= %(max_recipients)s"
-            )
-            params["max_recipients"] = max_recipients
-        if account is not None:
-            conditions.append(
-                "EXISTS (SELECT 1 FROM email_accounts ea_acc "
-                "WHERE ea_acc.email_id = e.id AND ea_acc.source_account = %(account)s)"
-            )
-            params["account"] = account
+        conditions, params = self._build_filters(
+            sender=sender,
+            sender_domain=sender_domain,
+            recipient=recipient,
+            after=after,
+            before=before,
+            labels=labels,
+            max_to=max_to,
+            max_cc=max_cc,
+            max_recipients=max_recipients,
+            direct_only=direct_only,
+            account=account,
+            column_prefix="e.",
+        )
 
         email_exists = ""
         if conditions:

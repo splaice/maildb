@@ -16,6 +16,7 @@ from maildb.models import (
     SearchResult,
     UnifiedSearchResult,
 )
+from maildb.server import _serialize_email
 
 
 def test_recipients_from_dict() -> None:
@@ -147,6 +148,21 @@ def test_email_defaults_when_columns_missing():
     email = Email.from_row(row)
     assert email.source_account is None
     assert email.import_id is None
+
+
+def test_email_defaults_when_embedding_and_body_html_columns_missing():
+    row = _make_row()
+    del row["embedding"]
+    del row["body_html"]
+
+    email = Email.from_row(row)
+
+    assert email.embedding is None
+    assert email.body_html is None
+    serialized = _serialize_email(email)
+    assert "embedding" not in serialized
+    assert "body_html" not in serialized
+    assert serialized["body_length"] == len("Hello")
 
 
 def test_account_summary_dataclass_shape():
