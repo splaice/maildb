@@ -756,6 +756,10 @@ class MailDB:
             sender: For inbound — filter to messages from this sender.
             sender_domain: For inbound — filter to messages from this domain.
             limit: Maximum number of results (default 100).
+            max_to: max number of To recipients (e.g. 1 for direct messages).
+            max_cc: max number of CC recipients (e.g. 0 for no-CC messages).
+            max_recipients: max total recipients across To + CC + BCC.
+            direct_only: shorthand for max_to=1, max_cc=0 (cannot combine with max_to/max_cc).
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
         """
@@ -768,8 +772,16 @@ class MailDB:
         if direction == "outbound" and (sender is not None or sender_domain is not None):
             raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
 
+        rc_conditions, rc_params = self._build_filters(
+            max_to=max_to,
+            max_cc=max_cc,
+            max_recipients=max_recipients,
+            direct_only=direct_only,
+        )
+
         identities = self._identity_addresses(account)
         params: dict[str, Any] = {"user_emails": identities}
+        params.update(rc_params)
 
         select_cols_aliased = """
             e.id, e.message_id, e.thread_id, e.subject, e.sender_name, e.sender_address,
@@ -802,6 +814,7 @@ class MailDB:
                 )
                 params["account"] = account
 
+            conditions.extend(rc_conditions)
             where = " AND ".join(conditions)
             params["limit"] = limit
             params["offset"] = offset
@@ -864,6 +877,7 @@ class MailDB:
                     )
                 """
 
+            conditions.extend(rc_conditions)
             where = " AND ".join(conditions)
             params["limit"] = limit
             params["offset"] = offset
