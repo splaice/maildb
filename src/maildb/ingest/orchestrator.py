@@ -26,6 +26,7 @@ from maildb.ingest.tasks import (
     reset_failed_tasks,
     reset_stale_in_progress,
 )
+from maildb.ingest.threads import repair_thread_ids
 
 logger = structlog.get_logger()
 
@@ -274,6 +275,10 @@ def run_pipeline(
                     "after workers exited. Retry the import."
                 )
                 raise RuntimeError(msg)  # noqa: TRY301
+
+            # Thread repair is cheap and idempotent; a crash simply reruns it on the next pipeline.
+            thread_updates = repair_thread_ids(pool)
+            logger.info("thread_repair_pipeline_complete", updated=thread_updates)
 
             # Phase 3: Index
             index_status = get_phase_status(pool, "index", import_id=import_id)

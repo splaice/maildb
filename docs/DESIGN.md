@@ -34,7 +34,7 @@ The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP), `ingest run|status
 
 ## 4. Load-Bearing Design Decisions
 
-**One row per message, not per thread.** `thread_id` is derived at parse time from RFC 2822 headers (`References[0]` → `In-Reply-To` → `message_id` fallback) and stored on the email row; queries group by the stored `thread_id`. This gives semantic search the precision to match the specific message, not every quoted reply.
+**One row per message, not per thread.** `thread_id` is derived at parse time from RFC 2822 headers (`References[0]` → `In-Reply-To` → `message_id` fallback) and stored on the email row; queries group by the stored `thread_id`. A post-parse union-find pass repairs fragmentation from In-Reply-To-only clients by rewriting `thread_id` to the connected-component root, with the oldest message winning. This gives semantic search the precision to match the specific message, not every quoted reply.
 
 **Denormalized `emails` row.** Recipients as JSONB, labels as text array, sender domain extracted at ingest. Avoids joins for the common query shapes.
 
