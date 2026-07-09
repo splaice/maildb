@@ -3,6 +3,7 @@ import pytest
 from maildb.ingest.index import (
     create_embed_backlog_index,
     drop_embed_backlog_index,
+    drop_non_unique_indexes,
     run_index_phase,
 )
 
@@ -19,6 +20,21 @@ def test_run_index_phase_creates_indexes(test_pool):
     assert "idx_email_sender_address" in indexes
     assert "idx_email_date" in indexes
     assert "idx_email_thread_sender_date" in indexes
+    assert "idx_email_body_trgm" in indexes
+    assert "idx_email_subject_trgm" in indexes
+
+
+def test_drop_non_unique_indexes_removes_trigram_indexes(test_pool):
+    run_index_phase(test_pool)
+    drop_non_unique_indexes(test_pool)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE indexname IN "
+            "('idx_email_body_trgm', 'idx_email_subject_trgm')"
+        )
+        indexes = {row[0] for row in cur.fetchall()}
+    assert indexes == set()
 
 
 def test_embed_backlog_index_create_drop_idempotent(test_pool):

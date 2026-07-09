@@ -5,7 +5,7 @@ import json
 import json as json_mod
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -162,6 +162,35 @@ def test_find_order_date_asc(test_pool, seed_emails) -> None:  # type: ignore[no
     assert results[0].date <= results[-1].date
 
 
+def test_find_date_desc_nulls_last_and_tiebreaks_by_id(test_pool) -> None:  # type: ignore[no-untyped-def]
+    same_date = datetime(2025, 1, 1, 10, 0, tzinfo=UTC)
+    rows = [
+        (UUID("00000000-0000-0000-0000-000000000002"), "sort-second@example.com", same_date),
+        (UUID("00000000-0000-0000-0000-000000000001"), "sort-first@example.com", same_date),
+        (UUID("00000000-0000-0000-0000-000000000000"), "sort-null@example.com", None),
+    ]
+    with test_pool.connection() as conn:
+        for email_id, message_id, sent_at in rows:
+            conn.execute(
+                """INSERT INTO emails (id, message_id, thread_id, sender_address, date)
+                   VALUES (%(id)s, %(mid)s, 'sort-thread', 'sender@example.com', %(date)s)""",
+                {"id": email_id, "mid": message_id, "date": sent_at},
+            )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool)
+    first_page, _ = db.find(limit=10)
+    second_page, _ = db.find(limit=10)
+
+    expected = [
+        "sort-first@example.com",
+        "sort-second@example.com",
+        "sort-null@example.com",
+    ]
+    assert [email.message_id for email in first_page] == expected
+    assert [email.message_id for email in second_page] == expected
+
+
 def test_find_offset(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     all_results, _ = db.find(limit=10)
@@ -310,6 +339,12 @@ def test_find_max_recipients(test_pool, seed_recipient_counts) -> None:  # type:
     assert "rcpt-2@example.com" not in message_ids
 
 
+def test_find_recipient_matches_cc_only(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, _ = db.find(recipient="dave@example.com")
+    assert [email.message_id for email in results] == ["rcpt-2@example.com"]
+
+
 def test_find_direct_only_conflicts_with_max_to(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
     with pytest.raises(ValueError, match="direct_only"):
@@ -368,12 +403,52 @@ def test_search(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     assert results[0].similarity > 0
 
 
+def test_search_total_counts_seen_results(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    mock_ec = MagicMock()
+    mock_ec.embed.return_value = [0.1] * 768
+    db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
+    results, total = db.search("budget discussion", limit=1, offset=1)
+    assert len(results) == 1
+    assert total == 1 + len(results)
+
+
 def test_search_with_filters(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     mock_ec = MagicMock()
     mock_ec.embed.return_value = [0.1] * 768
     db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
     results, _ = db.search("budget", sender_domain="example.com")
     assert all(r.email.sender_domain == "example.com" for r in results)
+
+
+def test_search_filtered_result_rows_unchanged(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    mock_ec = MagicMock()
+    mock_ec.embed.return_value = [0.1] * 768
+    db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
+    results, total = db.search("invoice", sender="billing@stripe.com")
+    assert [result.email.message_id for result in results] == ["find-test-3@stripe.com"]
+    assert total == len(results)
+
+
+def test_search_deep_offset_exercises_hnsw_ef_search(test_pool) -> None:  # type: ignore[no-untyped-def]
+    with test_pool.connection() as conn:
+        for i in range(45):
+            conn.execute(
+                """INSERT INTO emails (message_id, thread_id, sender_address, date, embedding)
+                   VALUES (%(mid)s, 'deep-search', 'sender@example.com', %(date)s, %(embedding)s)""",
+                {
+                    "mid": f"deep-search-{i}@example.com",
+                    "date": datetime(2025, 1, 1, 10, i, tzinfo=UTC),
+                    "embedding": [float(i + 1)] + [0.1] * 767,
+                },
+            )
+        conn.commit()
+
+    mock_ec = MagicMock()
+    mock_ec.embed.return_value = [1.0] + [0.1] * 767
+    db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
+    results, total = db.search("deep page", limit=1, offset=41)
+    assert len(results) == 1
+    assert total == 42
 
 
 # Additional seed data for advanced queries

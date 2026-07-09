@@ -298,6 +298,7 @@ def search(
       fields: list of field names to return. Default returns headers + body_length (no body_text).
 
     Returns {total, offset, limit, results: [{email: {headers + body_length}, similarity}, ...]}.
+    total is approximate for semantic search: offset + returned results, not an exact match count.
 
     Example: search("complaints about deployment", sender_domain="eng.acme.com", limit=5)
     """
@@ -771,6 +772,7 @@ def search_attachments(
     """Semantic search over attachment chunk embeddings.
 
     Returns {total, offset, limit, results: [{attachment_id, filename, chunk, emails, similarity}]}.
+    total is approximate for semantic search: offset + returned results, not an exact match count.
     """
     db = _get_db(ctx)
     results, total = db.search_attachments(
@@ -817,7 +819,8 @@ def search_all(
 
     Returns {total, offset, limit, results: [{source, similarity, ...}]} where each
     result carries source="email" with an email payload, or source="attachment"
-    with an attachment_result payload.
+    with an attachment_result payload. total is a lower-bound approximation over
+    over-fetched semantic results, not an exact match count.
     """
     db = _get_db(ctx)
     results, total = db.search_all(
