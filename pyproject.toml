@@ -17,6 +17,7 @@ dependencies = [
     "tokenizers>=0.20",
     "docling>=2.92.0",
     "markitdown[xls]>=0.1.5",
+    "numpy>=2.4.3",
 ]
 
 [project.scripts]

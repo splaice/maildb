@@ -680,6 +680,39 @@ def test_topics_with_sender(test_pool, seed_advanced) -> None:  # type: ignore[n
     assert all(e.sender_address == "bob@corp.com" for e in topics)
 
 
+def test_topics_with_selection_sequence_matches_python_implementation(test_pool) -> None:  # type: ignore[no-untyped-def]
+    with test_pool.connection() as conn:
+        rows = [
+            ("topics-seq-0@example.com", datetime(2025, 6, 4, tzinfo=UTC), [1.0, 0.0]),
+            ("topics-seq-1@example.com", datetime(2025, 6, 3, tzinfo=UTC), [0.0, 1.0]),
+            ("topics-seq-2@example.com", datetime(2025, 6, 2, tzinfo=UTC), [-1.0, 0.0]),
+            ("topics-seq-3@example.com", datetime(2025, 6, 1, tzinfo=UTC), [0.0, -1.0]),
+        ]
+        for message_id, sent_at, first_dims in rows:
+            conn.execute(
+                """INSERT INTO emails (message_id, thread_id, sender_address, sender_domain,
+                       date, embedding)
+                   VALUES (%(mid)s, 'topics-seq', 'topicpin@example.com', 'example.com',
+                       %(date)s, %(embedding)s)""",
+                {
+                    "mid": message_id,
+                    "date": sent_at,
+                    "embedding": first_dims + [0.0] * 766,
+                },
+            )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool)
+    topics, total = db.topics_with(sender="topicpin@example.com", limit=3)
+
+    assert [email.message_id for email in topics] == [
+        "topics-seq-0@example.com",
+        "topics-seq-2@example.com",
+        "topics-seq-1@example.com",
+    ]
+    assert total == 4
+
+
 # ---------------------------------------------------------------------------
 # Additional coverage tests
 # ---------------------------------------------------------------------------
@@ -1405,6 +1438,23 @@ def test_cluster_with_message_ids(test_pool, seed_advanced) -> None:  # type: ig
     )
     assert len(results) == 2
     assert all(isinstance(e, Email) for e in results)
+
+
+def test_cluster_message_id_selection_sequence_matches_python_implementation(
+    test_pool, seed_advanced
+) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    results, total = db.cluster(
+        message_ids=["adv-1@example.com", "adv-2@corp.com", "adv-3@corp.com", "adv-4@other.com"],
+        limit=3,
+    )
+
+    assert [email.message_id for email in results] == [
+        "adv-4@other.com",
+        "adv-1@example.com",
+        "adv-3@corp.com",
+    ]
+    assert total == 4
 
 
 def test_cluster_with_where(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
