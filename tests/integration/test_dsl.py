@@ -145,6 +145,40 @@ def test_simple_filter(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-
     assert len(rows) == 2
 
 
+def test_in_operator_executes(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
+    rows = _execute_dsl(
+        test_pool,
+        {
+            "where": {
+                "field": "sender_domain",
+                "op": "in",
+                "value": ["acme.com", "nonexistent.com"],
+            },
+        },
+    )
+    assert len(rows) == 2
+
+
+def test_not_in_operator_executes(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
+    rows = _execute_dsl(
+        test_pool,
+        {
+            "where": {"field": "sender_domain", "op": "not_in", "value": ["acme.com"]},
+        },
+    )
+    assert len(rows) == 1
+
+
+def test_in_empty_list_executes(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
+    rows = _execute_dsl(
+        test_pool,
+        {
+            "where": {"field": "sender_domain", "op": "in", "value": []},
+        },
+    )
+    assert len(rows) == 0
+
+
 def test_aggregation_count_by_domain(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
     rows = _execute_dsl(
         test_pool,

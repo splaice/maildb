@@ -92,8 +92,26 @@ class TestWhereOperators:
                 "where": {"field": "sender_domain", "op": "in", "value": ["a.com", "b.com"]},
             }
         )
-        assert "sender_domain IN %(__p0)s" in sql
-        assert params["__p0"] == ("a.com", "b.com")
+        assert "sender_domain = ANY(%(__p0)s)" in sql
+        assert params["__p0"] == ["a.com", "b.com"]
+
+    def test_not_in_list(self) -> None:
+        sql, params = parse_query(
+            {
+                "where": {"field": "sender_domain", "op": "not_in", "value": ["a.com", "b.com"]},
+            }
+        )
+        assert "sender_domain != ALL(%(__p0)s)" in sql
+        assert params["__p0"] == ["a.com", "b.com"]
+
+    def test_in_empty_list(self) -> None:
+        sql, params = parse_query(
+            {
+                "where": {"field": "sender_domain", "op": "in", "value": []},
+            }
+        )
+        assert "sender_domain = ANY(%(__p0)s)" in sql
+        assert params["__p0"] == []
 
     def test_is_null_true(self) -> None:
         sql, params = parse_query(

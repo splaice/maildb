@@ -531,9 +531,9 @@ def _build_where(
 
     # in / not_in
     if op in ("in", "not_in"):
-        pname = acc.add(tuple(value))  # type: ignore[arg-type]
-        keyword = "IN" if op == "in" else "NOT IN"
-        return f"{field} {keyword} %({pname})s"
+        pname = acc.add(list(value))  # type: ignore[arg-type]
+        comparison = "= ANY" if op == "in" else "!= ALL"
+        return f"{field} {comparison}(%({pname})s)"
 
     # contains (array containment)
     if op == "contains":
