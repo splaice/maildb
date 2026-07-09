@@ -38,6 +38,9 @@ VALID_ORDERS = {
     "sender_address DESC",
 }
 
+# Standard reciprocal-rank-fusion constant; higher values flatten the rank penalty.
+RRF_K = 60
+
 SELECT_COLS = """
     id, message_id, thread_id, subject, sender_name, sender_address,
     sender_domain, recipients, date, body_text, body_html, has_attachment,
@@ -1237,10 +1240,14 @@ class MailDB:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[UnifiedSearchResult], int]:
-        """Run both email and attachment searches, merge by similarity.
+        """Run both email and attachment searches; merge by rank fusion (RRF).
 
-        The returned total is a lower-bound approximation over the merged
-        over-fetched results, not an exact count across both corpora.
+        Results are rank-fused across sources (reciprocal rank fusion, K=60) so
+        neither corpus can crowd out the other by score-distribution differences.
+        Per-result ``similarity`` values remain raw cosine similarities and are
+        NOT comparable across sources. The returned total is a lower-bound
+        approximation over the merged over-fetched results, not an exact count
+        across both corpora.
         """
         over_fetch = 2 * (limit + offset)
         email_hits, _ = self.search(
@@ -1276,24 +1283,40 @@ class MailDB:
             offset=0,
         )
 
-        unified: list[UnifiedSearchResult] = [
-            UnifiedSearchResult(
+        # Build (sort_key, result) tuples; own_rank is 1-based within each source.
+        # Sort key: (-rrf, -similarity, source, stable_id) for deterministic order.
+        ranked: list[tuple[tuple[float, float, str, str | int], UnifiedSearchResult]] = []
+        for own_rank, h in enumerate(email_hits, start=1):
+            result = UnifiedSearchResult(
                 source="email",
                 similarity=h.similarity,
                 email=h.email,
                 attachment_result=None,
             )
-            for h in email_hits
-        ] + [
-            UnifiedSearchResult(
+            sort_key: tuple[float, float, str, str | int] = (
+                -1.0 / (RRF_K + own_rank),
+                -h.similarity,
+                "email",
+                h.email.message_id,
+            )
+            ranked.append((sort_key, result))
+        for own_rank, a in enumerate(attachment_hits, start=1):
+            result = UnifiedSearchResult(
                 source="attachment",
                 similarity=a.similarity,
                 email=None,
                 attachment_result=a,
             )
-            for a in attachment_hits
-        ]
-        unified.sort(key=lambda r: r.similarity, reverse=True)
+            sort_key = (
+                -1.0 / (RRF_K + own_rank),
+                -a.similarity,
+                "attachment",
+                a.chunk.id,
+            )
+            ranked.append((sort_key, result))
+
+        ranked.sort(key=lambda item: item[0])
+        unified = [item[1] for item in ranked]
         total = len(unified)
         return unified[offset : offset + limit], total
 
