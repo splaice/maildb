@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import structlog
 from psycopg_pool import ConnectionPool
 
+from maildb.contacts import build_contacts, classify_contacts
 from maildb.ingest.embed import embed_worker
 from maildb.ingest.index import (
     create_embed_backlog_index,
@@ -279,6 +280,16 @@ def run_pipeline(
             # Thread repair is cheap and idempotent; a crash simply reruns it on the next pipeline.
             thread_updates = repair_thread_ids(pool)
             logger.info("thread_repair_pipeline_complete", updated=thread_updates)
+
+            # Contacts refresh is cheap and idempotent; a crash simply reruns it on the next pipeline.
+            contacts_result = build_contacts(pool, import_id=import_id)
+            logger.info(
+                "contacts_build_pipeline_complete",
+                addresses=contacts_result["addresses"],
+                contacts_created=contacts_result["contacts_created"],
+            )
+            classified = classify_contacts(pool, contact_ids=contacts_result["contact_ids"])
+            logger.info("contacts_classify_pipeline_complete", classified=classified)
 
             # Phase 3: Index
             index_status = get_phase_status(pool, "index", import_id=import_id)

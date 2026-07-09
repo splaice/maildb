@@ -57,6 +57,27 @@ def test_run_pipeline_split_and_parse(test_pool, test_settings, tmp_path):
             {"ids": ["msg001@example.com", "msg002@example.com", "msg003@example.com"]},
         )
         assert cur.fetchone()[0] == 1
+        # Contacts subsystem hook: addresses from the fixture mbox are materialised
+        # and classified (human_probability set; kind left as default).
+        cur = conn.execute("SELECT count(*) FROM contact_addresses")
+        assert cur.fetchone()[0] > 0
+        for addr in (
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com",
+            "dave@example.com",
+            "noreply@notifications.example.com",
+        ):
+            row = conn.execute(
+                """SELECT c.human_probability, c.kind
+                   FROM contact_addresses ca
+                   JOIN contacts c ON c.id = ca.contact_id
+                   WHERE ca.address = %(addr)s""",
+                {"addr": addr},
+            ).fetchone()
+            assert row is not None, f"missing contact for {addr}"
+            assert row[0] is not None, f"missing probability for {addr}"
+            assert row[1] == "unknown"
 
 
 def test_run_pipeline_reclaims_stale_parse_task(test_pool, test_settings, tmp_path):
