@@ -25,15 +25,16 @@ Initial source is local `.mbox` files. Gmail API sync is planned.
 | Layer | File(s) | What it does |
 |-------|---------|--------------|
 | Ingestion | `src/maildb/ingest/` | Mbox → parsed rows → embeddings, 4-phase pipeline with restartability |
+| Ingestion | `src/maildb/ingest/process_attachments.py`, `src/maildb/ingest/extraction.py` | Attachment extraction after parse: Marker primary, Docling fallback for Office formats, MarkItDown/passthrough for text-shaped formats |
 | Storage | PostgreSQL + `src/maildb/schema_tables.sql` | Emails, per-account attribution join, import sessions, attachments |
 | Query | `src/maildb/maildb.py`, `src/maildb/dsl.py`, `src/maildb/ingest/chunking.py`, `src/maildb/tokenizer.py` | Tier 1 fixed methods + Tier 2 JSON DSL + attachment semantic search |
 | MCP server | `src/maildb/server.py` | FastMCP wrapper exposing every query method as a tool |
 
-The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP) and `ingest run|status|reset|migrate`.
+The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP), `ingest run|status|reset|migrate`, `jobs` (process/throughput/orphan monitoring), and `process_attachments run|status|retry|reembed`.
 
 ## 4. Load-Bearing Design Decisions
 
-**One row per message, not per thread.** Threads are reconstructed at query time using RFC 2822 headers (`References` → `In-Reply-To` → `message_id` fallback). This gives semantic search the precision to match the specific message, not every quoted reply.
+**One row per message, not per thread.** `thread_id` is derived at parse time from RFC 2822 headers (`References[0]` → `In-Reply-To` → `message_id` fallback) and stored on the email row; queries group by the stored `thread_id`. This gives semantic search the precision to match the specific message, not every quoted reply.
 
 **Denormalized `emails` row.** Recipients as JSONB, labels as text array, sender domain extracted at ingest. Avoids joins for the common query shapes.
 

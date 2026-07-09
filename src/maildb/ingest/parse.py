@@ -15,6 +15,8 @@ from maildb.parsing import parse_mbox
 
 logger = structlog.get_logger()
 
+BATCH_SIZE = 100
+
 INSERT_EMAIL_SQL = """
 INSERT INTO emails (
     id, message_id, thread_id, subject, sender_name, sender_address, sender_domain,
@@ -147,6 +149,126 @@ def _link_attachments(conn: Any, valid_meta: list[dict]) -> None:
                 conn.execute(INSERT_ATTACHMENT_CONTENTS_SQL, {"attachment_id": att_id})
 
 
+def _insert_email_row(
+    conn: Any,
+    row: dict[str, Any],
+    *,
+    task_id: int,
+    source_account: str,
+    import_id: Any,
+) -> tuple[int, int, int, object | None]:
+    try:
+        conn.execute("SAVEPOINT row_insert")
+        cur = conn.execute(INSERT_EMAIL_SQL, row)
+        result = cur.fetchone()
+        # ON CONFLICT DO UPDATE is a no-op write that always returns
+        # the id — the existing row's id on conflict, or the newly
+        # inserted id otherwise.
+        existing_id = result[0] if result else row["id"]
+        if existing_id == row["id"]:
+            inserted = 1
+            skipped = 0
+            inserted_id = row["id"]
+        else:
+            inserted = 0
+            skipped = 1
+            inserted_id = None
+        # Tag with this ingest's account, idempotent per (email, account).
+        if source_account is not None and import_id is not None:
+            conn.execute(
+                INSERT_EMAIL_ACCOUNT_SQL,
+                {
+                    "email_id": existing_id,
+                    "source_account": source_account,
+                    "import_id": import_id,
+                },
+            )
+        conn.execute("RELEASE SAVEPOINT row_insert")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT row_insert")
+        logger.warning(
+            "row_insert_failed",
+            message_id=row.get("message_id"),
+            task_id=task_id,
+        )
+        return 0, 0, 1, None
+    return inserted, skipped, 0, inserted_id
+
+
+def _insert_email_rows_individually(
+    conn: Any,
+    rows: list[dict[str, Any]],
+    *,
+    task_id: int,
+    source_account: str,
+    import_id: Any,
+) -> tuple[int, int, int, set[object]]:
+    inserted = 0
+    skipped = 0
+    errored = 0
+    inserted_email_ids: set[object] = set()
+    for row in rows:
+        row_inserted, row_skipped, row_errored, inserted_id = _insert_email_row(
+            conn,
+            row,
+            task_id=task_id,
+            source_account=source_account,
+            import_id=import_id,
+        )
+        inserted += row_inserted
+        skipped += row_skipped
+        errored += row_errored
+        if inserted_id is not None:
+            inserted_email_ids.add(inserted_id)
+    return inserted, skipped, errored, inserted_email_ids
+
+
+def _insert_email_rows_batch(
+    conn: Any,
+    rows: list[dict[str, Any]],
+    *,
+    source_account: str,
+    import_id: Any,
+) -> tuple[int, int, set[object]]:
+    inserted = 0
+    skipped = 0
+    inserted_email_ids: set[object] = set()
+    existing_ids: list[object] = []
+
+    with conn.cursor() as cur:
+        cur.executemany(INSERT_EMAIL_SQL, rows, returning=True)
+        for result_cur in cur.results():
+            result = result_cur.fetchone()
+            existing_ids.append(result[0] if result else None)
+
+    if len(existing_ids) != len(rows):
+        msg = f"Expected {len(rows)} returned email ids, got {len(existing_ids)}"
+        raise RuntimeError(msg)
+
+    account_rows: list[dict[str, Any]] = []
+    for row, existing_id in zip(rows, existing_ids, strict=True):
+        email_id = existing_id if existing_id is not None else row["id"]
+        if email_id == row["id"]:
+            inserted += 1
+            inserted_email_ids.add(row["id"])
+        else:
+            skipped += 1
+        if source_account is not None and import_id is not None:
+            account_rows.append(
+                {
+                    "email_id": email_id,
+                    "source_account": source_account,
+                    "import_id": import_id,
+                }
+            )
+
+    if account_rows:
+        with conn.cursor() as cur:
+            cur.executemany(INSERT_EMAIL_ACCOUNT_SQL, account_rows)
+
+    return inserted, skipped, inserted_email_ids
+
+
 def _process_single_chunk(
     pool: ConnectionPool,
     task_id: int,
@@ -211,56 +333,43 @@ def _process_single_chunk(
             )
         msg.pop("_attachments_with_data", None)
 
-    # Insert rows individually so one bad row doesn't kill the chunk.
-    # Use savepoints to isolate failures — rollback to the savepoint keeps
-    # all previously inserted rows intact in the outer transaction.
+    # Batch the common path; replay per-row on batch failure so one bad row
+    # doesn't kill the chunk.
     inserted = 0
     skipped = 0
     errored = 0
     inserted_email_ids: set[object] = set()
-    with pool.connection() as conn:
-        for row in email_rows:
+    with pool.connection() as conn, conn.transaction():
+        for i in range(0, len(email_rows), BATCH_SIZE):
+            batch = email_rows[i : i + BATCH_SIZE]
             try:
-                conn.execute("SAVEPOINT row_insert")
-                cur = conn.execute(INSERT_EMAIL_SQL, row)
-                result = cur.fetchone()
-                # ON CONFLICT DO UPDATE is a no-op write that always returns
-                # the id — the existing row's id on conflict, or the newly
-                # inserted id otherwise.
-                existing_id = result[0] if result else row["id"]
-                if existing_id == row["id"]:
-                    inserted += 1
-                    inserted_email_ids.add(row["id"])
-                else:
-                    skipped += 1
-                # Tag with this ingest's account, idempotent per (email, account).
-                if source_account is not None and import_id is not None:
-                    conn.execute(
-                        INSERT_EMAIL_ACCOUNT_SQL,
-                        {
-                            "email_id": existing_id,
-                            "source_account": source_account,
-                            "import_id": import_id,
-                        },
+                with conn.transaction():
+                    batch_inserted, batch_skipped, batch_inserted_ids = _insert_email_rows_batch(
+                        conn,
+                        batch,
+                        source_account=source_account,
+                        import_id=import_id,
                     )
-                conn.execute("RELEASE SAVEPOINT row_insert")
             except Exception:
-                conn.execute("ROLLBACK TO SAVEPOINT row_insert")
-                logger.warning(
-                    "row_insert_failed",
-                    message_id=row.get("message_id"),
-                    task_id=task_id,
+                batch_inserted, batch_skipped, batch_errored, batch_inserted_ids = (
+                    _insert_email_rows_individually(
+                        conn,
+                        batch,
+                        task_id=task_id,
+                        source_account=source_account,
+                        import_id=import_id,
+                    )
                 )
-                errored += 1
-                continue
+                errored += batch_errored
+            inserted += batch_inserted
+            skipped += batch_skipped
+            inserted_email_ids.update(batch_inserted_ids)
 
         for att_row in unique_hashes.values():
             conn.execute(INSERT_ATTACHMENT_SQL, att_row)
 
         valid_meta = [m for m in attachment_meta if m["email_id"] in inserted_email_ids]
         _link_attachments(conn, valid_meta)
-
-        conn.commit()
 
     complete_task(
         pool,
