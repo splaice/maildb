@@ -196,6 +196,12 @@ def test_aggregation_count_by_domain(test_pool, seed_dsl) -> None:  # type: igno
     assert by_domain["corp.com"] == 1
 
 
+def test_aggregation_count_all_executes(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
+    rows = _execute_dsl(test_pool, {"select": [{"count": "*", "as": "total"}]})
+    assert len(rows) == 1
+    assert rows[0]["total"] == 3
+
+
 def test_date_range_filter(test_pool, seed_dsl) -> None:  # type: ignore[no-untyped-def]
     rows = _execute_dsl(
         test_pool,

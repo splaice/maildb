@@ -201,6 +201,14 @@ class TestBooleanCombinators:
         assert "OR" in sql
         assert len(params) == 3
 
+    def test_empty_and_raises_clear_error(self) -> None:
+        with pytest.raises(ValueError, match="'and'"):
+            parse_query({"where": {"and": []}})
+
+    def test_empty_or_raises_clear_error(self) -> None:
+        with pytest.raises(ValueError, match="'or'"):
+            parse_query({"where": {"or": []}})
+
 
 # ---------------------------------------------------------------------------
 # Select expressions
@@ -224,6 +232,11 @@ class TestSelect:
             }
         )
         assert "count(*) AS total" in sql
+
+    def test_count_star_without_group_by_has_no_default_order(self) -> None:
+        sql, _ = parse_query({"select": [{"count": "*", "as": "total"}]})
+        assert "SELECT count(*) AS total FROM emails" in sql
+        assert "ORDER BY" not in sql
 
     def test_count_distinct(self) -> None:
         sql, _ = parse_query(
@@ -319,6 +332,10 @@ class TestGroupByHavingOrderBy:
 
     def test_default_order_is_date_desc(self) -> None:
         sql, _ = parse_query({})
+        assert "ORDER BY date DESC" in sql
+
+    def test_non_aggregate_select_without_order_by_defaults_to_date_desc(self) -> None:
+        sql, _ = parse_query({"select": [{"field": "subject"}]})
         assert "ORDER BY date DESC" in sql
 
 
