@@ -4,20 +4,22 @@ from uuid import uuid4
 import pytest
 from psycopg.rows import dict_row
 
-from maildb.ingest.embed import embed_worker
+from maildb.ingest.embed import _fetch_batch, embed_worker
 from maildb.ingest.orchestrator import get_status
 
 pytestmark = pytest.mark.integration
 
 
 def _insert_test_email(pool, message_id="test@example.com"):
+    email_id = uuid4()
     with pool.connection() as conn:
         conn.execute(
             """INSERT INTO emails (id, message_id, thread_id, subject, sender_name, body_text, created_at)
                VALUES (%(id)s, %(message_id)s, 'thread-1', 'Test', 'Sender', 'Body text', now())""",
-            {"id": uuid4(), "message_id": message_id},
+            {"id": email_id, "message_id": message_id},
         )
         conn.commit()
+    return email_id
 
 
 def test_embed_worker_processes_null_embeddings(test_pool, test_settings):
@@ -40,6 +42,27 @@ def test_embed_worker_processes_null_embeddings(test_pool, test_settings):
     with test_pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT count(*) AS c FROM emails WHERE embedding IS NOT NULL")
         assert cur.fetchone()["c"] == 2
+
+
+def test_fetch_batch_holds_locks(test_pool):
+    for i in range(4):
+        _insert_test_email(test_pool, f"lock-test-{i}@example.com")
+
+    conn1 = test_pool.getconn()
+    conn2 = test_pool.getconn()
+    try:
+        rows1 = _fetch_batch(conn1, 2)
+        rows2 = _fetch_batch(conn2, 10)
+
+        ids1 = {row["id"] for row in rows1}
+        ids2 = {row["id"] for row in rows2}
+        assert len(ids1) == 2
+        assert ids1.isdisjoint(ids2)
+    finally:
+        conn1.rollback()
+        conn2.rollback()
+        test_pool.putconn(conn2)
+        test_pool.putconn(conn1)
 
 
 def _insert_email_with_zero_vector(pool, message_id, dimensions=768):

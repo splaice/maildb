@@ -53,6 +53,25 @@ def run_index_phase(pool: ConnectionPool, *, include_hnsw: bool = False) -> None
     logger.info("indexes_created", include_hnsw=include_hnsw)
 
 
+def create_embed_backlog_index(pool: ConnectionPool) -> None:
+    """Create a temporary partial index for the embed backlog scan."""
+    with pool.connection() as conn:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_embedding_null "
+            "ON emails (id) WHERE embedding IS NULL"
+        )
+        conn.commit()
+    logger.info("embed_backlog_index_created")
+
+
+def drop_embed_backlog_index(pool: ConnectionPool) -> None:
+    """Drop the temporary partial index used during the embed phase."""
+    with pool.connection() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_email_embedding_null")
+        conn.commit()
+    logger.info("embed_backlog_index_dropped")
+
+
 def create_hnsw_index(pool: ConnectionPool) -> None:
     """Create the HNSW index on embeddings. Called after embed phase."""
     with pool.connection() as conn:

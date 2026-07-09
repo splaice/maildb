@@ -10,7 +10,13 @@ import structlog
 from psycopg_pool import ConnectionPool
 
 from maildb.ingest.embed import embed_worker
-from maildb.ingest.index import create_hnsw_index, drop_non_unique_indexes, run_index_phase
+from maildb.ingest.index import (
+    create_embed_backlog_index,
+    create_hnsw_index,
+    drop_embed_backlog_index,
+    drop_non_unique_indexes,
+    run_index_phase,
+)
 from maildb.ingest.parse import process_chunk
 from maildb.ingest.split import split_mbox
 from maildb.ingest.tasks import (
@@ -280,20 +286,24 @@ def run_pipeline(
                     else:
                         task_id = None
 
-                    with ProcessPoolExecutor(max_workers=embed_workers) as executor:
-                        futures = [
-                            executor.submit(
-                                embed_worker,
-                                database_url=database_url,
-                                ollama_url=ollama_url,
-                                embedding_model=embedding_model,
-                                embedding_dimensions=embedding_dimensions,
-                                batch_size=embed_batch_size,
-                                _progress_total=unembedded,
-                            )
-                            for _ in range(embed_workers)
-                        ]
-                        total_embedded = sum(f.result() for f in futures)
+                    create_embed_backlog_index(pool)
+                    try:
+                        with ProcessPoolExecutor(max_workers=embed_workers) as executor:
+                            futures = [
+                                executor.submit(
+                                    embed_worker,
+                                    database_url=database_url,
+                                    ollama_url=ollama_url,
+                                    embedding_model=embedding_model,
+                                    embedding_dimensions=embedding_dimensions,
+                                    batch_size=embed_batch_size,
+                                    _progress_total=unembedded,
+                                )
+                                for _ in range(embed_workers)
+                            ]
+                            total_embedded = sum(f.result() for f in futures)
+                    finally:
+                        drop_embed_backlog_index(pool)
 
                     if task_id is not None:
                         complete_task(pool, task_id, messages_total=total_embedded)
