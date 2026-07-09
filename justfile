@@ -30,6 +30,12 @@ check: fmt lint test
 patch-surya *ARGS="apply":
     uv run python scripts/surya_mps_patch.py {{ARGS}}
 
+# Verify required services are up (PostgreSQL + pgvector, test DB, Ollama +
+# embedding model, venv sanity, cheap-coder CLI). Run before a work session
+# or drain to catch environment blockers early.
+verify-env:
+    uv run python scripts/verify_env.py
+
 # Smoke-test the Marker extraction pipeline after dependency changes.
 # Pass --extract to also run a fixture PDF end-to-end (slower, warmer caches).
 # Catches the cv2-stub class of breakage from bad `uv add` / `uv remove`.
