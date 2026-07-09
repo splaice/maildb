@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from maildb.ingest.chunking import chunk_markdown
+from maildb.tokenizer import count_tokens
 
 
 def test_chunk_flat_short_doc_single_chunk():
@@ -38,6 +39,23 @@ def test_chunk_respects_token_cap():
     assert len(chunks) > 1
     for c in chunks:
         assert c.token_count <= 256
+
+
+def test_first_unbroken_word_is_hard_split_without_empty_chunks():
+    text = ("x." * 20_000) + " tail"
+    chunks = chunk_markdown(text, max_tokens=64, min_tokens=1)
+
+    assert chunks
+    assert all(c.text for c in chunks)
+    assert all(count_tokens(c.text) <= 64 for c in chunks)
+
+
+def test_normal_multi_sentence_text_stays_single_chunk_when_under_cap():
+    md = "First sentence. Second sentence. Third sentence."
+    chunks = chunk_markdown(md, max_tokens=1024, min_tokens=1)
+
+    assert len(chunks) == 1
+    assert chunks[0].text == md
 
 
 def test_chunk_small_sections_merge_under_soft_floor():

@@ -238,6 +238,44 @@ def test_init_db_backfills_email_accounts_from_emails(test_pool) -> None:  # typ
     assert rows == [("legacy@example.com", iid)]
 
 
+def test_init_db_commits_backfill_when_source_account_remains_nullable(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """A nullable legacy row must not prevent other init_db backfills from committing."""
+    iid = uuid4()
+    tagged_eid = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute("ALTER TABLE emails ALTER COLUMN source_account DROP NOT NULL")
+        conn.execute("DELETE FROM email_accounts")
+        conn.execute("DELETE FROM emails")
+        conn.execute("DELETE FROM imports")
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'legacy@example.com', 't', 'completed')",
+            {"id": iid},
+        )
+        conn.execute(
+            """INSERT INTO emails (id, message_id, thread_id, source_account, import_id)
+               VALUES (%(id)s, '<tagged@example.com>', 't',
+                       'legacy@example.com', %(iid)s)""",
+            {"id": tagged_eid, "iid": iid},
+        )
+        conn.execute(
+            "INSERT INTO emails (id, message_id, thread_id) "
+            "VALUES (%(id)s, '<null-source@example.com>', 't')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    init_db(test_pool)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT source_account, import_id FROM email_accounts WHERE email_id = %(eid)s",
+            {"eid": tagged_eid},
+        )
+        rows = cur.fetchall()
+    assert rows == [("legacy@example.com", iid)]
+
+
 def test_attachments_has_reference_count(test_pool) -> None:  # type: ignore[no-untyped-def]
     with test_pool.connection() as conn:
         cur = conn.execute(

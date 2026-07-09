@@ -127,7 +127,6 @@ class MailDB:
             model_name=self._config.embedding_model,
             dimensions=self._config.embedding_dimensions,
         )
-        self._effective_user_emails_cache: list[str] | None = None
 
     @classmethod
     def _from_pool(
@@ -145,7 +144,6 @@ class MailDB:
             model_name=instance._config.embedding_model,
             dimensions=instance._config.embedding_dimensions,
         )
-        instance._effective_user_emails_cache = None
         return instance
 
     def init_db(self) -> None:
@@ -413,8 +411,6 @@ class MailDB:
         Ingested accounts from `imports` fill in anything the config missed.
         Deduplicated.
         """
-        if self._effective_user_emails_cache is not None:
-            return self._effective_user_emails_cache
         with self._pool.connection() as conn:
             cur = conn.execute("SELECT DISTINCT source_account FROM imports")
             ingested = [r[0] for r in cur.fetchall() if r[0]]
@@ -424,7 +420,6 @@ class MailDB:
             if addr and addr not in seen:
                 seen.add(addr)
                 merged.append(addr)
-        self._effective_user_emails_cache = merged
         return merged
 
     def _identity_addresses(self, account: str | None) -> list[str]:

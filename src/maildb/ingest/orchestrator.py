@@ -37,6 +37,12 @@ def count_unembedded(pool: ConnectionPool) -> int:
         return cur.fetchone()[0]  # type: ignore[index,no-any-return]
 
 
+def _emails_table_is_empty(pool: ConnectionPool) -> bool:
+    with pool.connection() as conn:
+        cur = conn.execute("SELECT 1 FROM emails LIMIT 1")
+        return cur.fetchone() is None
+
+
 def _get_pool(database_url: str) -> ConnectionPool:
     return ConnectionPool(conninfo=database_url, min_size=1, max_size=5, open=True)
 
@@ -225,7 +231,12 @@ def run_pipeline(
             parse_status = get_phase_status(pool, "parse", import_id=import_id)
             if parse_status["pending"] > 0 or parse_status["in_progress"] > 0:
                 logger.info("phase_start", phase="parse", pending=parse_status["pending"])
-                drop_non_unique_indexes(pool)
+                if _emails_table_is_empty(pool):
+                    drop_non_unique_indexes(pool)
+                else:
+                    # The index phase uses CREATE INDEX IF NOT EXISTS, so existing
+                    # indexes kept for incremental imports become no-ops there.
+                    logger.info("indexes_kept_incremental_import")
 
                 with ProcessPoolExecutor(max_workers=parse_workers) as executor:
                     futures = [

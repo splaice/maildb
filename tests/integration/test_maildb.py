@@ -1707,6 +1707,33 @@ def test_effective_user_emails_merges_config_and_imports(test_pool, test_setting
     assert set(identities) == {"a@example.com", "b@example.com"}
 
 
+def test_effective_user_emails_reflects_new_import_on_same_instance(
+    test_pool, test_settings
+) -> None:  # type: ignore[no-untyped-def]
+    config = test_settings.model_copy()
+    config.user_emails = []
+    db = MailDB._from_pool(test_pool, config=config)
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'a@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+    assert db._identity_addresses(None) == ["a@example.com"]
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO imports (id, source_account, source_file, status) "
+            "VALUES (%(id)s, 'b@example.com', 't', 'completed')",
+            {"id": uuid4()},
+        )
+        conn.commit()
+
+    assert set(db._identity_addresses(None)) == {"a@example.com", "b@example.com"}
+
+
 def test_effective_user_emails_config_takes_priority_in_order(test_pool, test_settings) -> None:  # type: ignore[no-untyped-def]
     """Configured identities appear first, ingested ones fill in the rest."""
     config = test_settings.model_copy()

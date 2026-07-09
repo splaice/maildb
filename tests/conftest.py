@@ -5,6 +5,7 @@ import os
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from maildb.config import Settings
@@ -27,6 +28,11 @@ def test_settings() -> Settings:
 
 @pytest.fixture(scope="session")
 def test_pool(test_settings: Settings):  # type: ignore[no-untyped-def]
+    try:
+        with psycopg.connect(test_settings.database_url, connect_timeout=2) as conn:
+            conn.execute("SELECT 1")
+    except psycopg.Error as exc:
+        pytest.skip(f"PostgreSQL test database unavailable: {exc}")
     pool = create_pool(test_settings)
     init_db(pool)
     create_indexes(pool)  # Tests need indexes
@@ -52,14 +58,7 @@ def _ensure_source_account_nullable(request) -> Iterator[None]:  # type: ignore[
     yield
 
 
-@pytest.fixture(autouse=True)
-def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
-    """Delete all rows after each integration test to prevent test pollution."""
-    if "integration" not in [m.name for m in request.node.iter_markers()]:
-        yield
-        return
-    yield
-    pool = request.getfixturevalue("test_pool")
+def _delete_email_rows(pool) -> None:  # type: ignore[no-untyped-def]
     with pool.connection() as conn:
         conn.execute("DELETE FROM email_attachments")
         conn.execute("DELETE FROM attachments")
@@ -68,6 +67,18 @@ def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
         conn.execute("DELETE FROM emails")
         conn.execute("DELETE FROM imports")
         conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _clean_emails(request) -> Iterator[None]:  # type: ignore[no-untyped-def]
+    """Delete all rows after each integration test to prevent test pollution."""
+    if "integration" not in [m.name for m in request.node.iter_markers()]:
+        yield
+        return
+    pool = request.getfixturevalue("test_pool")
+    _delete_email_rows(pool)
+    yield
+    _delete_email_rows(pool)
 
 
 @pytest.fixture

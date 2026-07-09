@@ -13,6 +13,15 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 pytestmark = pytest.mark.integration
 
 
+def _existing_indexes(pool, names):
+    with pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE indexname = ANY(%(names)s)",
+            {"names": list(names)},
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
 def _insert_unembedded_email(pool, message_id):
     with pool.connection() as conn:
         conn.execute(
@@ -457,7 +466,22 @@ def test_run_pipeline_two_accounts_two_mboxes_both_ingest(test_pool, test_settin
     mbox_b = tmp_path / "sample_b.mbox"
     mbox_b.write_bytes(mbox_a.read_bytes().replace(b"<msg", b"<b-msg"))
 
+    with test_pool.connection() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_email_date")
+        conn.execute("DROP INDEX IF EXISTS idx_email_embedding")
+        conn.commit()
+
     run_pipeline(mbox_path=mbox_a, source_account="a@example.com", **common)
+    assert "idx_email_date" in _existing_indexes(test_pool, {"idx_email_date"})
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_embedding "
+            "ON emails USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64)"
+        )
+        conn.commit()
+
     run_pipeline(mbox_path=mbox_b, source_account="b@example.com", **common)
 
     with test_pool.connection() as conn:
@@ -479,11 +503,16 @@ def test_run_pipeline_two_accounts_two_mboxes_both_ingest(test_pool, test_settin
             "SELECT messages_inserted FROM imports WHERE source_account = 'b@example.com'"
         )
         b_inserted = cur.fetchone()[0]
+    indexes_after_second = _existing_indexes(
+        test_pool,
+        {"idx_email_date", "idx_email_embedding"},
+    )
     assert a_count > 0, "account a should have email_accounts rows"
     assert b_count > 0, "account b should have email_accounts rows"
     assert a_count == b_count, "both mboxes have the same message count"
     assert total_emails == a_count + b_count, "no dedup expected (distinct message_ids)"
     assert a_inserted > 0 and b_inserted > 0, "imports rows reflect actual work"
+    assert indexes_after_second == {"idx_email_date", "idx_email_embedding"}
 
 
 def test_run_pipeline_force_new_import(test_pool, test_settings, tmp_path):
