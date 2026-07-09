@@ -53,6 +53,8 @@ def _email(  # type: ignore[no-untyped-def]
     sender_address: str,
     sender_name: str | None = None,
     to: list[str] | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
     date: datetime | None = None,
     import_id=None,
     source_account: str = "me@example.com",
@@ -66,7 +68,7 @@ def _email(  # type: ignore[no-untyped-def]
         "sender_name": sender_name,
         "sender_address": sender_address,
         "sender_domain": domain,
-        "recipients": json.dumps({"to": to or [], "cc": [], "bcc": []}),
+        "recipients": json.dumps({"to": to or [], "cc": cc or [], "bcc": bcc or []}),
         "date": date or datetime(2025, 1, 15, 10, 0, tzinfo=UTC),
         "body_text": "hello",
         "labels": ["INBOX"],
@@ -74,6 +76,18 @@ def _email(  # type: ignore[no-untyped-def]
         "import_id": import_id,
         "source_account": source_account,
     }
+
+
+def _snapshot_contact_addresses(pool) -> dict[str, tuple]:  # type: ignore[no-untyped-def]
+    """Stats snapshot keyed by address (excludes contact_id UUIDs)."""
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT address, name_variants, is_user, first_seen, last_seen,
+                      messages_from, messages_to
+                 FROM contact_addresses
+                ORDER BY address"""
+        ).fetchall()
+    return {r[0]: (tuple(r[1] or []), r[2], r[3], r[4], r[5], r[6]) for r in rows}
 
 
 def _seed(pool, emails: list[dict]) -> None:  # type: ignore[no-untyped-def]
@@ -428,6 +442,102 @@ def test_build_and_classify_idempotent(test_pool) -> None:  # type: ignore[no-un
     assert c1 == c2
     assert probs_1 == probs_2
     assert r1["addresses"] == r2["addresses"]
+
+
+def test_full_and_incremental_build_equivalence(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """Full one-pass build must match per-import incremental stats exactly.
+
+    Seeds multi-arm (same address in to AND cc of one user-sent email counts
+    once), sender-only, recipient-only, and mixed addresses across imports.
+    """
+    _clean_contacts(test_pool)
+    import_a = _insert_import(test_pool, "me@example.com")
+    import_b = _insert_import(test_pool, "me@example.com")
+
+    _seed(
+        test_pool,
+        [
+            # Multi-arm: multi@z.com in both to and cc of a single user-sent email
+            # → messages_to must be 1 (not 2).
+            _email(
+                message_id="eq-multi-arm@x.com",
+                sender_address="me@example.com",
+                sender_name="Me",
+                to=["multi@z.com"],
+                cc=["multi@z.com", "other-cc@z.com"],
+                date=datetime(2025, 1, 5, 10, 0, tzinfo=UTC),
+                import_id=import_a,
+            ),
+            # Sender-only: never a recipient of a user-sent email
+            _email(
+                message_id="eq-sender-only@x.com",
+                sender_address="senderonly@x.com",
+                sender_name="Sender Only",
+                to=["me@example.com"],
+                date=datetime(2025, 1, 10, 9, 0, tzinfo=UTC),
+                import_id=import_a,
+            ),
+            # Recipient-only (import B): user wrote to them; they never sent
+            _email(
+                message_id="eq-recip-only@x.com",
+                sender_address="me@example.com",
+                sender_name="Me",
+                to=["reciponly@y.com"],
+                date=datetime(2025, 1, 12, 11, 0, tzinfo=UTC),
+                import_id=import_b,
+            ),
+            # Mixed: alice sends and user replies
+            _email(
+                message_id="eq-alice-from@x.com",
+                sender_address="alice@x.com",
+                sender_name="Alice A",
+                to=["me@example.com"],
+                date=datetime(2025, 1, 15, 8, 0, tzinfo=UTC),
+                import_id=import_b,
+            ),
+            _email(
+                message_id="eq-alice-to@x.com",
+                sender_address="me@example.com",
+                sender_name="Me",
+                to=["alice@x.com"],
+                bcc=["bcc-only@z.com"],
+                date=datetime(2025, 1, 16, 14, 0, tzinfo=UTC),
+                import_id=import_b,
+            ),
+            # Second name variant for alice (name_variants / top_name)
+            _email(
+                message_id="eq-alice-from-2@x.com",
+                sender_address="alice@x.com",
+                sender_name="Alice",
+                to=["me@example.com"],
+                date=datetime(2025, 1, 20, 8, 0, tzinfo=UTC),
+                import_id=import_a,
+            ),
+        ],
+    )
+
+    build_contacts(test_pool)  # full path
+    full_snapshot = _snapshot_contact_addresses(test_pool)
+
+    # Prove multi-arm dedup: one user-sent email with address in to+cc → 1
+    assert full_snapshot["multi@z.com"][5] == 1  # messages_to
+    assert full_snapshot["senderonly@x.com"][4] == 1  # messages_from
+    assert full_snapshot["senderonly@x.com"][5] == 0  # messages_to
+    assert full_snapshot["reciponly@y.com"][4] == 0  # messages_from
+    assert full_snapshot["reciponly@y.com"][5] == 1  # messages_to
+    assert full_snapshot["alice@x.com"][4] == 2  # messages_from
+    assert full_snapshot["alice@x.com"][5] == 1  # messages_to
+
+    with test_pool.connection() as conn:
+        conn.execute("TRUNCATE contact_addresses, contacts")
+        conn.commit()
+
+    # Per-import incremental builds over the same data
+    for iid in (import_a, import_b):
+        build_contacts(test_pool, import_id=iid)
+
+    incremental_snapshot = _snapshot_contact_addresses(test_pool)
+    assert incremental_snapshot == full_snapshot
 
 
 def test_orchestrator_builds_and_classifies_contacts(test_pool, test_settings, tmp_path) -> None:  # type: ignore[no-untyped-def]

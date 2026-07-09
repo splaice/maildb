@@ -76,56 +76,13 @@ def build_contacts(
 
     With ``import_id``, only addresses appearing in that import are touched;
     stats for those addresses are recomputed from the full corpus. Without,
-    the whole corpus is processed.
+    the whole corpus is processed via single-pass aggregation (no per-address
+    containment probes).
 
     Returns ``{"addresses": n, "contacts_created": n, "contact_ids": [...]}``.
     """
     user_ids = _user_identities(pool)
     with pool.connection() as conn:
-        # Addresses touched by the (scoped) source rows.
-        cur = conn.execute(
-            """
-            WITH scoped AS (
-                SELECT sender_address, recipients
-                  FROM emails
-                 WHERE (%(import_id)s::uuid IS NULL OR import_id = %(import_id)s::uuid)
-            ),
-            from_addrs AS (
-                SELECT lower(btrim(sender_address)) AS address
-                  FROM scoped
-                 WHERE sender_address IS NOT NULL AND btrim(sender_address) <> ''
-            ),
-            to_addrs AS (
-                SELECT lower(btrim(r.addr)) AS address
-                  FROM scoped e
-                  CROSS JOIN LATERAL (
-                      SELECT jsonb_array_elements_text(
-                                 COALESCE(e.recipients->'to', '[]'::jsonb)
-                             ) AS addr
-                      UNION ALL
-                      SELECT jsonb_array_elements_text(
-                                 COALESCE(e.recipients->'cc', '[]'::jsonb)
-                             )
-                      UNION ALL
-                      SELECT jsonb_array_elements_text(
-                                 COALESCE(e.recipients->'bcc', '[]'::jsonb)
-                             )
-                  ) r
-                 WHERE e.recipients IS NOT NULL
-                   AND r.addr IS NOT NULL
-                   AND btrim(r.addr) <> ''
-            )
-            SELECT DISTINCT address FROM from_addrs
-            UNION
-            SELECT DISTINCT address FROM to_addrs
-            """,
-            {"import_id": import_id},
-        )
-        touched = [row[0] for row in cur.fetchall()]
-        if not touched:
-            return {"addresses": 0, "contacts_created": 0, "contact_ids": []}
-
-        # Stage full-corpus stats for touched addresses, then apply set-based.
         conn.execute(
             """CREATE TEMP TABLE contacts_staging (
                    address text PRIMARY KEY,
@@ -139,153 +96,17 @@ def build_contacts(
                    messages_to int
                ) ON COMMIT DROP"""
         )
-        cur = conn.execute(
-            """
-            INSERT INTO contacts_staging (
-                address, top_name, name_variants, is_user,
-                first_seen, last_seen, messages_from, messages_to
-            )
-            WITH touched AS (
-                SELECT unnest(%(addrs)s::text[]) AS address
-            ),
-            sender_names AS (
-                SELECT lower(btrim(e.sender_address)) AS address,
-                       e.sender_name,
-                       count(*) AS cnt
-                  FROM emails e
-                  JOIN touched t ON lower(btrim(e.sender_address)) = t.address
-                 WHERE e.sender_name IS NOT NULL AND btrim(e.sender_name) <> ''
-                 GROUP BY 1, 2
-            ),
-            name_variants AS (
-                SELECT address,
-                       array_agg(sender_name ORDER BY sender_name) AS name_variants
-                  FROM sender_names
-                 GROUP BY address
-            ),
-            top_names AS (
-                SELECT DISTINCT ON (address) address, sender_name AS top_name
-                  FROM sender_names
-                 ORDER BY address, cnt DESC, sender_name
-            ),
-            from_stats AS (
-                SELECT lower(btrim(e.sender_address)) AS address,
-                       count(*)::int AS messages_from,
-                       min(e.date) AS first_seen,
-                       max(e.date) AS last_seen
-                  FROM emails e
-                  JOIN touched t ON lower(btrim(e.sender_address)) = t.address
-                 GROUP BY 1
-            ),
-            to_stats AS (
-                SELECT t.address,
-                       count(*)::int AS messages_to
-                  FROM touched t
-                  JOIN emails e ON (
-                      lower(btrim(e.sender_address)) = ANY(%(user_emails)s)
-                      AND (
-                          e.recipients @> jsonb_build_object(
-                              'to', to_jsonb(ARRAY[t.address])
-                          )
-                          OR e.recipients @> jsonb_build_object(
-                              'cc', to_jsonb(ARRAY[t.address])
-                          )
-                          OR e.recipients @> jsonb_build_object(
-                              'bcc', to_jsonb(ARRAY[t.address])
-                          )
-                      )
-                  )
-                 GROUP BY t.address
-            ),
-            date_bounds AS (
-                -- first/last seen across both sent and received for recipient-only addrs
-                SELECT t.address,
-                       least(fs.first_seen, rs.first_seen) AS first_seen,
-                       greatest(fs.last_seen, rs.last_seen) AS last_seen
-                  FROM touched t
-                  LEFT JOIN from_stats fs ON fs.address = t.address
-                  LEFT JOIN (
-                      SELECT t2.address,
-                             min(e.date) AS first_seen,
-                             max(e.date) AS last_seen
-                        FROM touched t2
-                        JOIN emails e ON (
-                            e.recipients @> jsonb_build_object(
-                                'to', to_jsonb(ARRAY[t2.address])
-                            )
-                            OR e.recipients @> jsonb_build_object(
-                                'cc', to_jsonb(ARRAY[t2.address])
-                            )
-                            OR e.recipients @> jsonb_build_object(
-                                'bcc', to_jsonb(ARRAY[t2.address])
-                            )
-                        )
-                       GROUP BY t2.address
-                  ) rs ON rs.address = t.address
-            )
-            SELECT t.address,
-                   tn.top_name,
-                   coalesce(nv.name_variants, '{}'::text[]) AS name_variants,
-                   (t.address = ANY(%(user_emails)s)) AS is_user,
-                   db.first_seen,
-                   db.last_seen,
-                   coalesce(fs.messages_from, 0) AS messages_from,
-                   coalesce(ts.messages_to, 0) AS messages_to
-              FROM touched t
-              LEFT JOIN name_variants nv ON nv.address = t.address
-              LEFT JOIN top_names tn ON tn.address = t.address
-              LEFT JOIN from_stats fs ON fs.address = t.address
-              LEFT JOIN to_stats ts ON ts.address = t.address
-              LEFT JOIN date_bounds db ON db.address = t.address
-            """,
-            {"addrs": touched, "user_emails": user_ids},
-        )
-        addresses_count = max(cur.rowcount, 0)
 
-        # (c) refresh stats on existing address rows first
-        conn.execute(
-            """UPDATE contact_addresses ca
-                  SET name_variants = s.name_variants,
-                      is_user = s.is_user,
-                      first_seen = s.first_seen,
-                      last_seen = s.last_seen,
-                      messages_from = s.messages_from,
-                      messages_to = s.messages_to
-                 FROM contacts_staging s
-                WHERE ca.address = s.address"""
-        )
-        # (a) new singleton contacts for addresses not yet in contact_addresses
-        cur = conn.execute(
-            """INSERT INTO contacts (id, display_name)
-               SELECT s.new_contact_id, s.top_name
-                 FROM contacts_staging s
-                WHERE NOT EXISTS (
-                          SELECT 1 FROM contact_addresses ca
-                           WHERE ca.address = s.address
-                      )"""
-        )
-        contacts_created = max(cur.rowcount, 0)
-        # (b) matching address rows for those new contacts
-        conn.execute(
-            """INSERT INTO contact_addresses (
-                   address, contact_id, name_variants, is_user,
-                   first_seen, last_seen, messages_from, messages_to
-               )
-               SELECT s.address, s.new_contact_id, s.name_variants, s.is_user,
-                      s.first_seen, s.last_seen, s.messages_from, s.messages_to
-                 FROM contacts_staging s
-                WHERE NOT EXISTS (
-                          SELECT 1 FROM contact_addresses ca
-                           WHERE ca.address = s.address
-                      )"""
-        )
+        if import_id is None:
+            addresses_count = _populate_staging_full(conn, user_ids)
+        else:
+            addresses_count = _populate_staging_incremental(conn, user_ids, import_id)
 
-        cur = conn.execute(
-            """SELECT DISTINCT ca.contact_id
-                 FROM contacts_staging s
-                 JOIN contact_addresses ca ON ca.address = s.address"""
-        )
-        contact_ids = [row[0] for row in cur.fetchall()]
+        if addresses_count == 0:
+            conn.commit()
+            return {"addresses": 0, "contacts_created": 0, "contact_ids": []}
+
+        contacts_created, contact_ids = _apply_contacts_staging(conn)
         conn.commit()
 
     logger.info(
@@ -299,6 +120,296 @@ def build_contacts(
         "contacts_created": contacts_created,
         "contact_ids": contact_ids,
     }
+
+
+def _populate_staging_full(conn: Any, user_ids: list[str]) -> int:
+    """Full-corpus staging via single scans (no per-address probing)."""
+    cur = conn.execute(
+        """
+        INSERT INTO contacts_staging (
+            address, top_name, name_variants, is_user,
+            first_seen, last_seen, messages_from, messages_to
+        )
+        WITH sender_names AS (
+            SELECT lower(btrim(e.sender_address)) AS address,
+                   e.sender_name,
+                   count(*) AS cnt
+              FROM emails e
+             WHERE e.sender_address IS NOT NULL AND btrim(e.sender_address) <> ''
+               AND e.sender_name IS NOT NULL AND btrim(e.sender_name) <> ''
+             GROUP BY 1, 2
+        ),
+        name_variants AS (
+            SELECT address,
+                   array_agg(sender_name ORDER BY sender_name) AS name_variants
+              FROM sender_names
+             GROUP BY address
+        ),
+        top_names AS (
+            SELECT DISTINCT ON (address) address, sender_name AS top_name
+              FROM sender_names
+             ORDER BY address, cnt DESC, sender_name
+        ),
+        from_stats AS (
+            SELECT lower(btrim(e.sender_address)) AS address,
+                   count(*)::int AS messages_from,
+                   min(e.date) AS first_seen,
+                   max(e.date) AS last_seen
+              FROM emails e
+             WHERE e.sender_address IS NOT NULL AND btrim(e.sender_address) <> ''
+             GROUP BY 1
+        ),
+        recipient_rows AS (
+            -- Deduplicate to one row per (email, address) so multi-arm hits
+            -- (to AND cc of the same email) count as a single messages_to.
+            SELECT DISTINCT
+                   e.id AS email_id,
+                   lower(btrim(r.addr)) AS address,
+                   e.date,
+                   (lower(btrim(e.sender_address)) = ANY(%(user_emails)s)) AS from_user
+              FROM emails e
+              CROSS JOIN LATERAL (
+                  SELECT jsonb_array_elements_text(
+                             coalesce(e.recipients->'to', '[]'::jsonb)
+                         ) AS addr
+                  UNION ALL
+                  SELECT jsonb_array_elements_text(
+                             coalesce(e.recipients->'cc', '[]'::jsonb)
+                         )
+                  UNION ALL
+                  SELECT jsonb_array_elements_text(
+                             coalesce(e.recipients->'bcc', '[]'::jsonb)
+                         )
+              ) r
+             WHERE r.addr IS NOT NULL AND btrim(r.addr) <> ''
+        ),
+        to_stats AS (
+            SELECT address,
+                   count(*) FILTER (WHERE from_user)::int AS messages_to,
+                   min(date) AS first_seen,
+                   max(date) AS last_seen
+              FROM recipient_rows
+             GROUP BY address
+        )
+        SELECT coalesce(fs.address, ts.address) AS address,
+               tn.top_name,
+               coalesce(nv.name_variants, '{}'::text[]) AS name_variants,
+               (coalesce(fs.address, ts.address) = ANY(%(user_emails)s)) AS is_user,
+               least(fs.first_seen, ts.first_seen) AS first_seen,
+               greatest(fs.last_seen, ts.last_seen) AS last_seen,
+               coalesce(fs.messages_from, 0) AS messages_from,
+               coalesce(ts.messages_to, 0) AS messages_to
+          FROM from_stats fs
+          FULL OUTER JOIN to_stats ts ON ts.address = fs.address
+          LEFT JOIN name_variants nv
+            ON nv.address = coalesce(fs.address, ts.address)
+          LEFT JOIN top_names tn
+            ON tn.address = coalesce(fs.address, ts.address)
+        """,
+        {"user_emails": user_ids},
+    )
+    return max(int(cur.rowcount), 0)
+
+
+def _populate_staging_incremental(
+    conn: Any,
+    user_ids: list[str],
+    import_id: UUID | str,
+) -> int:
+    """Import-scoped staging: touched set + full-corpus per-address stats."""
+    cur = conn.execute(
+        """
+        WITH scoped AS (
+            SELECT sender_address, recipients
+              FROM emails
+             WHERE import_id = %(import_id)s::uuid
+        ),
+        from_addrs AS (
+            SELECT lower(btrim(sender_address)) AS address
+              FROM scoped
+             WHERE sender_address IS NOT NULL AND btrim(sender_address) <> ''
+        ),
+        to_addrs AS (
+            SELECT lower(btrim(r.addr)) AS address
+              FROM scoped e
+              CROSS JOIN LATERAL (
+                  SELECT jsonb_array_elements_text(
+                             COALESCE(e.recipients->'to', '[]'::jsonb)
+                         ) AS addr
+                  UNION ALL
+                  SELECT jsonb_array_elements_text(
+                             COALESCE(e.recipients->'cc', '[]'::jsonb)
+                         )
+                  UNION ALL
+                  SELECT jsonb_array_elements_text(
+                             COALESCE(e.recipients->'bcc', '[]'::jsonb)
+                         )
+              ) r
+             WHERE e.recipients IS NOT NULL
+               AND r.addr IS NOT NULL
+               AND btrim(r.addr) <> ''
+        )
+        SELECT DISTINCT address FROM from_addrs
+        UNION
+        SELECT DISTINCT address FROM to_addrs
+        """,
+        {"import_id": import_id},
+    )
+    touched = [row[0] for row in cur.fetchall()]
+    if not touched:
+        return 0
+
+    cur = conn.execute(
+        """
+        INSERT INTO contacts_staging (
+            address, top_name, name_variants, is_user,
+            first_seen, last_seen, messages_from, messages_to
+        )
+        WITH touched AS (
+            SELECT unnest(%(addrs)s::text[]) AS address
+        ),
+        sender_names AS (
+            SELECT lower(btrim(e.sender_address)) AS address,
+                   e.sender_name,
+                   count(*) AS cnt
+              FROM emails e
+              JOIN touched t ON lower(btrim(e.sender_address)) = t.address
+             WHERE e.sender_name IS NOT NULL AND btrim(e.sender_name) <> ''
+             GROUP BY 1, 2
+        ),
+        name_variants AS (
+            SELECT address,
+                   array_agg(sender_name ORDER BY sender_name) AS name_variants
+              FROM sender_names
+             GROUP BY address
+        ),
+        top_names AS (
+            SELECT DISTINCT ON (address) address, sender_name AS top_name
+              FROM sender_names
+             ORDER BY address, cnt DESC, sender_name
+        ),
+        from_stats AS (
+            SELECT lower(btrim(e.sender_address)) AS address,
+                   count(*)::int AS messages_from,
+                   min(e.date) AS first_seen,
+                   max(e.date) AS last_seen
+              FROM emails e
+              JOIN touched t ON lower(btrim(e.sender_address)) = t.address
+             GROUP BY 1
+        ),
+        to_stats AS (
+            SELECT t.address,
+                   count(*)::int AS messages_to
+              FROM touched t
+              JOIN emails e ON (
+                  lower(btrim(e.sender_address)) = ANY(%(user_emails)s)
+                  AND (
+                      e.recipients @> jsonb_build_object(
+                          'to', to_jsonb(ARRAY[t.address])
+                      )
+                      OR e.recipients @> jsonb_build_object(
+                          'cc', to_jsonb(ARRAY[t.address])
+                      )
+                      OR e.recipients @> jsonb_build_object(
+                          'bcc', to_jsonb(ARRAY[t.address])
+                      )
+                  )
+              )
+             GROUP BY t.address
+        ),
+        date_bounds AS (
+            -- first/last seen across both sent and received for recipient-only addrs
+            SELECT t.address,
+                   least(fs.first_seen, rs.first_seen) AS first_seen,
+                   greatest(fs.last_seen, rs.last_seen) AS last_seen
+              FROM touched t
+              LEFT JOIN from_stats fs ON fs.address = t.address
+              LEFT JOIN (
+                  SELECT t2.address,
+                         min(e.date) AS first_seen,
+                         max(e.date) AS last_seen
+                    FROM touched t2
+                    JOIN emails e ON (
+                        e.recipients @> jsonb_build_object(
+                            'to', to_jsonb(ARRAY[t2.address])
+                        )
+                        OR e.recipients @> jsonb_build_object(
+                            'cc', to_jsonb(ARRAY[t2.address])
+                        )
+                        OR e.recipients @> jsonb_build_object(
+                            'bcc', to_jsonb(ARRAY[t2.address])
+                        )
+                    )
+                   GROUP BY t2.address
+              ) rs ON rs.address = t.address
+        )
+        SELECT t.address,
+               tn.top_name,
+               coalesce(nv.name_variants, '{}'::text[]) AS name_variants,
+               (t.address = ANY(%(user_emails)s)) AS is_user,
+               db.first_seen,
+               db.last_seen,
+               coalesce(fs.messages_from, 0) AS messages_from,
+               coalesce(ts.messages_to, 0) AS messages_to
+          FROM touched t
+          LEFT JOIN name_variants nv ON nv.address = t.address
+          LEFT JOIN top_names tn ON tn.address = t.address
+          LEFT JOIN from_stats fs ON fs.address = t.address
+          LEFT JOIN to_stats ts ON ts.address = t.address
+          LEFT JOIN date_bounds db ON db.address = t.address
+        """,
+        {"addrs": touched, "user_emails": user_ids},
+    )
+    return max(int(cur.rowcount), 0)
+
+
+def _apply_contacts_staging(conn: Any) -> tuple[int, list[Any]]:
+    """Apply contacts_staging into contact_addresses + contacts. Shared by both paths."""
+    # (c) refresh stats on existing address rows first
+    conn.execute(
+        """UPDATE contact_addresses ca
+              SET name_variants = s.name_variants,
+                  is_user = s.is_user,
+                  first_seen = s.first_seen,
+                  last_seen = s.last_seen,
+                  messages_from = s.messages_from,
+                  messages_to = s.messages_to
+             FROM contacts_staging s
+            WHERE ca.address = s.address"""
+    )
+    # (a) new singleton contacts for addresses not yet in contact_addresses
+    cur = conn.execute(
+        """INSERT INTO contacts (id, display_name)
+           SELECT s.new_contact_id, s.top_name
+             FROM contacts_staging s
+            WHERE NOT EXISTS (
+                      SELECT 1 FROM contact_addresses ca
+                       WHERE ca.address = s.address
+                  )"""
+    )
+    contacts_created = max(int(cur.rowcount), 0)
+    # (b) matching address rows for those new contacts
+    conn.execute(
+        """INSERT INTO contact_addresses (
+               address, contact_id, name_variants, is_user,
+               first_seen, last_seen, messages_from, messages_to
+           )
+           SELECT s.address, s.new_contact_id, s.name_variants, s.is_user,
+                  s.first_seen, s.last_seen, s.messages_from, s.messages_to
+             FROM contacts_staging s
+            WHERE NOT EXISTS (
+                      SELECT 1 FROM contact_addresses ca
+                       WHERE ca.address = s.address
+                  )"""
+    )
+
+    cur = conn.execute(
+        """SELECT DISTINCT ca.contact_id
+             FROM contacts_staging s
+             JOIN contact_addresses ca ON ca.address = s.address"""
+    )
+    contact_ids = [row[0] for row in cur.fetchall()]
+    return contacts_created, contact_ids
 
 
 def _is_personal_name(name: str) -> bool:
