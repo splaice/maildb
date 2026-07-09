@@ -30,3 +30,9 @@ CREATE INDEX IF NOT EXISTS idx_attachment_chunks_attachment_id
 
 -- HNSW index created separately after embed phase:
 -- CREATE INDEX IF NOT EXISTS idx_email_embedding ON emails USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+-- Contacts indexes (not part of the parse drop/rebuild cycle — not bulk-loaded during parse).
+CREATE INDEX IF NOT EXISTS idx_contact_addresses_contact_id ON contact_addresses (contact_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_tags ON contacts USING GIN (tags);
+CREATE INDEX IF NOT EXISTS idx_contacts_kind ON contacts (kind);
+CREATE INDEX IF NOT EXISTS idx_contacts_human_probability ON contacts (human_probability);

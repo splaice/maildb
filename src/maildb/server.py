@@ -934,6 +934,119 @@ def get_attachment_markdown(
 
 @mcp.tool()
 @log_tool
+def contacts(
+    ctx: Context,
+    query: str | None = None,
+    kind: str | None = None,
+    tag: str | None = None,
+    min_human_probability: float | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Resolve people and senders: search the address book by name fragment,
+    address fragment, kind, or tag.
+
+    This is the entry point for "who is Bob?" — resolve a person to their
+    email address(es), then pass those addresses into every other tool
+    (find, correspondence, topics_with, etc.).
+
+    Parameters:
+      query: case-insensitive substring match against display_name, any name
+        variant, or any address (e.g. "Bob", "bob@", "corp.com")
+      kind: filter by curated kind — one of "human", "organization",
+        "automated", "mailing_list", "unknown"
+      tag: filter contacts that have this tag (e.g. "vip")
+      min_human_probability: minimum automated human-probability estimate
+        (0.0-1.0). This is an automated estimate only; the final `kind` is
+        always manually curated and may disagree with the score.
+      limit: max results (default 20)
+      offset: skip first N results for pagination (default 0)
+
+    Returns {total, offset, limit, results: [{id, display_name, kind,
+    kind_source, tags, human_probability, addresses, name_variants,
+    messages_from, messages_to, first_seen, last_seen}, ...]}.
+    total is 0 when offset is past the last matching row — stop paginating
+    on an empty page rather than comparing offset to total.
+    """
+    db = _get_db(ctx)
+    results, total = db.contacts_search(
+        query=query,
+        kind=kind,
+        tag=tag,
+        min_human_probability=min_human_probability,
+        limit=limit,
+        offset=offset,
+    )
+    return _wrap_response(results, total=total, offset=offset, limit=limit)
+
+
+@mcp.tool()
+@log_tool
+def get_contact(
+    ctx: Context,
+    address: str | None = None,
+    contact_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the full contact card for one person/sender.
+
+    Exactly one of address or contact_id is required. Address lookup is
+    case-insensitive (normalized to lowercase).
+
+    Parameters:
+      address: email address to look up (e.g. "bob@corp.com")
+      contact_id: contact UUID from a prior contacts() result
+
+    Returns the contact card including notes, metadata, classification_signals,
+    and classified_at; or null if not found. Raises ValueError if neither or
+    both of address/contact_id are provided.
+    """
+    db = _get_db(ctx)
+    return db.get_contact(address=address, contact_id=contact_id)
+
+
+@mcp.tool()
+@log_tool
+def update_contact(
+    ctx: Context,
+    contact_id: str,
+    kind: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    """Curation write for a single contact — the only MCP write for contacts.
+
+    Updates only the fields you provide. Setting `kind` marks the contact as
+    manually curated (`kind_source='manual'`) so automated refresh/classify
+    never overrides it. Allowed kinds: "human", "organization", "automated",
+    "mailing_list", "unknown".
+
+    Bulk/maintenance operations (rebuild the address book, reclassify the
+    corpus) live in the `maildb contacts` CLI (`contacts refresh`,
+    `contacts classify`), not here.
+
+    Parameters:
+      contact_id: contact UUID (required)
+      kind: curated kind (optional; setting it also sets kind_source='manual')
+      tags: replace the tags array (optional)
+      notes: free-text notes (optional)
+      display_name: preferred display name (optional)
+
+    Returns the updated full contact card. Raises ValueError on invalid kind
+    or missing contact.
+    """
+    db = _get_db(ctx)
+    return db.update_contact(
+        contact_id=contact_id,
+        kind=kind,
+        tags=tags,
+        notes=notes,
+        display_name=display_name,
+    )
+
+
+@mcp.tool()
+@log_tool
 def accounts(ctx: Context) -> list[dict[str, Any]]:
     """List the email accounts present in the database with email counts.
 

@@ -90,6 +90,34 @@ CREATE TABLE IF NOT EXISTS email_accounts (
     PRIMARY KEY (email_id, source_account)
 );
 
+CREATE TABLE IF NOT EXISTS contacts (
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    display_name           TEXT,
+    kind                   TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (kind IN ('human','organization','automated','mailing_list','unknown')),
+    kind_source            TEXT NOT NULL DEFAULT 'heuristic'
+        CHECK (kind_source IN ('heuristic','manual')),
+    tags                   TEXT[] NOT NULL DEFAULT '{}',
+    notes                  TEXT,
+    metadata               JSONB NOT NULL DEFAULT '{}',
+    human_probability      REAL,
+    classification_signals JSONB,
+    classified_at          TIMESTAMPTZ,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS contact_addresses (
+    address       TEXT PRIMARY KEY,
+    contact_id    UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    name_variants TEXT[] NOT NULL DEFAULT '{}',
+    is_user       BOOLEAN NOT NULL DEFAULT FALSE,
+    first_seen    TIMESTAMPTZ,
+    last_seen     TIMESTAMPTZ,
+    messages_from INT NOT NULL DEFAULT 0,
+    messages_to   INT NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS attachment_contents (
     attachment_id     INT PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,
     status            TEXT NOT NULL

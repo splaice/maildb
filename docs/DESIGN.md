@@ -30,7 +30,7 @@ Initial source is local `.mbox` files. Gmail API sync is planned.
 | Query | `src/maildb/maildb.py`, `src/maildb/dsl.py`, `src/maildb/ingest/chunking.py`, `src/maildb/tokenizer.py` | Tier 1 fixed methods + Tier 2 JSON DSL + attachment semantic search |
 | MCP server | `src/maildb/server.py` | FastMCP wrapper exposing every query method as a tool |
 
-The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP), `ingest run|status|reset|migrate`, `jobs` (process/throughput/orphan monitoring), and `process_attachments run|status|retry|reembed`.
+The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP), `ingest run|status|reset|migrate`, `jobs` (process/throughput/orphan monitoring), `process_attachments run|status|retry|reembed`, and `contacts refresh|classify`.
 
 ## 4. Load-Bearing Design Decisions
 
@@ -55,6 +55,8 @@ The CLI (`src/maildb/cli.py`, Typer) ships `serve` (run MCP), `ingest run|status
 **Ingest is a 4-phase pipeline backed by `ingest_tasks`.** Split → parse → index → embed. Parse and embed workers claim tasks with `SKIP LOCKED` for parallelism. Indexes are dropped before parse and rebuilt after for bulk-insert performance.
 
 **Dual-sink logging with PII scrubbing.** INFO+ to stderr (MCP-stdio-safe), DEBUG+ to a rotating debug log. All events pass through an email/SSN/CC/phone redactor before either sink.
+
+**Contacts are an entity-level address book, not a query-time aggregation.** `contacts` ← `contact_addresses` is materialized from the archive and refreshed at ingest (and via `maildb contacts refresh`). An automated human-probability classifier writes explainable signals and a score, but never writes `kind` — final kind is always a manual decision, guarded by `kind_source='manual'` so refresh/classify cannot clobber curation. MCP exposes read tools plus a single-contact curation write (`update_contact`); batch/maintenance jobs stay on the CLI (`contacts refresh|classify`).
 
 ## 5. Multi-Account Semantics (Summary)
 

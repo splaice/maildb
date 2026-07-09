@@ -15,6 +15,7 @@ import typer
 
 from maildb import jobs as jobs_mod
 from maildb.config import Settings
+from maildb.contacts import build_contacts, classify_contact, classify_contacts
 from maildb.db import create_hnsw_index_attachment_chunks, create_pool, init_db
 from maildb.ingest import run_logs as run_logs_mod
 from maildb.ingest.orchestrator import (
@@ -47,6 +48,11 @@ app = typer.Typer(
 
 ingest_app = typer.Typer(name="ingest", help="Ingest pipeline commands.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+
+contacts_app = typer.Typer(
+    name="contacts", help="Contact address book commands.", no_args_is_help=True
+)
+app.add_typer(contacts_app, name="contacts")
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -377,6 +383,78 @@ def ingest_repair_threads() -> None:
     finally:
         pool.close()
     typer.echo(f"Thread repair complete. updated={updated}")
+
+
+@contacts_app.command("refresh")
+def contacts_refresh(
+    classify: bool = typer.Option(
+        True,
+        "--classify/--no-classify",
+        help="Run the human-probability classifier after building contacts.",
+    ),
+) -> None:
+    """Materialize/refresh contacts from the full email corpus."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        result = build_contacts(pool)
+        typer.echo(
+            f"Contacts refresh complete. "
+            f"addresses={result['addresses']} contacts_created={result['contacts_created']}"
+        )
+        if classify:
+            n = classify_contacts(pool)
+            typer.echo(f"Classified {n} contact(s).")
+    finally:
+        pool.close()
+
+
+@contacts_app.command("classify")
+def contacts_classify(
+    address: str | None = typer.Option(
+        None,
+        "--address",
+        help="Limit classification to the contact owning this address.",
+    ),
+) -> None:
+    """Run the human-probability classifier over contacts."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        if address is not None:
+            with pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT contact_id FROM contact_addresses WHERE address = %(addr)s",
+                    {"addr": address.lower().strip()},
+                ).fetchone()
+            if row is None:
+                typer.echo(f"No contact found for address {address!r}.")
+                raise typer.Exit(code=1)
+            n = 1
+            classify_contact(pool, row[0])
+        else:
+            n = classify_contacts(pool)
+
+        with pool.connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE human_probability < 0.3),
+                    count(*) FILTER (
+                        WHERE human_probability >= 0.3 AND human_probability <= 0.7
+                    ),
+                    count(*) FILTER (WHERE human_probability > 0.7)
+                  FROM contacts
+                 WHERE human_probability IS NOT NULL
+                """
+            )
+            low, mid, high = cur.fetchone()  # type: ignore[misc]
+        typer.echo(f"Classified {n} contact(s).")
+        typer.echo(f"Distribution: <0.3={low}  0.3-0.7={mid}  >0.7={high}")
+    finally:
+        pool.close()
 
 
 process_app = typer.Typer(

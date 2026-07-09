@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from maildb.config import Settings
+from maildb.contacts import build_contacts, classify_contacts
 from maildb.maildb import MailDB
 from maildb.models import Email, SearchResult
 
@@ -1834,3 +1835,297 @@ def test_effective_user_emails_dedupes_overlap(test_pool, test_settings) -> None
     db = MailDB._from_pool(test_pool, config=config)
     identities = db._identity_addresses(None)
     assert identities == ["a@example.com"]
+
+
+# ---------------------------------------------------------------------------
+# Contacts address-book methods (contacts_search / get_contact / update_contact)
+# ---------------------------------------------------------------------------
+
+
+def _clean_contacts(pool) -> None:  # type: ignore[no-untyped-def]
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM contact_addresses")
+        conn.execute("DELETE FROM contacts")
+        conn.commit()
+
+
+def _contacts_insert_import(pool, source_account: str = "me@example.com"):  # type: ignore[no-untyped-def]
+    import_id = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            """INSERT INTO imports (id, source_account, source_file, status, completed_at)
+               VALUES (%(id)s, %(acct)s, 'seed', 'completed', now())""",
+            {"id": import_id, "acct": source_account},
+        )
+        conn.commit()
+    return import_id
+
+
+def _contacts_email(  # type: ignore[no-untyped-def]
+    *,
+    message_id: str,
+    sender_address: str,
+    sender_name: str | None = None,
+    to: list[str] | None = None,
+    date: datetime | None = None,
+    import_id=None,
+    source_account: str = "me@example.com",
+    subject: str = "Test",
+) -> dict:
+    domain = sender_address.split("@")[1] if "@" in sender_address else "example.com"
+    return {
+        "message_id": message_id,
+        "thread_id": message_id,
+        "subject": subject,
+        "sender_name": sender_name,
+        "sender_address": sender_address,
+        "sender_domain": domain,
+        "recipients": json.dumps({"to": to or [], "cc": [], "bcc": []}),
+        "date": date or datetime(2025, 1, 15, 10, 0, tzinfo=UTC),
+        "body_text": "hello",
+        "body_html": None,
+        "has_attachment": False,
+        "attachments": json.dumps([]),
+        "labels": ["INBOX"],
+        "in_reply_to": None,
+        "references": [],
+        "import_id": import_id,
+        "source_account": source_account,
+    }
+
+
+def _contacts_seed(pool, emails: list[dict]) -> None:  # type: ignore[no-untyped-def]
+    insert = """
+    INSERT INTO emails (
+        message_id, thread_id, subject, sender_name, sender_address, sender_domain,
+        recipients, date, body_text, body_html, has_attachment, attachments,
+        labels, in_reply_to, "references", import_id, source_account
+    ) VALUES (
+        %(message_id)s, %(thread_id)s, %(subject)s, %(sender_name)s, %(sender_address)s,
+        %(sender_domain)s, %(recipients)s, %(date)s, %(body_text)s, %(body_html)s,
+        %(has_attachment)s, %(attachments)s::jsonb, %(labels)s, %(in_reply_to)s,
+        %(references)s, %(import_id)s, %(source_account)s
+    )
+    """
+    with pool.connection() as conn:
+        for e in emails:
+            conn.execute(insert, e)
+        conn.commit()
+
+
+def _seed_contacts_corpus(test_pool):  # type: ignore[no-untyped-def]
+    """Seed a multi-contact corpus and run build_contacts. Returns MailDB."""
+    _clean_contacts(test_pool)
+    import_id = _contacts_insert_import(test_pool, "me@example.com")
+    # Alice: 3 inbound messages (highest volume)
+    emails = [
+        _contacts_email(
+            message_id=f"alice-{i}@x.com",
+            sender_address="alice@x.com",
+            sender_name="Alice Wonder",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 10 + i, tzinfo=UTC),
+            import_id=import_id,
+        )
+        for i in range(3)
+    ]
+    # Bob: 1 inbound
+    emails.append(
+        _contacts_email(
+            message_id="bob-1@y.com",
+            sender_address="bob@y.com",
+            sender_name="Bob Builder",
+            to=["me@example.com"],
+            date=datetime(2025, 2, 1, tzinfo=UTC),
+            import_id=import_id,
+        )
+    )
+    # Carol: user wrote to her once (messages_to only)
+    emails.append(
+        _contacts_email(
+            message_id="me-to-carol@z.com",
+            sender_address="me@example.com",
+            sender_name="Me",
+            to=["carol@z.com"],
+            date=datetime(2025, 1, 20, tzinfo=UTC),
+            import_id=import_id,
+        )
+    )
+    # noreply bulk: 2 inbound
+    emails.extend(
+        [
+            _contacts_email(
+                message_id=f"noreply-{i}@shop.com",
+                sender_address="noreply@shop.com",
+                sender_name="Shop",
+                to=["me@example.com"],
+                date=datetime(2025, 1, 5 + i, tzinfo=UTC),
+                import_id=import_id,
+            )
+            for i in range(2)
+        ]
+    )
+    _contacts_seed(test_pool, emails)
+    build_contacts(test_pool)
+    classify_contacts(test_pool)
+    return MailDB._from_pool(test_pool)
+
+
+def test_contacts_search_by_name_fragment(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    results, total = db.contacts_search(query="Alice")
+    assert total >= 1
+    assert any("alice@x.com" in (r["addresses"] or []) for r in results)
+    alice = next(r for r in results if "alice@x.com" in r["addresses"])
+    assert alice["display_name"] is not None
+    assert "Alice" in (alice["display_name"] or "") or any(
+        "Alice" in v for v in (alice["name_variants"] or [])
+    )
+
+
+def test_contacts_search_by_address_fragment(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    results, total = db.contacts_search(query="bob@y")
+    assert total == 1
+    assert results[0]["addresses"] == ["bob@y.com"]
+
+
+def test_contacts_search_by_tag(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    # Tag alice as vip
+    with test_pool.connection() as conn:
+        contact_id = conn.execute(
+            "SELECT contact_id FROM contact_addresses WHERE address = 'alice@x.com'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE contacts SET tags = ARRAY['vip'] WHERE id = %(id)s",
+            {"id": contact_id},
+        )
+        conn.commit()
+
+    results, total = db.contacts_search(tag="vip")
+    assert total == 1
+    assert results[0]["addresses"] == ["alice@x.com"]
+    assert "vip" in results[0]["tags"]
+
+
+def test_contacts_search_by_min_human_probability(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    # All classified contacts have some probability; high threshold should
+    # prefer Alice (personal name + inbound) over noreply.
+    results, total = db.contacts_search(min_human_probability=0.5)
+    addresses = {a for r in results for a in r["addresses"]}
+    assert "noreply@shop.com" not in addresses or all(
+        r["human_probability"] is not None and r["human_probability"] >= 0.5 for r in results
+    )
+    assert all(
+        r["human_probability"] is not None and r["human_probability"] >= 0.5 for r in results
+    )
+    assert total == len(results) or total >= len(results)
+
+
+def test_contacts_search_excludes_user_only(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    results, _ = db.contacts_search(limit=100)
+    all_addresses = {a for r in results for a in r["addresses"]}
+    assert "me@example.com" not in all_addresses
+
+
+def test_contacts_search_deterministic_ordering(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    results, total = db.contacts_search(limit=100)
+    assert total == len(results)
+    # Ordered by (messages_from + messages_to) DESC
+    volumes = [r["messages_from"] + r["messages_to"] for r in results]
+    assert volumes == sorted(volumes, reverse=True)
+    # Alice (3) should rank above Bob (1)
+    alice_idx = next(i for i, r in enumerate(results) if "alice@x.com" in r["addresses"])
+    bob_idx = next(i for i, r in enumerate(results) if "bob@y.com" in r["addresses"])
+    assert alice_idx < bob_idx
+
+
+def test_get_contact_by_address_and_id(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    by_addr = db.get_contact(address="Alice@X.com")  # normalized lowercase
+    assert by_addr is not None
+    assert "alice@x.com" in by_addr["addresses"]
+    assert "notes" in by_addr
+    assert "metadata" in by_addr
+    assert "classification_signals" in by_addr
+    assert "classified_at" in by_addr
+
+    by_id = db.get_contact(contact_id=by_addr["id"])
+    assert by_id is not None
+    assert by_id["id"] == by_addr["id"]
+    assert by_id["addresses"] == by_addr["addresses"]
+
+
+def test_get_contact_exactly_one_arg(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"[Ee]xactly one"):
+        db.get_contact()
+    with pytest.raises(ValueError, match=r"[Ee]xactly one"):
+        db.get_contact(address="a@b.com", contact_id=uuid4())
+
+
+def test_get_contact_not_found(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    assert db.get_contact(address="nobody@nowhere.com") is None
+    assert db.get_contact(contact_id=uuid4()) is None
+
+
+def test_update_contact_sets_fields_and_kind_source(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    card = db.get_contact(address="alice@x.com")
+    assert card is not None
+    updated = db.update_contact(
+        contact_id=card["id"],
+        kind="human",
+        tags=["vip", "friend"],
+        notes="college roommate",
+        display_name="Alice Manual",
+    )
+    assert updated["kind"] == "human"
+    assert updated["kind_source"] == "manual"
+    assert updated["tags"] == ["vip", "friend"]
+    assert updated["notes"] == "college roommate"
+    assert updated["display_name"] == "Alice Manual"
+
+
+def test_update_contact_rejects_bad_kind(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = _seed_contacts_corpus(test_pool)
+    card = db.get_contact(address="alice@x.com")
+    assert card is not None
+    with pytest.raises(ValueError, match="kind"):
+        db.update_contact(contact_id=card["id"], kind="robot")
+
+
+def test_update_contact_missing_raises(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"does not exist"):
+        db.update_contact(contact_id=uuid4(), kind="human")
+
+
+def test_update_contact_preserved_across_build_and_classify(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """Critical invariant: manual curation survives build_contacts + classify_contacts."""
+    db = _seed_contacts_corpus(test_pool)
+    card = db.get_contact(address="alice@x.com")
+    assert card is not None
+    db.update_contact(
+        contact_id=card["id"],
+        kind="human",
+        tags=["vip"],
+        notes="friend",
+        display_name="Alice Curated",
+    )
+
+    build_contacts(test_pool)
+    classify_contacts(test_pool)
+
+    after = db.get_contact(address="alice@x.com")
+    assert after is not None
+    assert after["kind"] == "human"
+    assert after["kind_source"] == "manual"
+    assert after["tags"] == ["vip"]
+    assert after["notes"] == "friend"
+    assert after["display_name"] == "Alice Curated"
