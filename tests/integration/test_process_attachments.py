@@ -4,8 +4,10 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
 import maildb.ingest.process_attachments as process_attachments_module
+from maildb.cli import app
 from maildb.ingest.process_attachments import (
     _reclaim_stale,
     ensure_pending_rows,
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.integration
+runner = CliRunner()
 
 
 def _insert_attachment(pool, sha256: str, ct: str, filename: str, size: int = 10) -> int:
@@ -190,3 +193,174 @@ def test_watchdog_reclaims_stale_extracting_row(test_pool, tmp_path):
             (att_id,),
         )
         assert cur.fetchone()[0] == "pending"
+
+
+def test_claim_row_excludes_ids(test_pool):
+    first_id = _insert_attachment(test_pool, "ex1", "text/plain", "first.txt")
+    second_id = _insert_attachment(test_pool, "ex2", "text/plain", "second.txt")
+    ensure_pending_rows(test_pool)
+
+    claimed = process_attachments_module._claim_row(
+        test_pool,
+        retry_failed=False,
+        exclude_ids=[first_id],
+    )
+    assert claimed == second_id
+
+    claimed = process_attachments_module._claim_row(
+        test_pool,
+        retry_failed=False,
+        exclude_ids=[first_id, second_id],
+    )
+    assert claimed is None
+
+
+def test_claim_loop_does_not_reclaim_failed_row(test_pool, tmp_path: Path):
+    att_id = _insert_attachment(test_pool, "rf1", "text/plain", "missing.txt")
+    ensure_pending_rows(test_pool)
+
+    class ReclaimedTwiceError(BaseException):
+        pass
+
+    attempts: list[int] = []
+    original_process_one = process_attachments_module.process_one
+
+    def counting_process_one(*args, **kwargs):  # type: ignore[no-untyped-def]
+        attempts.append(args[1])
+        if len(attempts) > 1:
+            raise ReclaimedTwiceError
+        return original_process_one(*args, **kwargs)
+
+    with patch.object(process_attachments_module, "process_one", side_effect=counting_process_one):
+        process_attachments_module._claim_and_process_loop(
+            test_pool,
+            attachment_dir=tmp_path,
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+        )
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status FROM attachment_contents WHERE attachment_id = %s",
+            (att_id,),
+        )
+        status = cur.fetchone()[0]
+
+    assert attempts == [att_id]
+    assert status == "failed"
+
+
+def test_supervisor_stuck_kill_reverts_in_flight(test_pool, tmp_path: Path):
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = True
+    worker.pid = 12345
+    fake_ctx.Process.return_value = worker
+
+    with (
+        patch.object(process_attachments_module, "_count_selected", side_effect=[3, 0]),
+        patch.object(process_attachments_module, "_find_stuck_extracting", return_value=[42]),
+        patch.object(process_attachments_module, "_mp_context", return_value=fake_ctx),
+        patch.object(process_attachments_module, "_set_status") as set_status,
+        patch.object(process_attachments_module, "_killpg_quietly"),
+        patch.object(process_attachments_module, "_revert_in_flight_to_pending") as revert,
+        patch.object(process_attachments_module, "time") as time_mod,
+    ):
+        time_mod.sleep = MagicMock()
+        revert.return_value = 2
+        process_attachments_module._run_supervised_single_worker(
+            test_pool,
+            attachment_dir=tmp_path,
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+
+    set_status.assert_called_once()
+    assert set_status.call_args.args[1] == 42
+    revert.assert_called_once()
+    assert revert.call_args.kwargs["claimed_by"].startswith("sup-")
+
+
+def test_supervisor_worker_exit_reverts_in_flight(test_pool, tmp_path: Path):
+    fake_ctx = MagicMock()
+    worker = MagicMock()
+    worker.is_alive.return_value = False
+    fake_ctx.Process.return_value = worker
+
+    with (
+        patch.object(process_attachments_module, "_count_selected", side_effect=[3, 0]),
+        patch.object(process_attachments_module, "_mp_context", return_value=fake_ctx),
+        patch.object(process_attachments_module, "_revert_in_flight_to_pending") as revert,
+    ):
+        revert.return_value = 1
+        process_attachments_module._run_supervised_single_worker(
+            test_pool,
+            attachment_dir=tmp_path,
+            retry_failed=True,
+            selector_sql="",
+            selector_params={},
+            database_url="postgresql://x/y",
+            extract_timeout_s=300,
+        )
+
+    worker.join.assert_called()
+    revert.assert_called_once()
+    assert revert.call_args.kwargs["claimed_by"].startswith("sup-")
+
+
+def test_run_reports_per_run_counts(test_pool, tmp_path: Path):
+    previous_ids = [
+        _insert_attachment(test_pool, f"old{i}", "text/plain", f"old{i}.txt") for i in range(5)
+    ]
+    new_id = _insert_attachment(test_pool, "new1", "audio/mpeg", "voicemail.mp3")
+    ensure_pending_rows(test_pool)
+
+    with test_pool.connection() as conn:
+        conn.execute(
+            "UPDATE attachment_contents "
+            "SET status = 'extracted', extracted_at = now() - interval '1 day' "
+            "WHERE attachment_id = ANY(%s)",
+            (previous_ids,),
+        )
+        conn.commit()
+
+    counts = run(test_pool, attachment_dir=tmp_path, workers=1, retry_failed=False)
+
+    with test_pool.connection() as conn:
+        cur = conn.execute(
+            "SELECT status FROM attachment_contents WHERE attachment_id = %s",
+            (new_id,),
+        )
+        assert cur.fetchone()[0] == "skipped"
+
+    assert counts == {"extracted": 0, "failed": 0, "skipped": 1}
+
+
+def test_limit_selector_respects_eligibility(test_pool):
+    ids = [
+        _insert_attachment(test_pool, "lim1", "text/plain", "one.txt"),
+        _insert_attachment(test_pool, "lim2", "text/plain", "two.txt"),
+        _insert_attachment(test_pool, "lim3", "text/plain", "three.txt"),
+    ]
+    ensure_pending_rows(test_pool)
+    with test_pool.connection() as conn:
+        conn.execute(
+            "UPDATE attachment_contents "
+            "SET status = 'extracted', extracted_at = now() - interval '1 day' "
+            "WHERE attachment_id = ANY(%s)",
+            (ids[:2],),
+        )
+        conn.commit()
+
+    with (
+        patch("maildb.cli._build_process_pool", return_value=test_pool),
+        patch("maildb.cli._close_pool", return_value=None),
+    ):
+        result = runner.invoke(app, ["process_attachments", "run", "--dry-run", "--limit", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "Would process 1 attachment(s)." in result.output

@@ -497,19 +497,25 @@ def process_run(
             "AND attachment_id IN (SELECT id FROM attachments WHERE size <= %(max_size)s)"
         )
         selector_params["max_size"] = max_size
+    eligible_states = "('pending','failed')" if retry_failed else "('pending')"
+    eligible_selector_sql = " ".join(selector_sql_parts)
     if sample is not None:
-        selector_sql_parts.append(
-            "AND attachment_id IN ("
+        sample_selector_sql = (
+            "AND attachment_id IN ("  # noqa: S608
             "SELECT attachment_id FROM attachment_contents "
+            f"WHERE status IN {eligible_states} {eligible_selector_sql} "
             "ORDER BY random() LIMIT %(sample)s)"
         )
+        selector_sql_parts.append(sample_selector_sql)
         selector_params["sample"] = sample
     elif limit is not None:
-        selector_sql_parts.append(
-            "AND attachment_id IN ("
+        limit_selector_sql = (
+            "AND attachment_id IN ("  # noqa: S608
             "SELECT attachment_id FROM attachment_contents "
+            f"WHERE status IN {eligible_states} {eligible_selector_sql} "
             "ORDER BY attachment_id LIMIT %(limit)s)"
         )
+        selector_sql_parts.append(limit_selector_sql)
         selector_params["limit"] = limit
 
     selector_sql = " ".join(selector_sql_parts)
