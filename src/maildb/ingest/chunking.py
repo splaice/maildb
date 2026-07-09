@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from maildb.tokenizer import count_tokens
+from maildb.tokenizer import count_tokens, get_tokenizer, truncate_to_tokens
 
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_MIN_TOKENS = 128
@@ -100,15 +100,45 @@ def _split_oversized(body: str, max_tokens: int) -> list[str]:
                 words = sent.split()
                 current: list[str] = []
                 for w in words:
-                    current.append(w)
-                    if count_tokens(" ".join(current)) > max_tokens:
-                        # Back off one word, emit, reset
-                        current.pop()
-                        out.append(" ".join(current))
+                    if count_tokens(w) > max_tokens:
+                        if current:
+                            out.append(" ".join(current))
+                            current = []
+                        out.extend(_split_long_word(w, max_tokens))
+                        continue
+                    candidate = " ".join([*current, w]) if current else w
+                    if count_tokens(candidate) > max_tokens:
+                        if current:
+                            out.append(" ".join(current))
                         current = [w]
+                    else:
+                        current.append(w)
                 if current:
                     out.append(" ".join(current))
-    return out
+    return [piece for piece in out if piece]
+
+
+def _split_long_word(word: str, max_tokens: int) -> list[str]:
+    """Split an unbroken token-heavy word into tokenizer-sized slices."""
+    tok = get_tokenizer()
+    ids = tok.encode(word).ids
+
+    def _decode_safe(token_ids: list[int]) -> list[str]:
+        piece = tok.decode(token_ids).strip()
+        if not piece:
+            return []
+        if count_tokens(piece) <= max_tokens:
+            return [piece]
+        if len(token_ids) == 1:
+            truncated = truncate_to_tokens(piece, max_tokens).strip()
+            return [truncated] if truncated else []
+        midpoint = max(1, len(token_ids) // 2)
+        return [*_decode_safe(token_ids[:midpoint]), *_decode_safe(token_ids[midpoint:])]
+
+    pieces: list[str] = []
+    for start in range(0, len(ids), max_tokens):
+        pieces.extend(_decode_safe(ids[start : start + max_tokens]))
+    return pieces
 
 
 def chunk_markdown(

@@ -21,9 +21,9 @@ test-integration *ARGS:
     uv run pytest tests/integration/ -m integration {{ARGS}}
 
 test-cov:
-    uv run pytest --cov --cov-report=term-missing
+    uv run pytest --cov --cov-report=term-missing:skip-covered
 
-check: fmt lint test
+check: fmt lint test-cov
 
 # Apply (or revert / check status of) the vendored surya MPS .max() fix.
 # Required after `uv sync` reinstalls surya-ocr until upstream PR #493 ships.

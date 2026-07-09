@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
+from typing import Any
 
 # --- Field-based redaction ---
 
@@ -79,6 +77,31 @@ def _truncate(value: str) -> str:
     return value
 
 
+def _scrub_field(key: Any, value: Any) -> Any:
+    """Scrub a value, redacting it outright when its key is sensitive."""
+    if isinstance(key, str) and key.lower() in SENSITIVE_KEYS:
+        return REDACTED
+    return _scrub_nested_value(value)
+
+
+def _scrub_mapping(mapping: Mapping[Any, Any]) -> dict[Any, Any]:
+    """Scrub every value in a mapping, applying sensitive-key redaction."""
+    return {key: _scrub_field(key, value) for key, value in mapping.items()}
+
+
+def _scrub_nested_value(value: Any) -> Any:
+    """Scrub PII recursively while preserving scalar values."""
+    if isinstance(value, str):
+        return _truncate(_scrub_value(value))
+    if isinstance(value, Mapping):
+        return _scrub_mapping(value)
+    if isinstance(value, list):
+        return [_scrub_nested_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_nested_value(item) for item in value)
+    return value
+
+
 def scrub_pii(
     logger: Any,
     method_name: str,
@@ -86,19 +109,6 @@ def scrub_pii(
 ) -> MutableMapping[str, Any]:
     """structlog processor: redact PII, then truncate long values."""
     for key in list(event_dict.keys()):
-        # Field-based: redact entire value if key is sensitive
-        if key.lower() in SENSITIVE_KEYS:
-            event_dict[key] = REDACTED
-            continue
-
-        value = event_dict[key]
-        if not isinstance(value, str):
-            continue
-
-        # Regex-based: scrub PII patterns in string values
-        value = _scrub_value(value)
-        # Truncate long values
-        value = _truncate(value)
-        event_dict[key] = value
+        event_dict[key] = _scrub_field(key, event_dict[key])
 
     return event_dict

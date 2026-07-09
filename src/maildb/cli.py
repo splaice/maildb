@@ -49,12 +49,17 @@ app.add_typer(ingest_app, name="ingest")
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DEFAULT_EXTRACT_TIMEOUT_S = int(Settings.model_fields["extract_timeout_s"].default)
 
 
 def _validate_account(account: str) -> str:
     if not _EMAIL_RE.match(account):
         raise typer.BadParameter(f"--account {account!r} is not a valid email address")
     return account
+
+
+def _resolve_extract_timeout(extract_timeout: int | None, settings: Settings) -> int:
+    return extract_timeout if extract_timeout is not None else settings.extract_timeout_s
 
 
 def _configure_logging(settings: Settings | None = None) -> None:
@@ -458,9 +463,10 @@ def process_run(
     ids: str | None = typer.Option(None, "--ids", help="Comma-separated attachment_ids."),
     min_size: int | None = typer.Option(None, "--min-size"),
     max_size: int | None = typer.Option(None, "--max-size"),
-    extract_timeout: int = typer.Option(
-        300,
+    extract_timeout: int | None = typer.Option(
+        None,
         "--extract-timeout",
+        show_default=str(_DEFAULT_EXTRACT_TIMEOUT_S),
         help="Per-attachment wall-clock ceiling in seconds (0 disables). "
         "Timed-out rows are marked failed with reason prefixed 'timed out after'.",
     ),
@@ -520,6 +526,7 @@ def process_run(
 
     selector_sql = " ".join(selector_sql_parts)
 
+    settings = Settings()
     pool = _build_process_pool()
     try:
         if dry_run:
@@ -531,7 +538,6 @@ def process_run(
             )
             typer.echo(f"Would process {n} attachment(s). (--dry-run)")
             return
-        settings = Settings()
         run_log = _begin_run_log(["maildb", "process_attachments", "run", *sys.argv[1:]])
         try:
             counts = pa_run(
@@ -542,7 +548,7 @@ def process_run(
                 selector_sql=selector_sql,
                 selector_params=selector_params,
                 database_url=settings.database_url,
-                extract_timeout_s=extract_timeout,
+                extract_timeout_s=_resolve_extract_timeout(extract_timeout, settings),
                 max_runtime_s=max_runtime,
             )
             _end_run_log(run_log, exit_code=0, counts=counts)
@@ -619,9 +625,10 @@ def process_status() -> None:
 @process_app.command("retry")
 def process_retry(
     workers: int = typer.Option(1, "--workers"),
-    extract_timeout: int = typer.Option(
-        300,
+    extract_timeout: int | None = typer.Option(
+        None,
         "--extract-timeout",
+        show_default=str(_DEFAULT_EXTRACT_TIMEOUT_S),
         help="Per-attachment wall-clock ceiling in seconds (0 disables). "
         "With workers=1 and timeout>0, runs under a subprocess supervisor that "
         "SIGKILLs the worker when a single document exceeds this budget.",
@@ -655,9 +662,9 @@ def process_retry(
     if timeouts_only and hard_timeouts_only:
         raise typer.BadParameter("--timeouts-only and --hard-timeouts-only are mutually exclusive")
 
+    settings = Settings()
     pool = _build_process_pool()
     try:
-        settings = Settings()
         selector_sql = "AND status = 'failed'"
         if timeouts_only:
             selector_sql += " AND reason LIKE 'timed out after%%'"
@@ -675,7 +682,7 @@ def process_retry(
                 selector_sql=selector_sql,
                 selector_params={},
                 database_url=settings.database_url,
-                extract_timeout_s=extract_timeout,
+                extract_timeout_s=_resolve_extract_timeout(extract_timeout, settings),
                 max_runtime_s=max_runtime,
             )
             _end_run_log(run_log, exit_code=0, counts=counts)

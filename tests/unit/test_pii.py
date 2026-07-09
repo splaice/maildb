@@ -78,6 +78,42 @@ class TestValueTruncation:
         assert result["rows"] == 42
 
 
+class TestNestedScrubbing:
+    def test_nested_params_are_scrubbed_recursively(self) -> None:
+        result = scrub_pii(
+            None,
+            "debug",
+            _event(
+                params={
+                    "sender": "alice@acme.com",
+                    "nested": {"address": "x@y.com"},
+                    "vals": ["bob@x.com"],
+                }
+            ),
+        )
+
+        params = result["params"]
+        assert isinstance(params, dict)
+        assert params["sender"] == "[REDACTED-EMAIL]"
+        assert params["nested"] == {"address": "[REDACTED]"}
+        assert params["vals"] == ["[REDACTED-EMAIL]"]
+
+    def test_nested_sensitive_key_is_redacted(self) -> None:
+        result = scrub_pii(None, "debug", _event(params={"password": "hunter2"}))
+
+        params = result["params"]
+        assert isinstance(params, dict)
+        assert params["password"] == "[REDACTED]"  # noqa: S105
+
+    def test_nested_non_string_scalars_are_unchanged(self) -> None:
+        result = scrub_pii(None, "debug", _event(params={"count": 3, "empty": None}))
+
+        params = result["params"]
+        assert isinstance(params, dict)
+        assert params["count"] == 3
+        assert params["empty"] is None
+
+
 class TestCombined:
     def test_pii_scrubbed_before_truncation(self) -> None:
         """If a long string contains PII, PII is scrubbed first, then truncated."""

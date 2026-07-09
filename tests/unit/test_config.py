@@ -21,6 +21,7 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.embedding_model == "nomic-embed-text"
     assert settings.embedding_dimensions == 768
     assert settings.user_email is None
+    assert settings.extract_timeout_s == 300
 
 
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,6 +51,18 @@ def test_debug_log_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.debug_log == "/tmp/custom-debug.log"
     assert settings.debug_log_level == "INFO"
     assert settings.debug_log_max_bytes == 5_242_880
+
+
+def test_extract_timeout_resolution_uses_settings_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from maildb.cli import _resolve_extract_timeout  # noqa: PLC0415
+
+    monkeypatch.setenv("MAILDB_EXTRACT_TIMEOUT_S", "42")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert _resolve_extract_timeout(None, settings) == 42
+    assert _resolve_extract_timeout(7, settings) == 7
 
 
 def test_user_emails_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:

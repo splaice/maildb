@@ -28,36 +28,56 @@ def init_db(pool: ConnectionPool) -> None:
     with pool.connection() as conn:
         conn.execute(schema_sql)
 
-        # Backfill attachments.reference_count from email_attachments.
-        # Safe to run every init_db: only rewrites rows where count differs.
-        conn.execute(
-            """
-            UPDATE attachments a
-               SET reference_count = sub.n
-              FROM (
-                  SELECT attachment_id, count(*) AS n
-                    FROM email_attachments
-                   GROUP BY attachment_id
-              ) sub
-             WHERE a.id = sub.attachment_id
-               AND a.reference_count != sub.n
-            """
+        cur = conn.execute(
+            """SELECT 1
+                 FROM attachments a
+                 JOIN (
+                      SELECT attachment_id, count(*) AS n
+                        FROM email_attachments
+                       GROUP BY attachment_id
+                 ) sub ON a.id = sub.attachment_id
+                WHERE a.reference_count != sub.n
+                LIMIT 1"""
         )
+        if cur.fetchone() is not None:
+            conn.execute(
+                """
+                UPDATE attachments a
+                   SET reference_count = sub.n
+                  FROM (
+                      SELECT attachment_id, count(*) AS n
+                        FROM email_attachments
+                       GROUP BY attachment_id
+                  ) sub
+                 WHERE a.id = sub.attachment_id
+                   AND a.reference_count != sub.n
+                """
+            )
 
-        # Mirror any legacy (emails.source_account, emails.import_id) pairs
-        # into email_accounts. Safe to re-run — ON CONFLICT DO NOTHING.
-        conn.execute(
-            """INSERT INTO email_accounts (email_id, source_account, import_id)
-               SELECT id, source_account, import_id FROM emails
-               WHERE source_account IS NOT NULL AND import_id IS NOT NULL
-               ON CONFLICT DO NOTHING"""
+        cur = conn.execute(
+            """SELECT 1
+                 FROM emails e
+                WHERE e.source_account IS NOT NULL
+                  AND e.import_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM email_accounts ea WHERE ea.email_id = e.id
+                  )
+                LIMIT 1"""
         )
+        if cur.fetchone() is not None:
+            conn.execute(
+                """INSERT INTO email_accounts (email_id, source_account, import_id)
+                   SELECT id, source_account, import_id FROM emails
+                   WHERE source_account IS NOT NULL AND import_id IS NOT NULL
+                   ON CONFLICT DO NOTHING"""
+            )
 
         cur = conn.execute("SELECT count(*) FROM emails WHERE source_account IS NULL")
         null_rows = cur.fetchone()[0]  # type: ignore[index]
         if null_rows == 0:
             try:
-                conn.execute("ALTER TABLE emails ALTER COLUMN source_account SET NOT NULL")
+                with conn.transaction():
+                    conn.execute("ALTER TABLE emails ALTER COLUMN source_account SET NOT NULL")
             except Exception:
                 logger.warning("source_account_not_null_constraint_skipped", exc_info=True)
         else:

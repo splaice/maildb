@@ -248,6 +248,8 @@ def find(
         Pass ["body_text", ...] to include body content.
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
+    total is 0 when offset is past the last matching row — stop paginating on an
+    empty page rather than comparing offset to total.
 
     Example: find(sender="disney@postmates.com", direct_only=True, limit=100)
     """
