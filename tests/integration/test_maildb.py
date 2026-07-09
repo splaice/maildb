@@ -898,6 +898,31 @@ def seed_unreplied_outbound(test_pool):  # type: ignore[no-untyped-def]
             "references": [],
             "embedding": [0.4] * 768,
         },
+        # Frank→Alice + Dave/Eve (cc), Alice never replies (inbound unreplied)
+        {
+            "message_id": "unr-in-2@corp.com",
+            "thread_id": "unr-in-2@corp.com",
+            "subject": "Another question from Frank",
+            "sender_name": "Frank",
+            "sender_address": "frank@corp.com",
+            "sender_domain": "corp.com",
+            "recipients": json.dumps(
+                {
+                    "to": ["alice@example.com"],
+                    "cc": ["dave@example.com", "eve@example.com"],
+                    "bcc": [],
+                }
+            ),
+            "date": datetime(2025, 3, 4, 11, 0, tzinfo=UTC),
+            "body_text": "Can you also review this?",
+            "body_html": None,
+            "has_attachment": False,
+            "attachments": json.dumps([]),
+            "labels": ["INBOX"],
+            "in_reply_to": None,
+            "references": [],
+            "embedding": [0.45] * 768,
+        },
         # Alice→Eve (to) + Dave (cc), nobody replies
         {
             "message_id": "unr-out-4@example.com",
@@ -980,6 +1005,47 @@ def test_unreplied_inbound_default(test_pool, seed_unreplied_outbound) -> None: 
     assert "unr-out-1@example.com" not in message_ids
     assert "unr-out-2@example.com" not in message_ids
     assert "unr-out-4@example.com" not in message_ids
+
+
+def test_unreplied_inbound_direct_only(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    unfiltered, _ = db.unreplied()
+    unfiltered_ids = [e.message_id for e in unfiltered]
+    assert "unr-in-1@corp.com" in unfiltered_ids
+    assert "unr-in-2@corp.com" in unfiltered_ids
+
+    results, _ = db.unreplied(direct_only=True)
+    message_ids = [e.message_id for e in results]
+    assert "unr-in-1@corp.com" in message_ids
+    assert "unr-in-2@corp.com" not in message_ids
+
+
+def test_unreplied_inbound_max_recipients(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results, _ = db.unreplied(max_recipients=1)
+    message_ids = [e.message_id for e in results]
+    assert "unr-in-1@corp.com" in message_ids
+    assert "unr-in-2@corp.com" not in message_ids
+
+
+def test_unreplied_outbound_direct_only(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results, _ = db.unreplied(direction="outbound", direct_only=True)
+    message_ids = [e.message_id for e in results]
+    assert "unr-out-1@example.com" in message_ids
+    assert "unr-out-2@example.com" not in message_ids
+    assert "unr-out-4@example.com" not in message_ids
+
+
+def test_unreplied_direct_only_conflict(test_pool, seed_unreplied_outbound) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    with pytest.raises(ValueError, match="direct_only"):
+        db.unreplied(direct_only=True, max_to=2)
 
 
 def test_unreplied_outbound_multi_recipient_partial_reply(
