@@ -242,3 +242,78 @@ def test_contacts_set_kind_value_error_exits_1():
         result = runner.invoke(app, ["contacts", "set-kind", "human"])
     assert result.exit_code == 1
     assert "Exactly one" in result.output
+
+
+def test_contacts_merge_candidates_passes_limit():
+    mock_db = MagicMock()
+    mock_db.merge_candidates.return_value = [
+        {
+            "norm_name": "sampoole",
+            "a": {
+                "display_name": "Sam A",
+                "primary_address": "a@x.com",
+                "msg_count": 5,
+                "contact_id": "id-a",
+            },
+            "b": {
+                "display_name": "Sam B",
+                "primary_address": "b@x.com",
+                "msg_count": 3,
+                "contact_id": "id-b",
+            },
+        }
+    ]
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "merge-candidates", "--limit", "10"])
+    assert result.exit_code == 0, result.output
+    mock_db.merge_candidates.assert_called_once_with(limit=10)
+    assert "sampoole" in result.output
+    assert "a@x.com" in result.output
+    assert "id-a" in result.output
+
+
+def test_contacts_unmerge_passes_merge_id():
+    mock_db = MagicMock()
+    mock_db.unmerge_contacts.return_value = {
+        "source": {
+            "id": "src",
+            "display_name": "Sam A",
+            "addresses": ["a@x.com"],
+        },
+        "target": {
+            "id": "tgt",
+            "display_name": "Sam B",
+            "addresses": ["b@x.com"],
+        },
+    }
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "unmerge", "merge-uuid-1"])
+    assert result.exit_code == 0, result.output
+    mock_db.unmerge_contacts.assert_called_once_with(merge_id="merge-uuid-1")
+    assert "source:" in result.output
+    assert "target:" in result.output
+    assert "a@x.com" in result.output
+
+
+def test_contacts_unmerge_value_error_exits_1():
+    mock_db = MagicMock()
+    mock_db.unmerge_contacts.side_effect = ValueError("Merge x does not exist")
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "unmerge", "missing"])
+    assert result.exit_code == 1
+    assert "does not exist" in result.output

@@ -13,6 +13,7 @@ import structlog
 from psycopg.rows import dict_row
 
 from maildb.config import Settings
+from maildb.contacts import classify_contact, classify_contacts
 from maildb.db import create_pool, init_db
 from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
@@ -136,6 +137,21 @@ def _query_one_dict(
     result = dict(row) if row else None
     logger.debug("sql_complete", rows=1 if result else 0, elapsed_ms=elapsed_ms)
     return result
+
+
+def _jsonable(value: Any) -> Any:
+    """Recursively convert UUIDs/datetimes for JSONB serialization."""
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    return value
 
 
 class MailDB:
@@ -1642,6 +1658,311 @@ class MailDB:
         """
         updated_rows = _query_dicts(self._pool, update_sql, params)
         return {"matched": matched, "updated": len(updated_rows), "sample": sample}
+
+    def merge_contacts(
+        self,
+        *,
+        source_id: UUID | str,
+        target_id: UUID | str,
+    ) -> dict[str, Any]:
+        """Merge source contact into target in one audited transaction.
+
+        Addresses move to target; tags are set-unioned; notes/display_name prefer
+        target (with documented fallbacks); kind/kind_source keep target's unless
+        target is unknown and source is classified. Snapshot of the source is
+        stored in contact_merges for later unmerge. Source row is deleted.
+        """
+        if str(source_id) == str(target_id):
+            msg = "source_id and target_id must be different"
+            raise ValueError(msg)
+
+        with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            cur.execute(
+                """SELECT id, display_name, kind, kind_source, tags, notes, metadata,
+                          human_probability, classification_signals, classified_at,
+                          created_at, updated_at
+                     FROM contacts WHERE id = %(id)s""",
+                {"id": source_id},
+            )
+            source = cur.fetchone()
+            if source is None:
+                msg = f"Source contact {source_id} does not exist"
+                raise ValueError(msg)
+
+            cur.execute(
+                """SELECT id, display_name, kind, kind_source, tags, notes
+                     FROM contacts WHERE id = %(id)s""",
+                {"id": target_id},
+            )
+            target = cur.fetchone()
+            if target is None:
+                msg = f"Target contact {target_id} does not exist"
+                raise ValueError(msg)
+
+            cur.execute(
+                """SELECT address, contact_id, name_variants, is_user,
+                          first_seen, last_seen, messages_from, messages_to
+                     FROM contact_addresses
+                    WHERE contact_id = %(id)s
+                    ORDER BY address""",
+                {"id": source_id},
+            )
+            source_addrs = [dict(r) for r in cur.fetchall()]
+
+            snapshot = {
+                "contact": _jsonable(dict(source)),
+                "addresses": _jsonable(source_addrs),
+            }
+            cur.execute(
+                """INSERT INTO contact_merges (source_id, target_id, snapshot)
+                   VALUES (%(source_id)s, %(target_id)s, %(snapshot)s::jsonb)
+                RETURNING id""",
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "snapshot": json.dumps(snapshot),
+                },
+            )
+            merge_row = cur.fetchone()
+            if merge_row is None:
+                msg = "Failed to insert contact_merges row"
+                raise RuntimeError(msg)
+            merge_id = merge_row["id"]
+
+            cur.execute(
+                """UPDATE contact_addresses
+                      SET contact_id = %(target_id)s
+                    WHERE contact_id = %(source_id)s""",
+                {"target_id": target_id, "source_id": source_id},
+            )
+
+            source_tags = list(source["tags"] or [])
+            target_tags = list(target["tags"] or [])
+            merged_tags = list(dict.fromkeys([*target_tags, *source_tags]))
+
+            source_notes = source["notes"]
+            target_notes = target["notes"]
+            if target_notes and source_notes:
+                merged_notes = f"{target_notes}\n---\n{source_notes}"
+            elif target_notes:
+                merged_notes = target_notes
+            else:
+                merged_notes = source_notes
+
+            display_name = (
+                target["display_name"]
+                if target["display_name"] is not None
+                else source["display_name"]
+            )
+
+            if target["kind"] == "unknown" and source["kind"] != "unknown":
+                kind = source["kind"]
+                kind_source = source["kind_source"]
+            else:
+                kind = target["kind"]
+                kind_source = target["kind_source"]
+
+            cur.execute(
+                """UPDATE contacts
+                      SET tags = %(tags)s,
+                          notes = %(notes)s,
+                          display_name = %(display_name)s,
+                          kind = %(kind)s,
+                          kind_source = %(kind_source)s,
+                          updated_at = now()
+                    WHERE id = %(target_id)s""",
+                {
+                    "tags": merged_tags,
+                    "notes": merged_notes,
+                    "display_name": display_name,
+                    "kind": kind,
+                    "kind_source": kind_source,
+                    "target_id": target_id,
+                },
+            )
+
+            cur.execute("DELETE FROM contacts WHERE id = %(id)s", {"id": source_id})
+
+        target_uuid = target_id if isinstance(target_id, UUID) else UUID(str(target_id))
+        classify_contact(self._pool, target_uuid)
+
+        card = self.get_contact(contact_id=target_id)
+        if card is None:
+            msg = f"Target contact {target_id} does not exist after merge"
+            raise ValueError(msg)
+        card["merge_id"] = str(merge_id)
+        logger.info(
+            "contacts_merged",
+            source_id=str(source_id),
+            target_id=str(target_id),
+            merge_id=str(merge_id),
+        )
+        return card
+
+    def unmerge_contacts(self, *, merge_id: UUID | str) -> dict[str, Any]:
+        """Reverse a prior merge by merge_id.
+
+        Restores the source contact row and reassigns snapshot addresses that
+        still exist. Tags/notes/display_name adopted by the target during merge
+        are NOT reverted — unmerge restores the entity split, not field history.
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, source_id, target_id, snapshot
+                     FROM contact_merges WHERE id = %(id)s""",
+                {"id": merge_id},
+            )
+            merge_row = cur.fetchone()
+            if merge_row is None:
+                msg = f"Merge {merge_id} does not exist"
+                raise ValueError(msg)
+
+        snapshot = merge_row["snapshot"]
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+        contact_snap = snapshot["contact"]
+        address_snaps = snapshot.get("addresses") or []
+        source_id = contact_snap["id"]
+        target_id = merge_row["target_id"]
+        address_list = [a["address"] for a in address_snaps if a.get("address")]
+
+        with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            cur.execute(
+                """INSERT INTO contacts (
+                       id, display_name, kind, kind_source, tags, notes, metadata,
+                       human_probability, classification_signals, classified_at,
+                       created_at, updated_at
+                   ) VALUES (
+                       %(id)s, %(display_name)s, %(kind)s, %(kind_source)s, %(tags)s,
+                       %(notes)s, %(metadata)s::jsonb, %(human_probability)s,
+                       %(classification_signals)s::jsonb, %(classified_at)s,
+                       %(created_at)s, %(updated_at)s
+                   )""",
+                {
+                    "id": source_id,
+                    "display_name": contact_snap.get("display_name"),
+                    "kind": contact_snap.get("kind") or "unknown",
+                    "kind_source": contact_snap.get("kind_source") or "heuristic",
+                    "tags": contact_snap.get("tags") or [],
+                    "notes": contact_snap.get("notes"),
+                    "metadata": json.dumps(contact_snap.get("metadata") or {}),
+                    "human_probability": contact_snap.get("human_probability"),
+                    "classification_signals": (
+                        json.dumps(contact_snap["classification_signals"])
+                        if contact_snap.get("classification_signals") is not None
+                        else None
+                    ),
+                    "classified_at": contact_snap.get("classified_at"),
+                    "created_at": contact_snap.get("created_at"),
+                    "updated_at": contact_snap.get("updated_at"),
+                },
+            )
+
+            if address_list:
+                cur.execute(
+                    """UPDATE contact_addresses
+                          SET contact_id = %(source_id)s
+                        WHERE address = ANY(%(addrs)s)""",
+                    {"source_id": source_id, "addrs": address_list},
+                )
+
+            cur.execute("DELETE FROM contact_merges WHERE id = %(id)s", {"id": merge_id})
+
+        source_uuid = source_id if isinstance(source_id, UUID) else UUID(str(source_id))
+        target_uuid = target_id if isinstance(target_id, UUID) else UUID(str(target_id))
+        classify_contacts(self._pool, contact_ids=[source_uuid, target_uuid])
+
+        source_card = self.get_contact(contact_id=source_id)
+        target_card = self.get_contact(contact_id=target_id)
+        if source_card is None or target_card is None:
+            msg = "Contact missing after unmerge"
+            raise ValueError(msg)
+        logger.info(
+            "contacts_unmerged",
+            merge_id=str(merge_id),
+            source_id=str(source_id),
+            target_id=str(target_id),
+        )
+        return {"source": source_card, "target": target_card}
+
+    def merge_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return contact pairs that share a normalized name variant.
+
+        One set-based query. Both sides must have messages_from+messages_to >= 2
+        and neither may be user-only. Ordered by combined message volume DESC.
+        """
+        sql = """
+            WITH contact_stats AS (
+                SELECT
+                    c.id,
+                    c.display_name,
+                    coalesce(sum(ca.messages_from + ca.messages_to), 0)::int AS msg_count,
+                    (array_agg(
+                        ca.address
+                        ORDER BY (ca.messages_from + ca.messages_to) DESC, ca.address
+                    ))[1] AS primary_address
+                  FROM contacts c
+                  JOIN contact_addresses ca ON ca.contact_id = c.id
+                 GROUP BY c.id
+                HAVING coalesce(sum(ca.messages_from + ca.messages_to), 0) >= 2
+                   AND NOT bool_and(ca.is_user)
+            ),
+            variants AS (
+                SELECT DISTINCT
+                    ca.contact_id,
+                    lower(regexp_replace(v, '[^a-zA-Z0-9]', '', 'g')) AS norm_name
+                  FROM contact_addresses ca
+                  CROSS JOIN LATERAL unnest(ca.name_variants) AS v
+                 WHERE v IS NOT NULL
+                   AND btrim(v) <> ''
+                   AND lower(regexp_replace(v, '[^a-zA-Z0-9]', '', 'g')) <> ''
+            )
+            SELECT
+                v1.norm_name,
+                a.display_name AS a_display_name,
+                a.primary_address AS a_address,
+                a.msg_count AS a_msg_count,
+                a.id AS a_id,
+                b.display_name AS b_display_name,
+                b.primary_address AS b_address,
+                b.msg_count AS b_msg_count,
+                b.id AS b_id
+              FROM variants v1
+              JOIN variants v2
+                ON v1.norm_name = v2.norm_name
+               AND v1.contact_id < v2.contact_id
+              JOIN contact_stats a ON a.id = v1.contact_id
+              JOIN contact_stats b ON b.id = v2.contact_id
+             ORDER BY (a.msg_count + b.msg_count) DESC, v1.norm_name, a.id, b.id
+             LIMIT %(limit)s
+        """
+        rows = _query_dicts(self._pool, sql, {"limit": limit})
+        return [
+            {
+                "norm_name": row["norm_name"],
+                "a": {
+                    "display_name": row["a_display_name"],
+                    "primary_address": row["a_address"],
+                    "msg_count": row["a_msg_count"],
+                    "contact_id": str(row["a_id"]),
+                },
+                "b": {
+                    "display_name": row["b_display_name"],
+                    "primary_address": row["b_address"],
+                    "msg_count": row["b_msg_count"],
+                    "contact_id": str(row["b_id"]),
+                },
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def _format_contact_row(row: dict[str, Any], *, full: bool) -> dict[str, Any]:

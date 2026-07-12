@@ -532,6 +532,33 @@ def test_update_contact_tool_surfaces_value_error() -> None:
         server.update_contact(ctx, contact_id="c1", kind="robot")
 
 
+def test_merge_contacts_tool_passes_params() -> None:
+    mock_db = MagicMock()
+    mock_db.merge_contacts.return_value = {
+        "id": "tgt",
+        "merge_id": "m1",
+        "addresses": ["a@x.com", "b@x.com"],
+        "tags": ["vip"],
+    }
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.merge_contacts(ctx, source_id="src", target_id="tgt")
+    mock_db.merge_contacts.assert_called_once_with(source_id="src", target_id="tgt")
+    assert result["merge_id"] == "m1"
+    assert "a@x.com" in result["addresses"]
+
+
+def test_merge_contacts_tool_surfaces_value_error() -> None:
+    mock_db = MagicMock()
+    mock_db.merge_contacts.side_effect = ValueError("source_id and target_id must be different")
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    with pytest.raises(ValueError, match="must be different"):
+        server.merge_contacts(ctx, source_id="c1", target_id="c1")
+
+
 def test_correspondence_tool_passes_contact_id() -> None:
     mock_db = MagicMock()
     mock_db.correspondence.return_value = ([], None)

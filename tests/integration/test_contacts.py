@@ -31,6 +31,7 @@ INSERT INTO emails (
 
 def _clean_contacts(pool) -> None:  # type: ignore[no-untyped-def]
     with pool.connection() as conn:
+        conn.execute("DELETE FROM contact_merges")
         conn.execute("DELETE FROM contact_addresses")
         conn.execute("DELETE FROM contacts")
         conn.commit()
@@ -830,3 +831,244 @@ def test_set_kind_bulk_validation(test_pool) -> None:  # type: ignore[no-untyped
         db.set_kind_bulk(kind="human")
     with pytest.raises(ValueError, match="Exactly one"):
         db.set_kind_bulk(kind="human", domain="x.com", address="a@x.com")
+
+
+def _two_contacts_seed(pool):  # type: ignore[no-untyped-def]
+    """Seed two singleton contacts with distinct addresses; return (db, source_id, target_id)."""
+    _clean_contacts(pool)
+    import_id = _insert_import(pool)
+    emails = [
+        _email(
+            message_id="merge-src-1@x.com",
+            sender_address="sam.a@x.com",
+            sender_name="Sam Poole",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 1, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _email(
+            message_id="merge-src-2@x.com",
+            sender_address="sam.a@x.com",
+            sender_name="Sam Poole",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 2, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _email(
+            message_id="merge-tgt-1@x.com",
+            sender_address="sam.b@x.com",
+            sender_name="Sam.Poole",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 3, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _email(
+            message_id="merge-tgt-2@x.com",
+            sender_address="sam.b@x.com",
+            sender_name="Sam.Poole",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 4, tzinfo=UTC),
+            import_id=import_id,
+        ),
+    ]
+    _seed(pool, emails)
+    build_contacts(pool)
+    db = MailDB._from_pool(pool)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT ca.address, ca.contact_id FROM contact_addresses ca
+                WHERE ca.address IN ('sam.a@x.com', 'sam.b@x.com')
+                ORDER BY ca.address"""
+        ).fetchall()
+    by_addr = {r[0]: r[1] for r in rows}
+    source_id = by_addr["sam.a@x.com"]
+    target_id = by_addr["sam.b@x.com"]
+    with pool.connection() as conn:
+        conn.execute(
+            """UPDATE contacts SET tags = ARRAY['src-tag'], notes = 'source notes'
+                WHERE id = %(id)s""",
+            {"id": source_id},
+        )
+        conn.execute(
+            """UPDATE contacts SET tags = ARRAY['tgt-tag'], notes = 'target notes',
+                       display_name = 'Target Sam'
+                WHERE id = %(id)s""",
+            {"id": target_id},
+        )
+        conn.commit()
+    return db, source_id, target_id
+
+
+def test_merge_contacts_addresses_tags_snapshot_reclassify(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, source_id, target_id = _two_contacts_seed(test_pool)
+
+    with test_pool.connection() as conn:
+        before_cls = conn.execute(
+            "SELECT classified_at FROM contacts WHERE id = %(id)s",
+            {"id": target_id},
+        ).fetchone()[0]
+
+    result = db.merge_contacts(source_id=source_id, target_id=target_id)
+    assert result["id"] == str(target_id)
+    assert "merge_id" in result
+    assert set(result["addresses"]) == {"sam.a@x.com", "sam.b@x.com"}
+    assert set(result["tags"]) == {"tgt-tag", "src-tag"}
+    assert result["notes"] == "target notes\n---\nsource notes"
+    assert result["display_name"] == "Target Sam"
+
+    with test_pool.connection() as conn:
+        src_gone = conn.execute(
+            "SELECT 1 FROM contacts WHERE id = %(id)s", {"id": source_id}
+        ).fetchone()
+        assert src_gone is None
+
+        merge = conn.execute(
+            """SELECT source_id, target_id, snapshot
+                 FROM contact_merges WHERE id = %(id)s""",
+            {"id": result["merge_id"]},
+        ).fetchone()
+        assert merge is not None
+        assert str(merge[0]) == str(source_id)
+        assert str(merge[1]) == str(target_id)
+        snap = merge[2]
+        assert str(snap["contact"]["id"]) == str(source_id)
+        assert any(a["address"] == "sam.a@x.com" for a in snap["addresses"])
+
+        after_cls = conn.execute(
+            "SELECT classified_at FROM contacts WHERE id = %(id)s",
+            {"id": target_id},
+        ).fetchone()[0]
+        assert after_cls is not None
+        if before_cls is not None:
+            assert after_cls >= before_cls
+
+
+def test_merge_contacts_unknown_target_adopts_source_kind(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, source_id, target_id = _two_contacts_seed(test_pool)
+    with test_pool.connection() as conn:
+        conn.execute(
+            """UPDATE contacts SET kind = 'human', kind_source = 'manual'
+                WHERE id = %(id)s""",
+            {"id": source_id},
+        )
+        conn.execute(
+            """UPDATE contacts SET kind = 'unknown', kind_source = 'heuristic'
+                WHERE id = %(id)s""",
+            {"id": target_id},
+        )
+        conn.commit()
+
+    result = db.merge_contacts(source_id=source_id, target_id=target_id)
+    assert result["kind"] == "human"
+    assert result["kind_source"] == "manual"
+
+
+def test_merge_contacts_validation(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, source_id, target_id = _two_contacts_seed(test_pool)
+    with pytest.raises(ValueError, match="must be different"):
+        db.merge_contacts(source_id=source_id, target_id=source_id)
+    with pytest.raises(ValueError, match="does not exist"):
+        db.merge_contacts(source_id=uuid4(), target_id=target_id)
+    with pytest.raises(ValueError, match="does not exist"):
+        db.merge_contacts(source_id=source_id, target_id=uuid4())
+
+
+def test_merge_survives_build_contacts_refresh(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, source_id, target_id = _two_contacts_seed(test_pool)
+    db.merge_contacts(source_id=source_id, target_id=target_id)
+
+    build_contacts(test_pool)
+
+    with test_pool.connection() as conn:
+        src = conn.execute(
+            "SELECT 1 FROM contacts WHERE id = %(id)s", {"id": source_id}
+        ).fetchone()
+        assert src is None
+        rows = conn.execute(
+            """SELECT address, contact_id FROM contact_addresses
+                WHERE address IN ('sam.a@x.com', 'sam.b@x.com')"""
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(str(r[1]) == str(target_id) for r in rows)
+
+
+def test_unmerge_contacts_restores_source(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, source_id, target_id = _two_contacts_seed(test_pool)
+    merged = db.merge_contacts(source_id=source_id, target_id=target_id)
+    merge_id = merged["merge_id"]
+
+    result = db.unmerge_contacts(merge_id=merge_id)
+    assert result["source"]["id"] == str(source_id)
+    assert "sam.a@x.com" in result["source"]["addresses"]
+    assert result["target"]["id"] == str(target_id)
+    assert "sam.b@x.com" in result["target"]["addresses"]
+    assert "sam.a@x.com" not in result["target"]["addresses"]
+
+    with test_pool.connection() as conn:
+        gone = conn.execute(
+            "SELECT 1 FROM contact_merges WHERE id = %(id)s", {"id": merge_id}
+        ).fetchone()
+        assert gone is None
+
+    with pytest.raises(ValueError, match="does not exist"):
+        db.unmerge_contacts(merge_id=merge_id)
+
+
+def test_merge_candidates_reports_shared_name(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db, _source_id, _target_id = _two_contacts_seed(test_pool)
+
+    # Low-volume contact with same name — should be excluded
+    import_id = _insert_import(test_pool)
+    _seed(
+        test_pool,
+        [
+            _email(
+                message_id="low-vol@x.com",
+                sender_address="once@x.com",
+                sender_name="Sam Poole",
+                to=["me@example.com"],
+                import_id=import_id,
+            ),
+        ],
+    )
+    build_contacts(test_pool)
+
+    # User-only contact with high volume — should be excluded
+    with test_pool.connection() as conn:
+        user_cid = conn.execute(
+            "SELECT contact_id FROM contact_addresses WHERE address = 'me@example.com'"
+        ).fetchone()
+        if user_cid is None:
+            # ensure user address exists as user-only
+            pass
+        else:
+            conn.execute(
+                """UPDATE contact_addresses
+                      SET messages_from = 10, messages_to = 10, is_user = TRUE,
+                          name_variants = ARRAY['Sam Poole']
+                    WHERE address = 'me@example.com'"""
+            )
+            conn.commit()
+
+    pairs = db.merge_candidates(limit=50)
+    assert pairs
+    norms = {p["norm_name"] for p in pairs}
+    assert "sampoole" in norms
+    pair = next(p for p in pairs if p["norm_name"] == "sampoole")
+    ids = {pair["a"]["contact_id"], pair["b"]["contact_id"]}
+    # The two high-volume Sam contacts
+    with test_pool.connection() as conn:
+        sam_ids = {
+            str(r[0])
+            for r in conn.execute(
+                """SELECT ca.contact_id FROM contact_addresses ca
+                    WHERE ca.address IN ('sam.a@x.com', 'sam.b@x.com')"""
+            ).fetchall()
+        }
+    assert ids == sam_ids
+    # Low-volume once@x.com must not appear
+    all_addrs = {pair["a"]["primary_address"], pair["b"]["primary_address"]}
+    for p in pairs:
+        all_addrs.add(p["a"]["primary_address"])
+        all_addrs.add(p["b"]["primary_address"])
+    assert "once@x.com" not in all_addrs

@@ -1092,6 +1092,30 @@ def update_contact(
 
 @mcp.tool()
 @log_tool
+def merge_contacts(
+    ctx: Context,
+    source_id: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Merge two contact rows for the same person — single-pair curation write.
+
+    Addresses move to target, tags are unioned, and target curation wins
+    (unless target is unclassified / kind='unknown'). Audited in
+    contact_merges; reversible via `maildb contacts unmerge`.
+
+    Parameters:
+      source_id: contact UUID to absorb and delete (required)
+      target_id: contact UUID that remains (required)
+
+    Returns the merged full contact card plus merge_id. Raises ValueError if
+    source equals target or either id is missing.
+    """
+    db = _get_db(ctx)
+    return db.merge_contacts(source_id=source_id, target_id=target_id)
+
+
+@mcp.tool()
+@log_tool
 def accounts(ctx: Context) -> list[dict[str, Any]]:
     """List the email accounts present in the database with email counts.
 
