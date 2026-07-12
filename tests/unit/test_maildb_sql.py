@@ -127,7 +127,10 @@ def test_find_include_total_issues_count_query(monkeypatch) -> None:
     results, total = db.find(include_total=True)
 
     assert "COUNT(*) OVER()" not in dicts_capture.sql[0]
-    assert "SELECT COUNT(*) AS n FROM emails WHERE" in dicts_capture.sql[1]
+    assert (
+        "SELECT COUNT(*) AS n FROM (SELECT 1 FROM emails WHERE TRUE) AS _count_sub"
+        in dicts_capture.sql[1]
+    )
     assert total == 7
     assert results == []
 
