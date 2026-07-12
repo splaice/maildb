@@ -338,11 +338,7 @@ class MailDB:
         results = [Email.from_row(row) for row in rows]
         if not include_total:
             return results, None
-        count_row = _query_one_dict(
-            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
-        )
-        total = int(count_row["n"]) if count_row is not None else 0
-        return results, total
+        return results, _count(self._pool, f"SELECT 1 FROM emails WHERE {where}", params)
 
     def search(
         self,
@@ -1068,11 +1064,7 @@ class MailDB:
         results = [Email.from_row(row) for row in rows]
         if not include_total:
             return results, None
-        count_row = _query_one_dict(
-            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
-        )
-        total = int(count_row["n"]) if count_row is not None else 0
-        return results, total
+        return results, _count(self._pool, f"SELECT 1 FROM emails WHERE {where}", params)
 
     def mention_search(
         self,
@@ -1139,11 +1131,7 @@ class MailDB:
         results = [Email.from_row(row) for row in rows]
         if not include_total:
             return results, None
-        count_row = _query_one_dict(
-            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
-        )
-        total = int(count_row["n"]) if count_row is not None else 0
-        return results, total
+        return results, _count(self._pool, f"SELECT 1 FROM emails WHERE {where}", params)
 
     def search_attachments(
         self,
