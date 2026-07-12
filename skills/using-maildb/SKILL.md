@@ -93,7 +93,7 @@ All list tools return a wrapper with pagination metadata:
 | `get_emails(ids, body_max_chars, fields)` | Fetch full emails by message_id — includes `body_text` by default |
 | `get_thread(thread_id, fields)` | Full conversation by thread ID |
 | `get_thread_for(message_id, fields)` | Find thread containing a message |
-| `correspondence(address, after, before, account, limit, offset, order, fields, include_total)` | Bidirectional email history with a person |
+| `correspondence(address, contact_id, after, before, account, limit, offset, order, fields, include_total)` | Bidirectional email history with a person (exactly one of `address` / `contact_id`) |
 | `mention_search(text, sender, sender_domain, after, before, max_to, max_cc, max_recipients, direct_only, account, limit, offset, fields, include_total)` | Keyword search in body/subject (no Ollama) |
 | `search_attachments(query, sender, sender_domain, recipient, after, before, labels, max_to, max_cc, max_recipients, direct_only, account, content_type, limit, offset)` | Semantic search over extracted attachment chunks; approximate total |
 | `search_all(query, ...email/recipient/account filters..., limit, offset)` | Unified semantic search across emails and extracted attachments; approximate total |
@@ -103,9 +103,9 @@ All list tools return a wrapper with pagination metadata:
 
 | Tool | Use When | Needs `user_email` |
 |------|----------|--------------------|
-| `top_contacts(period, limit, offset, direction, group_by, exclude_domains, include_total)` | Most frequent correspondents; `group_by="domain"` for domain view | Yes |
+| `top_contacts(period, limit, offset, direction, group_by, exclude_domains, include_total)` | Most frequent correspondents; `group_by="domain"` for domain view; `group_by="contact"` collapses multi-address entities (`contact_id`, `display_name`, `count`) | Yes |
 | `topics_with(sender or sender_domain, limit, offset, fields)` | Diverse topic sample with a contact | No |
-| `unreplied(direction, recipient, after, before, sender, sender_domain, max_to, max_cc, max_recipients, direct_only, limit, offset, fields, include_total)` | Messages with no reply; `direction="outbound"` for sent | Yes |
+| `unreplied(direction, recipient, after, before, sender, sender_domain, max_to, max_cc, max_recipients, direct_only, limit, offset, fields, include_total, human_only)` | Messages with no reply; `direction="outbound"` for sent; `human_only` restricts to human counterparties (inbound only; kind='human' or unclassified ≥ 0.7) | Yes |
 | `long_threads(min_messages, after, participant, limit, offset, include_total)` | Threads exceeding message count | No |
 | `cluster(where or message_ids, limit, offset, fields)` | Diverse topic extraction from any subset | No |
 | `query(spec)` | DSL: aggregation, grouping, custom selects | No |
@@ -116,7 +116,13 @@ All list tools return a wrapper with pagination metadata:
 |------|----------|
 | `accounts()` | Discover source accounts and counts before using `account=...` |
 | `import_history(account, limit, offset)` | Inspect ingest sessions, inserted/skipped counts, and status |
-| `contacts(query, kind, tag, min_human_probability, limit, offset, include_total)` | Resolve people/senders by name, address, kind, or tag |
+| `contacts(query, kind, tag, min_human_probability, limit, offset, include_total, needs_review)` | Resolve people/senders by name, address, kind, or tag |
+
+### Curation
+
+| Tool | Use When |
+|------|----------|
+| `merge_contacts(source_id, target_id)` | Merge two contacts into one; reversible via CLI `maildb contacts unmerge` |
 
 ### Recipient Count Filters
 
@@ -238,3 +244,4 @@ cluster(message_ids=ids, limit=5, fields=["subject", "body_text", "date"])
 - **`query` DSL** has a 5s timeout and 1000-row hard cap. Returns flat lists (no wrapper).
 - **`cluster` chains well** with other tools via `message_ids` — pass IDs from any prior result.
 - **Null-date emails** (e.g. Google Chat transcripts) are excluded from `unreplied` results automatically.
+- **Contact curation flow:** review queue via `contacts(needs_review=true)` → `update_contact` / `merge_contacts`; bulk operations live on the CLI.
