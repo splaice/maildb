@@ -221,6 +221,12 @@ def test_wrap_response_empty() -> None:
     assert wrapped == {"total": 0, "offset": 0, "limit": 50, "results": []}
 
 
+def test_wrap_response_null_total() -> None:
+    wrapped = _wrap_response([], total=None, offset=0, limit=50)
+    assert wrapped == {"total": None, "offset": 0, "limit": 50, "results": []}
+    assert "total" in wrapped
+
+
 def test_mcp_has_all_tools() -> None:
     tool_names = set(mcp._tool_manager._tools.keys())
 
@@ -245,13 +251,28 @@ def test_mcp_has_all_tools() -> None:
 
 def test_find_passes_account_to_db() -> None:
     mock_db = MagicMock()
-    mock_db.find.return_value = ([], 0)
+    mock_db.find.return_value = ([], None)
     ctx = MagicMock()
     ctx.request_context.lifespan_context.db = mock_db
 
-    server.find(ctx, account="you@example.com")
+    result = server.find(ctx, account="you@example.com")
     kwargs = mock_db.find.call_args.kwargs
     assert kwargs["account"] == "you@example.com"
+    assert kwargs["include_total"] is False
+    assert result["total"] is None
+
+
+def test_find_include_total_envelope() -> None:
+    mock_db = MagicMock()
+    mock_db.find.return_value = ([], 3)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.find(ctx, include_total=True)
+    kwargs = mock_db.find.call_args.kwargs
+    assert kwargs["include_total"] is True
+    assert result["total"] == 3
+    assert "total" in result
 
 
 def test_accounts_tool_serializes_summaries() -> None:
@@ -416,6 +437,7 @@ def test_contacts_tool_passes_params_and_uses_envelope() -> None:
         min_human_probability=0.5,
         limit=10,
         offset=5,
+        include_total=True,
     )
     kwargs = mock_db.contacts_search.call_args.kwargs
     assert kwargs["query"] == "Alice"
@@ -424,6 +446,7 @@ def test_contacts_tool_passes_params_and_uses_envelope() -> None:
     assert kwargs["min_human_probability"] == 0.5
     assert kwargs["limit"] == 10
     assert kwargs["offset"] == 5
+    assert kwargs["include_total"] is True
     assert result["total"] == 1
     assert result["offset"] == 5
     assert result["limit"] == 10

@@ -59,10 +59,10 @@ def test_duplicate_emails_surface_under_both_accounts(
 
 def test_find_no_account_returns_all(test_pool, test_settings, multi_account_seed):
     db = _db(test_pool, test_settings)
-    results, total = db.find(limit=100)
+    results, total = db.find(limit=100, include_total=True)
     accounts = {e.source_account for e in results}
     assert accounts == {"a@example.com", "b@example.com"}
-    assert total >= 6
+    assert total is not None and total >= 6
 
 
 def test_accounts_summary(test_pool, test_settings, multi_account_seed):

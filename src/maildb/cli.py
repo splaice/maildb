@@ -34,6 +34,7 @@ from maildb.ingest.process_attachments import (
     sweep_empty_extractions as pa_sweep_empty_extractions,
 )
 from maildb.ingest.threads import repair_thread_ids
+from maildb.maildb import MailDB
 from maildb.pii import scrub_pii
 from maildb.server import mcp
 
@@ -304,26 +305,18 @@ def ingest_status(
 
 def _print_imports_summary(pool, account: str | None) -> None:  # type: ignore[no-untyped-def]
     """Print a per-import breakdown to stdout."""
-    sql = (
-        "SELECT started_at, source_account, status, messages_inserted, messages_skipped "
-        "FROM imports "
-    )
-    params: dict = {}
-    if account is not None:
-        sql += "WHERE source_account = %(account)s "
-        params["account"] = account
-    sql += "ORDER BY started_at DESC LIMIT 20"
-    with pool.connection() as conn:
-        cur = conn.execute(sql, params)
-        rows = cur.fetchall()
-    if not rows:
+    db = MailDB._from_pool(pool)
+    records = db.import_history(account=account, limit=20)
+    if not records:
         return
     typer.echo("\nImports")
-    for started, acct, status, inserted, skipped in rows:
+    for rec in records:
+        started = rec.started_at
         ts = started.strftime("%Y-%m-%d %H:%M") if started else "?"
         typer.echo(
-            f"  {ts}  {acct:<24} {status:<10} "
-            f"{inserted or 0:>10,} inserted   {skipped or 0:>4} skipped"
+            f"  {ts}  {rec.source_account:<24} {rec.status:<10} "
+            f"{rec.messages_inserted or 0:>10,} inserted   "
+            f"{rec.messages_skipped or 0:>4} skipped"
         )
 
 

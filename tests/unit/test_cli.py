@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 from typer.testing import CliRunner
 
 from maildb.cli import app
+from maildb.models import ImportRecord
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,26 +84,24 @@ def test_ingest_run_skip_embed_flag(tmp_path: Path):
 
 
 def test_ingest_status_invokes_get_status():
+    record = ImportRecord(
+        id=uuid4(),
+        source_account="you@example.com",
+        source_file=None,
+        started_at=datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
+        completed_at=None,
+        messages_total=45,
+        messages_inserted=42,
+        messages_skipped=3,
+        status="completed",
+    )
     with (
         patch("maildb.cli.get_status") as mock_status,
         patch("maildb.cli.create_pool") as mock_pool,
         patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB.import_history", return_value=[record]) as mock_history,
     ):
-        # Arrange: pool.connection() → cursor → execute() → fetchall returns a row.
-        pool_instance = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchall.return_value = [
-            (
-                datetime(2026, 4, 16, 12, 0, tzinfo=UTC),
-                "you@example.com",
-                "completed",
-                42,
-                3,
-            )
-        ]
-        pool_instance.connection.return_value.__enter__.return_value.execute.return_value = cursor
-        mock_pool.return_value = pool_instance
-
+        mock_pool.return_value = MagicMock()
         mock_status.return_value = {
             "split": {},
             "parse": {},
@@ -113,6 +113,7 @@ def test_ingest_status_invokes_get_status():
 
     assert result.exit_code == 0, result.output
     mock_status.assert_called_once()
+    mock_history.assert_called_once_with(account=None, limit=20)
     # Confirms _print_imports_summary actually ran the loop body.
     assert "Imports" in result.output
     assert "you@example.com" in result.output
@@ -121,19 +122,14 @@ def test_ingest_status_invokes_get_status():
 
 
 def test_ingest_status_filters_by_account():
-    """--account adds source_account filter to the imports query."""
+    """--account is passed through to import_history."""
     with (
         patch("maildb.cli.get_status") as mock_status,
         patch("maildb.cli.create_pool") as mock_pool,
         patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB.import_history", return_value=[]) as mock_history,
     ):
-        pool_instance = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchall.return_value = []
-        execute_mock = pool_instance.connection.return_value.__enter__.return_value.execute
-        execute_mock.return_value = cursor
-        mock_pool.return_value = pool_instance
-
+        mock_pool.return_value = MagicMock()
         mock_status.return_value = {
             "split": {},
             "parse": {},
@@ -144,11 +140,7 @@ def test_ingest_status_filters_by_account():
         result = runner.invoke(app, ["ingest", "status", "--account", "you@example.com"])
 
     assert result.exit_code == 0, result.output
-    # Verify the account filter was applied in the SQL params.
-    calls = execute_mock.call_args_list
-    assert any(
-        len(call.args) >= 2 and call.args[1].get("account") == "you@example.com" for call in calls
-    )
+    mock_history.assert_called_once_with(account="you@example.com", limit=20)
 
 
 def test_ingest_reset_requires_yes_or_aborts():

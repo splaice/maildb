@@ -90,6 +90,13 @@ def _query_dicts(
     return rows
 
 
+def _count(pool: ConnectionPool, base_sql: str, params: dict[str, Any]) -> int:
+    """Exact row count for a query body (no ORDER BY/LIMIT/OFFSET)."""
+    sql = f"SELECT COUNT(*) AS n FROM ({base_sql}) AS _count_sub"
+    row = _query_one_dict(pool, sql, params)
+    return int(row["n"]) if row is not None else 0
+
+
 def _query_dicts_with_hnsw_ef_search(
     pool: ConnectionPool,
     sql: str,
@@ -294,8 +301,13 @@ class MailDB:
         max_recipients: int | None = None,
         direct_only: bool = False,
         account: str | None = None,
-    ) -> tuple[list[Email], int]:
-        """Structured query with dynamic WHERE clauses. Returns (emails, total_count)."""
+        include_total: bool = False,
+    ) -> tuple[list[Email], int | None]:
+        """Structured query with dynamic WHERE clauses.
+
+        Returns (emails, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
+        """
         order_sql = _order_clause(order)
 
         conditions, params = self._build_filters(
@@ -315,15 +327,22 @@ class MailDB:
         )
 
         where = " AND ".join(conditions) if conditions else "TRUE"
-        query = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        query = (
+            f"SELECT {LIST_COLS} FROM emails WHERE {where} "
+            f"ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        )
         params["limit"] = limit
         params["offset"] = offset
 
         rows = _query_dicts(self._pool, query, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return [Email.from_row(row) for row in rows], total
+        results = [Email.from_row(row) for row in rows]
+        if not include_total:
+            return results, None
+        count_row = _query_one_dict(
+            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
+        )
+        total = int(count_row["n"]) if count_row is not None else 0
+        return results, total
 
     def search(
         self,
@@ -461,8 +480,12 @@ class MailDB:
         group_by: str = "address",
         exclude_domains: list[str] | None = None,
         account: str | None = None,
-    ) -> tuple[list[dict[str, Any]], int]:
+        include_total: bool = False,
+    ) -> tuple[list[dict[str, Any]], int | None]:
         """Most frequent correspondents via GROUP BY aggregation.
+
+        Returns (results, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
 
         Args:
             period: Only count messages after this date (ISO format).
@@ -472,6 +495,7 @@ class MailDB:
             exclude_domains: List of domains to exclude from results.
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
+            include_total: When True, compute an exact total via a separate count query.
         """
         if group_by not in ("address", "domain"):
             msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
@@ -516,20 +540,18 @@ class MailDB:
             outbound_col = "r.addr"
 
         if direction == "inbound":
-            sql = f"""
-                SELECT {inbound_col} AS {label}, count(*) AS count, COUNT(*) OVER() AS _total
+            base_sql = f"""
+                SELECT {inbound_col} AS {label}, count(*) AS count
                 FROM emails
                 WHERE sender_address != ALL(%(user_emails)s)
                   {period_cond}
                   {exclude_inbound}
                   {account_cond}
                 GROUP BY {inbound_col}
-                ORDER BY count DESC
-                LIMIT %(limit)s OFFSET %(offset)s
             """
         elif direction == "outbound":
-            sql = f"""
-                SELECT {outbound_col} AS {label}, count(*) AS count, COUNT(*) OVER() AS _total
+            base_sql = f"""
+                SELECT {outbound_col} AS {label}, count(*) AS count
                 FROM emails,
                      LATERAL (
                          SELECT jsonb_array_elements_text(recipients->'to') AS addr
@@ -544,12 +566,10 @@ class MailDB:
                   {exclude_outbound}
                   {account_cond}
                 GROUP BY {outbound_col}
-                ORDER BY count DESC
-                LIMIT %(limit)s OFFSET %(offset)s
             """
         else:  # both
-            sql = f"""
-                SELECT {label}, sum(count) AS count, COUNT(*) OVER() AS _total
+            base_sql = f"""
+                SELECT {label}, sum(count) AS count
                 FROM (
                     SELECT {inbound_col} AS {label}, count(*) AS count
                     FROM emails
@@ -578,15 +598,18 @@ class MailDB:
                     GROUP BY {outbound_col}
                 ) AS combined
                 GROUP BY {label}
-                ORDER BY count DESC
-                LIMIT %(limit)s OFFSET %(offset)s
             """
 
+        sql = f"""
+            {base_sql}
+            ORDER BY count DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return rows, total
+        if not include_total:
+            return rows, None
+        return rows, _count(self._pool, base_sql, params)
 
     def accounts(self) -> list[AccountSummary]:
         """Summarize email counts per source_account.
@@ -664,9 +687,11 @@ class MailDB:
         limit: int = 5,
         offset: int = 0,
     ) -> tuple[list[Email], int]:
-        """Representative emails spanning different topics with a contact. Returns (emails, total_count).
+        """Representative emails spanning different topics with a contact.
 
-        Uses greedy farthest-point selection on embeddings.
+        Uses greedy farthest-point selection on embeddings. The candidate pool is
+        capped (LIMIT 500); ``total`` is a lower bound (``offset + returned``),
+        consistent with ``search`` / ``search_attachments``, not a corpus count.
 
         Args:
             sender: Exact sender email address.
@@ -699,10 +724,11 @@ class MailDB:
         if not rows:
             return [], 0
 
-        total = len(rows)
         emails = [Email.from_row(row) for row in rows]
         selected = self._farthest_point_select(emails, limit + offset)
-        return selected[offset:], total
+        page = selected[offset:]
+        total = offset + len(page)
+        return page, total
 
     @staticmethod
     def _farthest_point_select(emails: list[Email], limit: int) -> list[Email]:
@@ -817,8 +843,12 @@ class MailDB:
         max_recipients: int | None = None,
         direct_only: bool = False,
         account: str | None = None,
-    ) -> tuple[list[Email], int]:
+        include_total: bool = False,
+    ) -> tuple[list[Email], int | None]:
         """Messages with no reply in the same thread.
+
+        Returns (emails, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
 
         Args:
             direction: "inbound" (default) — messages FROM others where user never
@@ -837,6 +867,7 @@ class MailDB:
             direct_only: shorthand for max_to=1, max_cc=0 (cannot combine with max_to/max_cc).
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
+            include_total: When True, compute an exact total via a separate count query.
         """
         if direction not in ("inbound", "outbound"):
             msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
@@ -893,8 +924,8 @@ class MailDB:
             where = " AND ".join(conditions)
             params["limit"] = limit
             params["offset"] = offset
-            sql = f"""
-                SELECT {select_cols_aliased}, COUNT(*) OVER() AS _total
+            base_sql = f"""
+                SELECT {select_cols_aliased}
                 FROM emails e
                 WHERE {where}
                   AND NOT EXISTS (
@@ -903,8 +934,6 @@ class MailDB:
                         AND reply.sender_address = ANY(%(user_emails)s)
                         AND reply.date > e.date
                   )
-                ORDER BY e.date DESC NULLS LAST, e.id
-                LIMIT %(limit)s OFFSET %(offset)s
             """
         else:
             # Outbound: messages FROM user where recipients never replied
@@ -955,20 +984,24 @@ class MailDB:
             where = " AND ".join(conditions)
             params["limit"] = limit
             params["offset"] = offset
-            sql = f"""
-                SELECT {select_cols_aliased}, COUNT(*) OVER() AS _total
+            base_sql = f"""
+                SELECT {select_cols_aliased}
                 FROM emails e
                 WHERE {where}
                   {not_exists}
-                ORDER BY e.date DESC NULLS LAST, e.id
-                LIMIT %(limit)s OFFSET %(offset)s
             """
 
+        sql = f"""
+            {base_sql}
+            ORDER BY e.date DESC NULLS LAST, e.id
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return [Email.from_row(row) for row in rows], total
+        results = [Email.from_row(row) for row in rows]
+        if not include_total:
+            return results, None
+        return results, _count(self._pool, base_sql, params)
 
     def correspondence(
         self,
@@ -980,10 +1013,14 @@ class MailDB:
         limit: int = 500,
         offset: int = 0,
         order: str = "date ASC",
-    ) -> tuple[list[Email], int]:
-        """All emails exchanged with a specific person. Returns (emails, total_count).
+        include_total: bool = False,
+    ) -> tuple[list[Email], int | None]:
+        """All emails exchanged with a specific person.
+
         Returns emails where address is sender OR is in recipients (to/cc/bcc).
         Default chronological order, higher limit than find().
+        Returns (emails, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
 
         Args:
             address: Email address to match as sender or recipient.
@@ -993,6 +1030,7 @@ class MailDB:
             limit: Max results to return.
             offset: Skip first N results.
             order: Result ordering.
+            include_total: When True, compute an exact total via a separate count query.
         """
         order_sql = _order_clause(order)
 
@@ -1021,13 +1059,20 @@ class MailDB:
         params.update(account_params)
 
         where = " AND ".join(conditions)
-        sql = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        sql = (
+            f"SELECT {LIST_COLS} FROM emails WHERE {where} "
+            f"ORDER BY {order_sql} LIMIT %(limit)s OFFSET %(offset)s"
+        )
 
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return [Email.from_row(row) for row in rows], total
+        results = [Email.from_row(row) for row in rows]
+        if not include_total:
+            return results, None
+        count_row = _query_one_dict(
+            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
+        )
+        total = int(count_row["n"]) if count_row is not None else 0
+        return results, total
 
     def mention_search(
         self,
@@ -1044,9 +1089,13 @@ class MailDB:
         max_recipients: int | None = None,
         direct_only: bool = False,
         account: str | None = None,
-    ) -> tuple[list[Email], int]:
-        """Case-insensitive keyword search in body_text and subject. Returns (emails, total_count).
+        include_total: bool = False,
+    ) -> tuple[list[Email], int | None]:
+        """Case-insensitive keyword search in body_text and subject.
+
         Unlike search(), uses ILIKE (substring match) and does not require Ollama.
+        Returns (emails, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
         """
         escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
@@ -1082,12 +1131,19 @@ class MailDB:
         conditions.extend(rcpt_conditions)
         params.update(rcpt_params)
         where = " AND ".join(conditions)
-        sql = f"SELECT {LIST_COLS}, COUNT(*) OVER() AS _total FROM emails WHERE {where} ORDER BY date DESC NULLS LAST, id LIMIT %(limit)s OFFSET %(offset)s"
+        sql = (
+            f"SELECT {LIST_COLS} FROM emails WHERE {where} "
+            f"ORDER BY date DESC NULLS LAST, id LIMIT %(limit)s OFFSET %(offset)s"
+        )
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return [Email.from_row(row) for row in rows], total
+        results = [Email.from_row(row) for row in rows]
+        if not include_total:
+            return results, None
+        count_row = _query_one_dict(
+            self._pool, f"SELECT COUNT(*) AS n FROM emails WHERE {where}", params
+        )
+        total = int(count_row["n"]) if count_row is not None else 0
+        return results, total
 
     def search_attachments(
         self,
@@ -1210,12 +1266,15 @@ class MailDB:
         min_human_probability: float | None = None,
         limit: int = 20,
         offset: int = 0,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """Search the contacts address book. Returns (contacts, total_count).
+        include_total: bool = False,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Search the contacts address book.
 
         Joins contacts ← contact_addresses (aggregated per contact). Excludes
         contacts whose every address is the user. Order is by total message
         volume DESC, then last_seen DESC NULLS LAST, then id.
+        Returns (contacts, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
         """
         conditions: list[str] = ["NOT only_user"]
         params: dict[str, Any] = {"limit": limit, "offset": offset}
@@ -1247,7 +1306,7 @@ class MailDB:
             )
 
         where = " AND ".join(conditions)
-        sql = f"""
+        base_sql = f"""
             WITH contact_stats AS (
                 SELECT
                     c.id,
@@ -1278,22 +1337,22 @@ class MailDB:
             SELECT
                 id, display_name, kind, kind_source, tags, human_probability,
                 addresses, name_variants, messages_from, messages_to,
-                first_seen, last_seen,
-                COUNT(*) OVER() AS _total
+                first_seen, last_seen
               FROM contact_stats
              WHERE {where}
+        """
+        sql = f"""
+            {base_sql}
              ORDER BY (messages_from + messages_to) DESC,
                       last_seen DESC NULLS LAST,
                       id
              LIMIT %(limit)s OFFSET %(offset)s
         """
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            row.pop("_total", None)
-            results.append(self._format_contact_row(row, full=False))
-        return results, total
+        results: list[dict[str, Any]] = [self._format_contact_row(row, full=False) for row in rows]
+        if not include_total:
+            return results, None
+        return results, _count(self._pool, base_sql, params)
 
     def get_contact(
         self,
@@ -1498,9 +1557,9 @@ class MailDB:
         Results are rank-fused across sources (reciprocal rank fusion, K=60) so
         neither corpus can crowd out the other by score-distribution differences.
         Per-result ``similarity`` values remain raw cosine similarities and are
-        NOT comparable across sources. The returned total is a lower-bound
-        approximation over the merged over-fetched results, not an exact count
-        across both corpora.
+        NOT comparable across sources. ``total`` is a lower bound
+        (``offset + returned``), consistent with ``search`` /
+        ``search_attachments``, not a corpus count across both corpora.
         """
         over_fetch = 2 * (limit + offset)
         email_hits, _ = self.search(
@@ -1570,8 +1629,9 @@ class MailDB:
 
         ranked.sort(key=lambda item: item[0])
         unified = [item[1] for item in ranked]
-        total = len(unified)
-        return unified[offset : offset + limit], total
+        page = unified[offset : offset + limit]
+        total = offset + len(page)
+        return page, total
 
     def query(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute a Tier 2 DSL query and return results as dicts.
@@ -1611,8 +1671,12 @@ class MailDB:
         limit: int = 50,
         offset: int = 0,
         account: str | None = None,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """Threads exceeding a message count threshold. Returns (threads, total_count).
+        include_total: bool = False,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Threads exceeding a message count threshold.
+
+        Returns (threads, total) where total is None unless include_total=True;
+        when present it is the exact count of matching rows regardless of offset.
         participant: only threads where this address appears as sender.
         account: scope to a single source_account.
         """
@@ -1632,19 +1696,20 @@ class MailDB:
         if participant:
             having_participant = "AND %(participant)s = ANY(array_agg(sender_address))"
             params["participant"] = participant
-        sql = f"""
+        base_sql = f"""
             SELECT thread_id, count(*) AS message_count,
                    min(date) AS first_date, max(date) AS last_date,
-                   array_agg(DISTINCT sender_address) AS participants,
-                   COUNT(*) OVER() AS _total
+                   array_agg(DISTINCT sender_address) AS participants
             FROM emails WHERE {where}
             GROUP BY thread_id
             HAVING count(*) >= %(min_messages)s {having_participant}
+        """
+        sql = f"""
+            {base_sql}
             ORDER BY count(*) DESC
             LIMIT %(limit)s OFFSET %(offset)s
         """
         rows = _query_dicts(self._pool, sql, params)
-        total = rows[0]["_total"] if rows else 0
-        for row in rows:
-            row.pop("_total", None)
-        return rows, total
+        if not include_total:
+            return rows, None
+        return rows, _count(self._pool, base_sql, params)
