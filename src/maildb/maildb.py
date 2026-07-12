@@ -687,9 +687,11 @@ class MailDB:
         limit: int = 5,
         offset: int = 0,
     ) -> tuple[list[Email], int]:
-        """Representative emails spanning different topics with a contact. Returns (emails, total_count).
+        """Representative emails spanning different topics with a contact.
 
-        Uses greedy farthest-point selection on embeddings.
+        Uses greedy farthest-point selection on embeddings. The candidate pool is
+        capped (LIMIT 500); ``total`` is a lower bound (``offset + returned``),
+        consistent with ``search`` / ``search_attachments``, not a corpus count.
 
         Args:
             sender: Exact sender email address.
@@ -722,10 +724,11 @@ class MailDB:
         if not rows:
             return [], 0
 
-        total = len(rows)
         emails = [Email.from_row(row) for row in rows]
         selected = self._farthest_point_select(emails, limit + offset)
-        return selected[offset:], total
+        page = selected[offset:]
+        total = offset + len(page)
+        return page, total
 
     @staticmethod
     def _farthest_point_select(emails: list[Email], limit: int) -> list[Email]:
@@ -1554,9 +1557,9 @@ class MailDB:
         Results are rank-fused across sources (reciprocal rank fusion, K=60) so
         neither corpus can crowd out the other by score-distribution differences.
         Per-result ``similarity`` values remain raw cosine similarities and are
-        NOT comparable across sources. The returned total is a lower-bound
-        approximation over the merged over-fetched results, not an exact count
-        across both corpora.
+        NOT comparable across sources. ``total`` is a lower bound
+        (``offset + returned``), consistent with ``search`` /
+        ``search_attachments``, not a corpus count across both corpora.
         """
         over_fetch = 2 * (limit + offset)
         email_hits, _ = self.search(
@@ -1626,8 +1629,9 @@ class MailDB:
 
         ranked.sort(key=lambda item: item[0])
         unified = [item[1] for item in ranked]
-        total = len(unified)
-        return unified[offset : offset + limit], total
+        page = unified[offset : offset + limit]
+        total = offset + len(page)
+        return page, total
 
     def query(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
         """Execute a Tier 2 DSL query and return results as dicts.

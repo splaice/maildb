@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -48,23 +49,38 @@ def log_tool[F: Callable[..., Any]](func: F) -> F:
             row_count = len(result)
         else:
             row_count = 1
-        response_bytes = len(json.dumps(result, default=str).encode())
 
-        if response_bytes > RESPONSE_SIZE_WARNING_BYTES:
-            logger.warning(
-                "tool_exit",
-                tool=tool_name,
-                rows=row_count,
-                response_bytes=response_bytes,
-                elapsed_ms=elapsed_ms,
-                warning="response exceeds 50KB",
-            )
+        # Measurement costs a full re-serialization; only when a sink will record
+        # the debug line (CLI: root is always DEBUG; handler levels gate — file sink
+        # is the DEBUG path, so MAILDB_DEBUG_LOG_LEVEL > DEBUG disables measurement).
+        root = logging.getLogger()
+        debug_enabled = root.isEnabledFor(logging.DEBUG) and any(
+            h.level <= logging.DEBUG for h in root.handlers
+        )
+        if debug_enabled:
+            response_bytes = len(json.dumps(result, default=str).encode())
+            if response_bytes > RESPONSE_SIZE_WARNING_BYTES:
+                logger.warning(
+                    "tool_exit",
+                    tool=tool_name,
+                    rows=row_count,
+                    response_bytes=response_bytes,
+                    elapsed_ms=elapsed_ms,
+                    warning="response exceeds 50KB",
+                )
+            else:
+                logger.debug(
+                    "tool_exit",
+                    tool=tool_name,
+                    rows=row_count,
+                    response_bytes=response_bytes,
+                    elapsed_ms=elapsed_ms,
+                )
         else:
             logger.debug(
                 "tool_exit",
                 tool=tool_name,
                 rows=row_count,
-                response_bytes=response_bytes,
                 elapsed_ms=elapsed_ms,
             )
 

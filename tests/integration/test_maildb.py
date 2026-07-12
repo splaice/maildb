@@ -457,6 +457,19 @@ def test_search_total_counts_seen_results(test_pool, seed_emails) -> None:  # ty
     assert total == 1 + len(results)
 
 
+def test_search_all_total_is_offset_plus_returned(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
+    """search_all total is a lower bound: offset + len(results), not unified pool size."""
+    mock_ec = MagicMock()
+    mock_ec.embed.return_value = [0.1] * 768
+    db = MailDB._from_pool(test_pool, embedding_client=mock_ec)
+
+    results, total = db.search_all("budget discussion", limit=1, offset=0)
+    assert total == len(results)
+
+    results, total = db.search_all("budget discussion", limit=1, offset=1)
+    assert total == 1 + len(results)
+
+
 def test_search_with_filters(test_pool, seed_emails) -> None:  # type: ignore[no-untyped-def]
     mock_ec = MagicMock()
     mock_ec.embed.return_value = [0.1] * 768
@@ -755,7 +768,9 @@ def test_topics_with_selection_sequence_matches_python_implementation(test_pool)
         "topics-seq-2@example.com",
         "topics-seq-1@example.com",
     ]
-    assert total == 4
+    # total is lower bound: offset + returned (not candidate-pool size)
+    assert total == 0 + len(topics)
+    assert total == 3
 
 
 # ---------------------------------------------------------------------------
@@ -836,6 +851,32 @@ def test_topics_with_no_args_raises(test_pool, seed_advanced) -> None:  # type: 
     db = MailDB._from_pool(test_pool)
     with pytest.raises(ValueError, match="sender or sender_domain"):
         db.topics_with()
+
+
+def test_topics_with_total_is_offset_plus_returned(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """topics_with total is a lower bound: offset + len(results), not pool size."""
+    with test_pool.connection() as conn:
+        for i, first_dims in enumerate([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]):
+            conn.execute(
+                """INSERT INTO emails (message_id, thread_id, sender_address, sender_domain,
+                       date, embedding)
+                   VALUES (%(mid)s, 'topics-total', 'topictotal@example.com', 'example.com',
+                       %(date)s, %(embedding)s)""",
+                {
+                    "mid": f"topics-total-{i}@example.com",
+                    "date": datetime(2025, 6, 4 - i, tzinfo=UTC),
+                    "embedding": first_dims + [0.0] * 766,
+                },
+            )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool)
+
+    results, total = db.topics_with(sender="topictotal@example.com", limit=2, offset=0)
+    assert total == len(results)
+
+    results, total = db.topics_with(sender="topictotal@example.com", limit=2, offset=1)
+    assert total == 1 + len(results)
 
 
 def test_long_threads_with_after(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
