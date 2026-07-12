@@ -299,7 +299,8 @@ def test_classifier_signal_ordering_and_never_sets_kind(test_pool) -> None:  # t
 
     with test_pool.connection() as conn:
         noreply = conn.execute(
-            """SELECT c.human_probability, c.classification_signals, c.classified_at, c.kind
+            """SELECT c.human_probability, c.classification_signals, c.classified_at,
+                      c.kind, c.kind_source
                FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
                WHERE ca.address = 'noreply@shop.com'"""
         ).fetchone()
@@ -308,9 +309,10 @@ def test_classifier_signal_ordering_and_never_sets_kind(test_pool) -> None:  # t
         assert "one_way_bulk" in noreply[1]
         assert noreply[2] is not None
         assert noreply[3] == "unknown"
+        assert noreply[4] == "heuristic"  # default; classifier never writes kind_source
 
         person = conn.execute(
-            """SELECT c.human_probability, c.classification_signals, c.kind
+            """SELECT c.human_probability, c.classification_signals, c.kind, c.kind_source
                FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
                WHERE ca.address = 'jane@p.com'"""
         ).fetchone()
@@ -318,14 +320,16 @@ def test_classifier_signal_ordering_and_never_sets_kind(test_pool) -> None:  # t
         assert "bidirectional" in person[1]
         assert "personal_name" in person[1]
         assert person[2] == "unknown"
+        assert person[3] == "heuristic"
 
         unknown = conn.execute(
-            """SELECT c.human_probability, c.classification_signals, c.kind
+            """SELECT c.human_probability, c.classification_signals, c.kind, c.kind_source
                FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
                WHERE ca.address = 'stranger@z.com'"""
         ).fetchone()
         assert 0.4 <= unknown[0] <= 0.7
         assert unknown[2] == "unknown"
+        assert unknown[3] == "heuristic"
 
         user = conn.execute(
             """SELECT c.human_probability
@@ -333,6 +337,95 @@ def test_classifier_signal_ordering_and_never_sets_kind(test_pool) -> None:  # t
                WHERE ca.address = 'me@example.com'"""
         ).fetchone()
         assert user[0] is None
+
+        # Invariant: classify never writes kind/kind_source — manual curation survives
+        stranger_id = conn.execute(
+            "SELECT contact_id FROM contact_addresses WHERE address = 'stranger@z.com'"
+        ).fetchone()[0]
+        conn.execute(
+            """UPDATE contacts
+                  SET kind = 'human', kind_source = 'manual'
+                WHERE id = %(id)s""",
+            {"id": stranger_id},
+        )
+        conn.commit()
+
+    classify_contacts(test_pool)
+    with test_pool.connection() as conn:
+        preserved = conn.execute(
+            "SELECT kind, kind_source FROM contacts WHERE id = %(id)s",
+            {"id": stranger_id},
+        ).fetchone()
+        assert preserved[0] == "human"
+        assert preserved[1] == "manual"
+
+
+def test_classifier_thread_stats_signals(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """Deep conversational partner vs one-way bulk (depth-1) threads."""
+    _clean_contacts(test_pool)
+    import_id = _insert_import(test_pool, "me@example.com")
+
+    deep_thread = "thread-deep-conv"
+    emails: list[dict] = []
+    # Sam and user share a deep thread (depth >= 3)
+    for i, (sender, mid) in enumerate(
+        [
+            ("sam@p.com", "deep-sam-1"),
+            ("me@example.com", "deep-me-1"),
+            ("sam@p.com", "deep-sam-2"),
+            ("me@example.com", "deep-me-2"),
+            ("sam@p.com", "deep-sam-3"),
+        ]
+    ):
+        e = _email(
+            message_id=f"{mid}@p.com",
+            sender_address=sender,
+            sender_name="Sam Poole" if sender == "sam@p.com" else "Me",
+            to=["me@example.com"] if sender == "sam@p.com" else ["sam@p.com"],
+            date=datetime(2025, 5, 1, 10, i, tzinfo=UTC),
+            import_id=import_id,
+        )
+        e["thread_id"] = deep_thread
+        emails.append(e)
+
+    # Bulk sender: 12 one-message threads (avg depth 1), never shared with user
+    for i in range(12):
+        e = _email(
+            message_id=f"bulk-{i}@news.com",
+            sender_address="bulk@news.com",
+            sender_name="News Blast",
+            to=["me@example.com"],
+            date=datetime(2025, 6, 1 + (i % 28), tzinfo=UTC),
+            import_id=import_id,
+        )
+        e["thread_id"] = f"bulk-thread-{i}"
+        emails.append(e)
+
+    _seed(test_pool, emails)
+    build_contacts(test_pool)
+    n = classify_contacts(test_pool)
+    assert n >= 2
+
+    with test_pool.connection() as conn:
+        sam = conn.execute(
+            """SELECT c.human_probability, c.classification_signals, c.kind, c.kind_source
+               FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
+               WHERE ca.address = 'sam@p.com'"""
+        ).fetchone()
+        bulk = conn.execute(
+            """SELECT c.human_probability, c.classification_signals, c.kind, c.kind_source
+               FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
+               WHERE ca.address = 'bulk@news.com'"""
+        ).fetchone()
+
+        assert "replied_threads" in sam[1]
+        assert "deep_threads" in sam[1]
+        assert "shallow_threads" in bulk[1]
+        assert sam[0] > bulk[0]
+        assert sam[2] == "unknown"
+        assert bulk[2] == "unknown"
+        assert sam[3] == "heuristic"
+        assert bulk[3] == "heuristic"
 
 
 def test_classify_contact_matches_batch(test_pool) -> None:  # type: ignore[no-untyped-def]

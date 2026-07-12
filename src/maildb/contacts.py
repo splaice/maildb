@@ -28,6 +28,10 @@ WEIGHT_PERSONAL_NAME = 0.10  # Display name looks like a personal first+last.
 WEIGHT_AUTOMATED_PATTERN = -0.40  # Local-part matches noreply/billing/etc.
 WEIGHT_LIST_PATTERN = -0.30  # Address looks like a mailing list.
 WEIGHT_ONE_WAY_BULK = -0.20  # Many inbound messages, zero outbound.
+WEIGHT_REPLIED_THREADS = 0.25  # Contact messages often share threads with the user.
+WEIGHT_SHALLOW_THREADS = -0.15  # High volume of single-message (depth-1) threads.
+WEIGHT_DEEP_THREADS = 0.10  # Messages sit in multi-message threads.
+WEIGHT_ORG_NAME = -0.20  # Display name looks like an org/role label.
 
 _PERSONAL_NAME_RE = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$")
 _NON_PERSONAL_NAME_RE = re.compile(
@@ -41,6 +45,12 @@ _AUTOMATED_LOCAL_RE = re.compile(
 )
 _LIST_ADDRESS_RE = re.compile(
     r"lists\.|googlegroups\.com|listserv|-announce@|-dev@|-users@",
+    re.IGNORECASE,
+)
+_ORG_NAME_RE = re.compile(
+    r"\b(?:noreply|no-reply|do-not-reply|support|team|billing|notifications?|"
+    r"alerts?|info|sales|newsletter|updates?|admin|help|service|marketing|"
+    r"customer care)\b",
     re.IGNORECASE,
 )
 
@@ -420,12 +430,34 @@ def _is_personal_name(name: str) -> bool:
     return not any(ch.isdigit() for ch in name)
 
 
+def _enrichment_signals(
+    *,
+    messages_from: int,
+    name_variants: list[str],
+    replied_thread_ratio: float | None,
+    avg_thread_depth: float | None,
+) -> dict[str, float]:
+    """Thread-stats and org-name signals for the human-probability classifier."""
+    out: dict[str, float] = {}
+    if replied_thread_ratio is not None and replied_thread_ratio >= 0.3:
+        out["replied_threads"] = WEIGHT_REPLIED_THREADS
+    if avg_thread_depth is not None and avg_thread_depth < 1.5 and messages_from >= 10:
+        out["shallow_threads"] = WEIGHT_SHALLOW_THREADS
+    if avg_thread_depth is not None and avg_thread_depth >= 3.0:
+        out["deep_threads"] = WEIGHT_DEEP_THREADS
+    if any(_ORG_NAME_RE.search(n) for n in name_variants):
+        out["org_name"] = WEIGHT_ORG_NAME
+    return out
+
+
 def _compute_probability(
     *,
     messages_from: int,
     messages_to: int,
     name_variants: list[str],
     addresses: list[str],
+    replied_thread_ratio: float | None = None,
+    avg_thread_depth: float | None = None,
 ) -> tuple[float, dict[str, float]]:
     score = BASE_PROBABILITY
     signals: dict[str, float] = {}
@@ -456,6 +488,15 @@ def _compute_probability(
         score += WEIGHT_ONE_WAY_BULK
         signals["one_way_bulk"] = WEIGHT_ONE_WAY_BULK
 
+    for key, weight in _enrichment_signals(
+        messages_from=messages_from,
+        name_variants=name_variants,
+        replied_thread_ratio=replied_thread_ratio,
+        avg_thread_depth=avg_thread_depth,
+    ).items():
+        score += weight
+        signals[key] = weight
+
     probability = max(0.01, min(0.99, score))
     return probability, signals
 
@@ -469,11 +510,95 @@ def classify_contacts(
 
     With ``contact_ids=None``, classifies the whole corpus. Skips contacts
     whose only address is the user. Returns the number classified.
+
+    Thread stats (one set-based pass): ``replied_thread_ratio`` is the fraction
+    of the contact's messages that sit in threads where the user sent any
+    message (approximation; ordering not checked). ``avg_thread_depth`` is the
+    message-count of the containing thread, averaged over the contact's messages.
     """
+    user_emails = _user_identities(pool)
     with pool.connection() as conn:
+        # One set-based pass for per-contact thread stats (never per-contact).
         if contact_ids is not None:
             if not contact_ids:
                 return 0
+            thread_sql = """
+                WITH user_threads AS (
+                    SELECT DISTINCT thread_id FROM emails
+                     WHERE sender_address = ANY(%(user_emails)s)
+                       AND thread_id IS NOT NULL
+                ),
+                thread_sizes AS (
+                    SELECT thread_id, count(*) AS n FROM emails
+                     WHERE thread_id IS NOT NULL GROUP BY thread_id
+                ),
+                sender_stats AS (
+                    SELECT e.sender_address AS address,
+                           count(*)::int AS msgs,
+                           sum(ts.n)::float AS depth_sum,
+                           count(*) FILTER (
+                               WHERE ut.thread_id IS NOT NULL
+                           )::int AS replied_msgs
+                      FROM emails e
+                      JOIN thread_sizes ts ON ts.thread_id = e.thread_id
+                      LEFT JOIN user_threads ut ON ut.thread_id = e.thread_id
+                     GROUP BY e.sender_address
+                )
+                SELECT ca.contact_id,
+                       sum(ss.msgs)::int AS msgs,
+                       sum(ss.depth_sum) / sum(ss.msgs) AS avg_thread_depth,
+                       sum(ss.replied_msgs)::float / sum(ss.msgs)
+                           AS replied_thread_ratio
+                  FROM sender_stats ss
+                  JOIN contact_addresses ca ON ca.address = ss.address
+                 WHERE ca.contact_id = ANY(%(ids)s)
+                 GROUP BY ca.contact_id
+            """
+            thread_params: dict[str, Any] = {
+                "user_emails": user_emails,
+                "ids": contact_ids,
+            }
+        else:
+            thread_sql = """
+                WITH user_threads AS (
+                    SELECT DISTINCT thread_id FROM emails
+                     WHERE sender_address = ANY(%(user_emails)s)
+                       AND thread_id IS NOT NULL
+                ),
+                thread_sizes AS (
+                    SELECT thread_id, count(*) AS n FROM emails
+                     WHERE thread_id IS NOT NULL GROUP BY thread_id
+                ),
+                sender_stats AS (
+                    SELECT e.sender_address AS address,
+                           count(*)::int AS msgs,
+                           sum(ts.n)::float AS depth_sum,
+                           count(*) FILTER (
+                               WHERE ut.thread_id IS NOT NULL
+                           )::int AS replied_msgs
+                      FROM emails e
+                      JOIN thread_sizes ts ON ts.thread_id = e.thread_id
+                      LEFT JOIN user_threads ut ON ut.thread_id = e.thread_id
+                     GROUP BY e.sender_address
+                )
+                SELECT ca.contact_id,
+                       sum(ss.msgs)::int AS msgs,
+                       sum(ss.depth_sum) / sum(ss.msgs) AS avg_thread_depth,
+                       sum(ss.replied_msgs)::float / sum(ss.msgs)
+                           AS replied_thread_ratio
+                  FROM sender_stats ss
+                  JOIN contact_addresses ca ON ca.address = ss.address
+                 GROUP BY ca.contact_id
+            """
+            thread_params = {"user_emails": user_emails}
+
+        thread_rows = conn.execute(thread_sql, thread_params).fetchall()
+        # contact_id -> (avg_thread_depth, replied_thread_ratio)
+        thread_stats: dict[Any, tuple[float, float]] = {
+            row[0]: (float(row[2]), float(row[3])) for row in thread_rows
+        }
+
+        if contact_ids is not None:
             cur = conn.execute(
                 """
                 SELECT c.id,
@@ -524,11 +649,19 @@ def classify_contacts(
         ) in rows:
             if only_user:
                 continue
+            stats = thread_stats.get(contact_id)
+            if stats is None:
+                avg_depth: float | None = None
+                replied_ratio: float | None = None
+            else:
+                avg_depth, replied_ratio = stats
             probability, signals = _compute_probability(
                 messages_from=messages_from,
                 messages_to=messages_to,
                 name_variants=list(name_variants or []),
                 addresses=list(addresses or []),
+                replied_thread_ratio=replied_ratio,
+                avg_thread_depth=avg_depth,
             )
             updates.append(
                 {
