@@ -10,6 +10,7 @@ import pytest
 
 from maildb.contacts import build_contacts, classify_contact, classify_contacts
 from maildb.ingest.orchestrator import run_pipeline
+from maildb.maildb import MailDB
 
 pytestmark = pytest.mark.integration
 
@@ -677,3 +678,155 @@ def test_orchestrator_builds_and_classifies_contacts(test_pool, test_settings, t
         # address appears in the mbox; if it does, probability stays NULL.
         if user is not None:
             assert user[0] is None
+
+
+def test_contacts_search_needs_review_queue(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """needs_review returns only kind=unknown, ranked by volume x human_probability."""
+    _clean_contacts(test_pool)
+    import_id = _insert_import(test_pool)
+    # high: 4 msgs * 0.9 = 3.6
+    # mid:  2 msgs * 0.8 = 1.6
+    # low:  10 msgs * 0.1 = 1.0
+    emails: list[dict] = [
+        _email(
+            message_id=f"high-{i}@p.com",
+            sender_address="high@p.com",
+            sender_name="High Vol",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 1 + i, tzinfo=UTC),
+            import_id=import_id,
+        )
+        for i in range(4)
+    ]
+    emails.extend(
+        _email(
+            message_id=f"mid-{i}@p.com",
+            sender_address="mid@p.com",
+            sender_name="Mid Vol",
+            to=["me@example.com"],
+            date=datetime(2025, 2, 1 + i, tzinfo=UTC),
+            import_id=import_id,
+        )
+        for i in range(2)
+    )
+    emails.extend(
+        _email(
+            message_id=f"low-{i}@bulk.com",
+            sender_address="low@bulk.com",
+            sender_name="Low Prob",
+            to=["me@example.com"],
+            date=datetime(2025, 3, 1 + (i % 28), tzinfo=UTC),
+            import_id=import_id,
+        )
+        for i in range(10)
+    )
+    _seed(test_pool, emails)
+    build_contacts(test_pool)
+
+    with test_pool.connection() as conn:
+        for addr, prob in (("high@p.com", 0.9), ("mid@p.com", 0.8), ("low@bulk.com", 0.1)):
+            conn.execute(
+                """UPDATE contacts c
+                      SET human_probability = %(prob)s
+                     FROM contact_addresses ca
+                    WHERE ca.contact_id = c.id AND ca.address = %(addr)s""",
+                {"prob": prob, "addr": addr},
+            )
+        conn.commit()
+
+    db = MailDB._from_pool(test_pool)
+    results, total = db.contacts_search(needs_review=True, include_total=True, limit=100)
+    assert total is not None and total >= 3
+    assert all(r["kind"] == "unknown" for r in results)
+
+    addrs = [r["addresses"][0] for r in results if r["addresses"]]
+    high_i = addrs.index("high@p.com")
+    mid_i = addrs.index("mid@p.com")
+    low_i = addrs.index("low@bulk.com")
+    assert high_i < mid_i < low_i
+
+    # Manually kind a contact → it leaves the review queue
+    db.set_kind_bulk(kind="human", address="high@p.com")
+    after, _ = db.contacts_search(needs_review=True, limit=100)
+    after_addrs = {a for r in after for a in (r["addresses"] or [])}
+    assert "high@p.com" not in after_addrs
+    assert "mid@p.com" in after_addrs
+
+
+def test_set_kind_bulk_by_domain_and_invariants(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """set_kind_bulk by domain updates matches with kind_source=manual; classify no-clobber."""
+    _clean_contacts(test_pool)
+    import_id = _insert_import(test_pool)
+    emails = [
+        _email(
+            message_id="a1@corp.com",
+            sender_address="alice@corp.com",
+            sender_name="Alice",
+            to=["me@example.com"],
+            import_id=import_id,
+        ),
+        _email(
+            message_id="b1@corp.com",
+            sender_address="bob@corp.com",
+            sender_name="Bob",
+            to=["me@example.com"],
+            import_id=import_id,
+        ),
+        _email(
+            message_id="o1@other.com",
+            sender_address="other@other.com",
+            sender_name="Other",
+            to=["me@example.com"],
+            import_id=import_id,
+        ),
+    ]
+    _seed(test_pool, emails)
+    build_contacts(test_pool)
+    db = MailDB._from_pool(test_pool)
+
+    dry = db.set_kind_bulk(kind="organization", domain="corp.com", dry_run=True)
+    assert dry["matched"] == 2
+    assert dry["updated"] == 0
+    assert len(dry["sample"]) == 2
+    with test_pool.connection() as conn:
+        still_unknown = conn.execute(
+            "SELECT count(*) FROM contacts WHERE kind = 'unknown'"
+        ).fetchone()[0]
+    assert still_unknown >= 2
+
+    result = db.set_kind_bulk(kind="organization", domain="corp.com")
+    assert result["matched"] == 2
+    assert result["updated"] == 2
+
+    with test_pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT ca.address, c.kind, c.kind_source
+                 FROM contact_addresses ca
+                 JOIN contacts c ON c.id = ca.contact_id
+                WHERE ca.address IN ('alice@corp.com', 'bob@corp.com', 'other@other.com')
+                ORDER BY ca.address"""
+        ).fetchall()
+    by_addr = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_addr["alice@corp.com"] == ("organization", "manual")
+    assert by_addr["bob@corp.com"] == ("organization", "manual")
+    assert by_addr["other@other.com"] == ("unknown", "heuristic")
+
+    classify_contacts(test_pool)
+    with test_pool.connection() as conn:
+        preserved = conn.execute(
+            """SELECT c.kind, c.kind_source
+                 FROM contacts c JOIN contact_addresses ca ON ca.contact_id = c.id
+                WHERE ca.address = 'alice@corp.com'"""
+        ).fetchone()
+    assert preserved[0] == "organization"
+    assert preserved[1] == "manual"
+
+
+def test_set_kind_bulk_validation(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match="Invalid kind"):
+        db.set_kind_bulk(kind="not-a-kind", domain="x.com")
+    with pytest.raises(ValueError, match="Exactly one"):
+        db.set_kind_bulk(kind="human")
+    with pytest.raises(ValueError, match="Exactly one"):
+        db.set_kind_bulk(kind="human", domain="x.com", address="a@x.com")

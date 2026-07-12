@@ -450,6 +450,59 @@ def contacts_classify(
         pool.close()
 
 
+@contacts_app.command("set-kind")
+def contacts_set_kind(
+    kind: str = typer.Argument(help="Contact kind to apply (human, organization, ...)."),
+    domain: str | None = typer.Option(
+        None,
+        "--domain",
+        help="Match all contacts with an address ending @DOMAIN.",
+    ),
+    address: str | None = typer.Option(
+        None,
+        "--address",
+        help="Match the contact owning this exact address.",
+    ),
+    contact_id: str | None = typer.Option(
+        None,
+        "--contact-id",
+        help="Match this contact UUID.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report matches without writing.",
+    ),
+) -> None:
+    """Bulk-set kind on contacts matched by domain, address, or contact id."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        db = MailDB._from_pool(pool)
+        try:
+            result = db.set_kind_bulk(
+                kind=kind,
+                domain=domain,
+                address=address,
+                contact_id=contact_id,
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if dry_run:
+            typer.echo(f"Would update {result['matched']} contact(s).")
+            for item in result["sample"]:
+                name = item.get("display_name") or "(no name)"
+                addrs = ", ".join(item.get("addresses") or [])
+                typer.echo(f"  {name}  {addrs}")
+        else:
+            typer.echo(f"Updated {result['updated']} contact(s).")
+    finally:
+        pool.close()
+
+
 process_app = typer.Typer(
     name="process_attachments",
     help="Extract + embed attachment contents for semantic search.",

@@ -1255,12 +1255,15 @@ class MailDB:
         limit: int = 20,
         offset: int = 0,
         include_total: bool = False,
+        needs_review: bool = False,
     ) -> tuple[list[dict[str, Any]], int | None]:
         """Search the contacts address book.
 
         Joins contacts ← contact_addresses (aggregated per contact). Excludes
         contacts whose every address is the user. Order is by total message
-        volume DESC, then last_seen DESC NULLS LAST, then id.
+        volume DESC, then last_seen DESC NULLS LAST, then id — unless
+        needs_review is True, in which case only kind='unknown' contacts are
+        returned ranked by curation priority (volume x human probability).
         Returns (contacts, total) where total is None unless include_total=True;
         when present it is the exact count of matching rows regardless of offset.
         """
@@ -1270,6 +1273,8 @@ class MailDB:
         if kind is not None:
             conditions.append("kind = %(kind)s")
             params["kind"] = kind
+        if needs_review:
+            conditions.append("kind = 'unknown'")
         if tag is not None:
             conditions.append("%(tag)s = ANY(tags)")
             params["tag"] = tag
@@ -1329,11 +1334,13 @@ class MailDB:
               FROM contact_stats
              WHERE {where}
         """
+        if needs_review:
+            order_by = "(messages_from + messages_to) * coalesce(human_probability, 0.5) DESC, id"
+        else:
+            order_by = "(messages_from + messages_to) DESC, last_seen DESC NULLS LAST, id"
         sql = f"""
             {base_sql}
-             ORDER BY (messages_from + messages_to) DESC,
-                      last_seen DESC NULLS LAST,
-                      id
+             ORDER BY {order_by}
              LIMIT %(limit)s OFFSET %(offset)s
         """
         rows = _query_dicts(self._pool, sql, params)
@@ -1470,6 +1477,93 @@ class MailDB:
             msg = f"Contact {contact_id} does not exist"
             raise ValueError(msg)
         return card
+
+    def set_kind_bulk(
+        self,
+        *,
+        kind: str,
+        domain: str | None = None,
+        address: str | None = None,
+        contact_id: UUID | str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Bulk-set kind for contacts matched by exactly one selector.
+
+        Manual curation: sets kind_source='manual'. Returns
+        ``{"matched": int, "updated": int, "sample": [...]}`` where sample is
+        up to 10 matching contacts with display_name and addresses.
+        """
+        if kind not in VALID_CONTACT_KINDS:
+            msg = (
+                f"Invalid kind {kind!r}. Must be one of: {', '.join(sorted(VALID_CONTACT_KINDS))}"
+            )
+            raise ValueError(msg)
+
+        n_selectors = sum(x is not None for x in (domain, address, contact_id))
+        if n_selectors != 1:
+            msg = "Exactly one of domain, address, or contact_id is required"
+            raise ValueError(msg)
+
+        params: dict[str, Any] = {"kind": kind}
+        if domain is not None:
+            # Full LIKE pattern in the param so pyformat does not treat %@ as a placeholder.
+            params["domain_pattern"] = f"%@{domain.lower().strip()}"
+            match_sql = """
+                SELECT DISTINCT ca.contact_id AS id
+                  FROM contact_addresses ca
+                 WHERE lower(ca.address) LIKE %(domain_pattern)s
+            """
+        elif address is not None:
+            params["address"] = address.lower().strip()
+            match_sql = """
+                SELECT ca.contact_id AS id
+                  FROM contact_addresses ca
+                 WHERE ca.address = %(address)s
+            """
+        else:
+            params["contact_id"] = contact_id
+            match_sql = """
+                SELECT c.id FROM contacts c WHERE c.id = %(contact_id)s
+            """
+
+        sample_sql = f"""
+            SELECT
+                c.display_name,
+                array_agg(DISTINCT ca.address ORDER BY ca.address) AS addresses
+              FROM contacts c
+              JOIN ({match_sql}) AS matched ON matched.id = c.id
+              JOIN contact_addresses ca ON ca.contact_id = c.id
+             GROUP BY c.id, c.display_name
+             ORDER BY c.id
+             LIMIT 10
+        """
+        sample_rows = _query_dicts(self._pool, sample_sql, params)
+        sample: list[dict[str, Any]] = [
+            {
+                "display_name": row.get("display_name"),
+                "addresses": list(row["addresses"]) if row.get("addresses") is not None else [],
+            }
+            for row in sample_rows
+        ]
+
+        count_sql = f"SELECT count(*)::int AS n FROM ({match_sql}) AS matched"
+        count_row = _query_one_dict(self._pool, count_sql, params)
+        matched = int(count_row["n"]) if count_row is not None else 0
+
+        if dry_run:
+            return {"matched": matched, "updated": 0, "sample": sample}
+
+        update_sql = f"""
+            UPDATE contacts AS c
+               SET kind = %(kind)s,
+                   kind_source = 'manual',
+                   updated_at = now()
+              FROM ({match_sql}) AS matched
+             WHERE c.id = matched.id
+         RETURNING c.id
+        """
+        updated_rows = _query_dicts(self._pool, update_sql, params)
+        return {"matched": matched, "updated": len(updated_rows), "sample": sample}
 
     @staticmethod
     def _format_contact_row(row: dict[str, Any], *, full: bool) -> dict[str, Any]:

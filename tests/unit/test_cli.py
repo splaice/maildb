@@ -168,3 +168,77 @@ def test_ingest_reset_with_yes_calls_reset():
         result = runner.invoke(app, ["ingest", "reset", "--yes"])
     assert result.exit_code == 0, result.output
     mock_reset.assert_called_once()
+
+
+def test_contacts_set_kind_passes_args():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.return_value = {"matched": 3, "updated": 3, "sample": []}
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(
+            app,
+            ["contacts", "set-kind", "organization", "--domain", "corp.com"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_db.set_kind_bulk.assert_called_once_with(
+        kind="organization",
+        domain="corp.com",
+        address=None,
+        contact_id=None,
+        dry_run=False,
+    )
+    assert "Updated 3 contact(s)." in result.output
+
+
+def test_contacts_set_kind_dry_run_output():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.return_value = {
+        "matched": 2,
+        "updated": 0,
+        "sample": [
+            {"display_name": "Alice", "addresses": ["alice@corp.com"]},
+            {"display_name": None, "addresses": ["bob@corp.com"]},
+        ],
+    }
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(
+            app,
+            ["contacts", "set-kind", "human", "--address", "alice@corp.com", "--dry-run"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_db.set_kind_bulk.assert_called_once_with(
+        kind="human",
+        domain=None,
+        address="alice@corp.com",
+        contact_id=None,
+        dry_run=True,
+    )
+    assert "Would update 2 contact(s)." in result.output
+    assert "Alice" in result.output
+    assert "alice@corp.com" in result.output
+    assert "bob@corp.com" in result.output
+
+
+def test_contacts_set_kind_value_error_exits_1():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.side_effect = ValueError(
+        "Exactly one of domain, address, or contact_id is required"
+    )
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "set-kind", "human"])
+    assert result.exit_code == 1
+    assert "Exactly one" in result.output

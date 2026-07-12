@@ -438,6 +438,7 @@ def test_contacts_tool_passes_params_and_uses_envelope() -> None:
         limit=10,
         offset=5,
         include_total=True,
+        needs_review=True,
     )
     kwargs = mock_db.contacts_search.call_args.kwargs
     assert kwargs["query"] == "Alice"
@@ -447,11 +448,23 @@ def test_contacts_tool_passes_params_and_uses_envelope() -> None:
     assert kwargs["limit"] == 10
     assert kwargs["offset"] == 5
     assert kwargs["include_total"] is True
+    assert kwargs["needs_review"] is True
     assert result["total"] == 1
     assert result["offset"] == 5
     assert result["limit"] == 10
     assert len(result["results"]) == 1
     assert result["results"][0]["display_name"] == "Alice"
+
+
+def test_contacts_tool_needs_review_default_false() -> None:
+    mock_db = MagicMock()
+    mock_db.contacts_search.return_value = ([], None)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    server.contacts(ctx)
+    kwargs = mock_db.contacts_search.call_args.kwargs
+    assert kwargs["needs_review"] is False
 
 
 def test_get_contact_tool_passes_params() -> None:

@@ -975,6 +975,7 @@ def contacts(
     limit: int = 20,
     offset: int = 0,
     include_total: bool = False,
+    needs_review: bool = False,
 ) -> dict[str, Any]:
     """Resolve people and senders: search the address book by name fragment,
     address fragment, kind, or tag.
@@ -995,6 +996,8 @@ def contacts(
       limit: max results (default 20)
       offset: skip first N results for pagination (default 0)
       include_total: set true to compute an exact total (extra count query); by default total is null.
+      needs_review: only unclassified contacts (kind='unknown'), ranked by
+        curation priority (volume x human probability).
 
     Returns {total, offset, limit, results: [{id, display_name, kind,
     kind_source, tags, human_probability, addresses, name_variants,
@@ -1009,6 +1012,7 @@ def contacts(
         limit=limit,
         offset=offset,
         include_total=include_total,
+        needs_review=needs_review,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
