@@ -40,6 +40,9 @@ VALID_ORDERS = {
 
 VALID_CONTACT_KINDS = frozenset({"human", "organization", "automated", "mailing_list", "unknown"})
 
+# Threshold for treating kind='unknown' contacts as human in human_only filters.
+HUMAN_PROBABILITY_THRESHOLD = 0.7
+
 # Standard reciprocal-rank-fusion constant; higher values flatten the rank penalty.
 RRF_K = 60
 
@@ -487,14 +490,15 @@ class MailDB:
             period: Only count messages after this date (ISO format).
             limit: Max results to return.
             direction: 'inbound', 'outbound', or 'both'.
-            group_by: 'address' (default) or 'domain' to aggregate by domain.
+            group_by: 'address' (default), 'domain', or 'contact' to aggregate by
+                contact entity (collapses multi-address contacts).
             exclude_domains: List of domains to exclude from results.
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
             include_total: When True, compute an exact total via a separate count query.
         """
-        if group_by not in ("address", "domain"):
-            msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
+        if group_by not in ("address", "domain", "contact"):
+            msg = f"group_by must be 'address', 'domain', or 'contact', got {group_by!r}"
             raise ValueError(msg)
 
         identities = self._identity_addresses(account)
@@ -527,8 +531,10 @@ class MailDB:
         else:
             account_cond = ""
 
-        label = group_by
-        if group_by == "domain":
+        # Address-level aggregation is the base scan; "contact" reuses it as a subquery.
+        agg_group = "address" if group_by == "contact" else group_by
+        label = agg_group
+        if agg_group == "domain":
             inbound_col = "sender_domain"
             outbound_col = "split_part(r.addr, '@', 2)"
         else:
@@ -594,6 +600,22 @@ class MailDB:
                     GROUP BY {outbound_col}
                 ) AS combined
                 GROUP BY {label}
+            """
+
+        if group_by == "contact":
+            # Collapse multi-address contacts; unlinked addresses keep contact_id=None.
+            base_sql = f"""
+                SELECT
+                    ca.contact_id AS contact_id,
+                    coalesce(max(c.display_name), min(addr_agg.address)) AS display_name,
+                    sum(addr_agg.count) AS count
+                FROM (
+                    {base_sql}
+                ) AS addr_agg
+                LEFT JOIN contact_addresses ca ON ca.address = addr_agg.address
+                LEFT JOIN contacts c ON c.id = ca.contact_id
+                GROUP BY ca.contact_id,
+                         CASE WHEN ca.contact_id IS NULL THEN addr_agg.address END
             """
 
         sql = f"""
@@ -840,6 +862,7 @@ class MailDB:
         direct_only: bool = False,
         account: str | None = None,
         include_total: bool = False,
+        human_only: bool = False,
     ) -> tuple[list[Email], int | None]:
         """Messages with no reply in the same thread.
 
@@ -864,6 +887,8 @@ class MailDB:
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
             include_total: When True, compute an exact total via a separate count query.
+            human_only: For inbound only — restrict senders to human contacts
+                (kind='human', or kind='unknown' with human_probability >= threshold).
         """
         if direction not in ("inbound", "outbound"):
             msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
@@ -873,6 +898,8 @@ class MailDB:
             raise ValueError("'recipient' is only valid for direction='outbound'")
         if direction == "outbound" and (sender is not None or sender_domain is not None):
             raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
+        if human_only and direction == "outbound":
+            raise ValueError("'human_only' is only valid for direction='inbound'")
 
         rc_conditions, rc_params = self._build_filters(
             max_to=max_to,
@@ -915,6 +942,17 @@ class MailDB:
                     "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
                 )
                 params["account"] = account
+            if human_only:
+                conditions.append(
+                    """e.sender_address IN (
+                        SELECT ca.address FROM contact_addresses ca
+                          JOIN contacts c ON c.id = ca.contact_id
+                         WHERE c.kind = 'human'
+                            OR (c.kind = 'unknown'
+                                AND c.human_probability >= %(human_probability_threshold)s)
+                    )"""
+                )
+                params["human_probability_threshold"] = HUMAN_PROBABILITY_THRESHOLD
 
             conditions.extend(rc_conditions)
             where = " AND ".join(conditions)
@@ -1002,7 +1040,8 @@ class MailDB:
     def correspondence(
         self,
         *,
-        address: str,
+        address: str | None = None,
+        contact_id: UUID | str | None = None,
         after: str | None = None,
         before: str | None = None,
         account: str | None = None,
@@ -1014,12 +1053,14 @@ class MailDB:
         """All emails exchanged with a specific person.
 
         Returns emails where address is sender OR is in recipients (to/cc/bcc).
+        With contact_id, matches any of the contact's addresses.
         Default chronological order, higher limit than find().
         Returns (emails, total) where total is None unless include_total=True;
         when present it is the exact count of matching rows regardless of offset.
 
         Args:
             address: Email address to match as sender or recipient.
+            contact_id: Contact UUID — match all of that contact's addresses.
             after: Only include emails on or after this date.
             before: Only include emails before this date.
             account: Scope to a single source_account. Omit to query across all accounts.
@@ -1028,20 +1069,57 @@ class MailDB:
             order: Result ordering.
             include_total: When True, compute an exact total via a separate count query.
         """
-        order_sql = _order_clause(order)
+        if (address is None) == (contact_id is None):
+            msg = "Exactly one of address or contact_id is required"
+            raise ValueError(msg)
 
-        conditions: list[str] = [
-            "(sender_address = %(address)s "
-            "OR recipients @> jsonb_build_object('to', %(address_arr)s::jsonb) "
-            "OR recipients @> jsonb_build_object('cc', %(address_arr)s::jsonb) "
-            "OR recipients @> jsonb_build_object('bcc', %(address_arr)s::jsonb))"
-        ]
+        order_sql = _order_clause(order)
         params: dict[str, Any] = {
-            "address": address,
-            "address_arr": json.dumps([address]),
             "limit": limit,
             "offset": offset,
         }
+
+        if address is not None:
+            match_cond = (
+                "(sender_address = %(address)s "
+                "OR recipients @> jsonb_build_object('to', %(address_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('cc', %(address_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('bcc', %(address_arr)s::jsonb))"
+            )
+            params["address"] = address
+            params["address_arr"] = json.dumps([address])
+        else:
+            exists = _query_one_dict(
+                self._pool,
+                "SELECT id FROM contacts WHERE id = %(contact_id)s",
+                {"contact_id": contact_id},
+            )
+            if exists is None:
+                msg = f"Contact {contact_id} does not exist"
+                raise ValueError(msg)
+            addr_rows = _query_dicts(
+                self._pool,
+                "SELECT address FROM contact_addresses WHERE contact_id = %(contact_id)s",
+                {"contact_id": contact_id},
+            )
+            addresses = [row["address"] for row in addr_rows]
+            if not addresses:
+                msg = f"Contact {contact_id} has no addresses"
+                raise ValueError(msg)
+            # GIN-indexable containment per address, OR-ed; sender via ANY.
+            parts = ["sender_address = ANY(%(addresses)s)"]
+            params["addresses"] = addresses
+            for i, addr in enumerate(addresses):
+                key = f"address_arr_{i}"
+                parts.append(
+                    f"recipients @> jsonb_build_object('to', %({key})s::jsonb) "
+                    f"OR recipients @> jsonb_build_object('cc', %({key})s::jsonb) "
+                    f"OR recipients @> jsonb_build_object('bcc', %({key})s::jsonb)"
+                )
+                params[key] = json.dumps([addr])
+            match_cond = "(" + " OR ".join(parts) + ")"
+
+        conditions: list[str] = [match_cond]
 
         if after:
             conditions.append("date >= %(after)s")

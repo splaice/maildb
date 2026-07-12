@@ -422,7 +422,8 @@ def top_contacts(
     """Find most frequent email correspondents by message count.
 
     Parameters:
-      group_by: "address" (default) for individual addresses, "domain" for domain aggregation
+      group_by: "address" (default) for individual addresses, "domain" for domain aggregation,
+        "contact" for contact-entity aggregation (collapses multi-address contacts)
       exclude_domains: list of domains to filter out (e.g. ["mycompany.com"])
       period: ISO date string — only count messages after this date
       direction: "inbound" | "outbound" | "both" (default "both")
@@ -433,7 +434,8 @@ def top_contacts(
       include_total: set true to compute an exact total (extra count query); by default total is null.
 
     Returns {total, offset, limit, results: [{address: str, count: int}, ...]}
-    (or {domain: str, count: int} results when group_by="domain").
+    (or {domain: str, count: int} when group_by="domain";
+    or {contact_id, display_name, count} when group_by="contact").
 
     Example: top_contacts(group_by="domain", exclude_domains=["mycompany.com"], direction="outbound")
     """
@@ -511,6 +513,7 @@ def unreplied(
     limit: int = 100,
     offset: int = 0,
     include_total: bool = False,
+    human_only: bool = False,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Find emails with no reply in the same thread.
@@ -527,6 +530,7 @@ def unreplied(
       limit: max results (default 100)
       offset: skip first N results for pagination (default 0)
       include_total: set true to compute an exact total (extra count query); by default total is null.
+      human_only: only senders curated or classified as human (kind='human', or unclassified with probability >= 0.7); inbound only.
       fields: list of field names to return. Default returns headers + body_length (no body_text).
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
@@ -549,6 +553,7 @@ def unreplied(
         offset=offset,
         account=account,
         include_total=include_total,
+        human_only=human_only,
     )
     valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
@@ -559,7 +564,8 @@ def unreplied(
 @log_tool
 def correspondence(
     ctx: Context,
-    address: str,
+    address: str | None = None,
+    contact_id: str | None = None,
     after: str | None = None,
     before: str | None = None,
     account: str | None = None,
@@ -572,7 +578,8 @@ def correspondence(
     """Get all emails exchanged with a specific person (sent by them or to them).
 
     Parameters:
-      address: the person's email address (required)
+      address: the person's email address (exactly one of address / contact_id required)
+      contact_id: contact UUID — match all of that contact's addresses at once
       after, before: ISO date range filters
       account: limit results to this source account (e.g. "you@gmail.com").
         Omit to query across all accounts.
@@ -589,6 +596,7 @@ def correspondence(
     db = _get_db(ctx)
     results, total = db.correspondence(
         address=address,
+        contact_id=contact_id,
         after=after,
         before=before,
         account=account,

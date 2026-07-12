@@ -530,3 +530,56 @@ def test_update_contact_tool_surfaces_value_error() -> None:
 
     with pytest.raises(ValueError, match="Invalid kind"):
         server.update_contact(ctx, contact_id="c1", kind="robot")
+
+
+def test_correspondence_tool_passes_contact_id() -> None:
+    mock_db = MagicMock()
+    mock_db.correspondence.return_value = ([], None)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    server.correspondence(ctx, contact_id="c1")
+    kwargs = mock_db.correspondence.call_args.kwargs
+    assert kwargs["contact_id"] == "c1"
+    assert kwargs["address"] is None
+
+    mock_db.reset_mock()
+    mock_db.correspondence.return_value = ([], None)
+    server.correspondence(ctx, address="bob@corp.com")
+    kwargs = mock_db.correspondence.call_args.kwargs
+    assert kwargs["address"] == "bob@corp.com"
+    assert kwargs["contact_id"] is None
+
+
+def test_top_contacts_tool_passes_group_by_contact() -> None:
+    mock_db = MagicMock()
+    mock_db.top_contacts.return_value = (
+        [{"contact_id": "c1", "display_name": "Bob", "count": 3}],
+        1,
+    )
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    result = server.top_contacts(ctx, group_by="contact", include_total=True)
+    kwargs = mock_db.top_contacts.call_args.kwargs
+    assert kwargs["group_by"] == "contact"
+    assert kwargs["include_total"] is True
+    assert result["results"][0]["display_name"] == "Bob"
+    assert result["total"] == 1
+
+
+def test_unreplied_tool_passes_human_only() -> None:
+    mock_db = MagicMock()
+    mock_db.unreplied.return_value = ([], None)
+    ctx = MagicMock()
+    ctx.request_context.lifespan_context.db = mock_db
+
+    server.unreplied(ctx, human_only=True)
+    kwargs = mock_db.unreplied.call_args.kwargs
+    assert kwargs["human_only"] is True
+
+    mock_db.reset_mock()
+    mock_db.unreplied.return_value = ([], None)
+    server.unreplied(ctx)
+    kwargs = mock_db.unreplied.call_args.kwargs
+    assert kwargs["human_only"] is False

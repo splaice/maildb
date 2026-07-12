@@ -2218,3 +2218,261 @@ def test_update_contact_preserved_across_build_and_classify(test_pool) -> None: 
     assert after["tags"] == ["vip"]
     assert after["notes"] == "friend"
     assert after["display_name"] == "Alice Curated"
+
+
+# ---------------------------------------------------------------------------
+# Contact-aware queries
+# ---------------------------------------------------------------------------
+
+
+def _link_addresses_to_contact(pool, addresses: list[str], *, display_name: str | None = None):  # type: ignore[no-untyped-def]
+    """Merge given addresses onto a single contact; return that contact_id.
+
+    Addresses must already exist in contact_addresses (e.g. after build_contacts).
+    """
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT address, contact_id FROM contact_addresses WHERE address = ANY(%(addrs)s)",
+            {"addrs": addresses},
+        ).fetchall()
+        by_addr = {r[0]: r[1] for r in rows}
+        missing = [a for a in addresses if a not in by_addr]
+        assert not missing, f"addresses not in contact_addresses: {missing}"
+        keep_id = by_addr[addresses[0]]
+        for addr in addresses[1:]:
+            old_id = by_addr[addr]
+            if old_id == keep_id:
+                continue
+            conn.execute(
+                "UPDATE contact_addresses SET contact_id = %(keep)s WHERE address = %(addr)s",
+                {"keep": keep_id, "addr": addr},
+            )
+            conn.execute("DELETE FROM contacts WHERE id = %(old)s", {"old": old_id})
+        if display_name is not None:
+            conn.execute(
+                "UPDATE contacts SET display_name = %(name)s WHERE id = %(id)s",
+                {"name": display_name, "id": keep_id},
+            )
+        conn.commit()
+        return keep_id
+
+
+def test_correspondence_by_contact_id_unions_addresses(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """correspondence(contact_id=...) returns the union of all contact addresses."""
+    _clean_contacts(test_pool)
+    import_id = _contacts_insert_import(test_pool, "me@example.com")
+    emails = [
+        _contacts_email(
+            message_id="corr-bob-work@corp.com",
+            sender_address="bob@corp.com",
+            sender_name="Bob",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 10, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _contacts_email(
+            message_id="corr-bob-personal@gmail.com",
+            sender_address="bob@gmail.com",
+            sender_name="Bob",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 11, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _contacts_email(
+            message_id="corr-me-to-bob-work@me.com",
+            sender_address="me@example.com",
+            sender_name="Me",
+            to=["bob@corp.com"],
+            date=datetime(2025, 1, 12, tzinfo=UTC),
+            import_id=import_id,
+        ),
+        _contacts_email(
+            message_id="corr-carol@other.com",
+            sender_address="carol@other.com",
+            sender_name="Carol",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 13, tzinfo=UTC),
+            import_id=import_id,
+        ),
+    ]
+    _contacts_seed(test_pool, emails)
+    build_contacts(test_pool)
+    contact_id = _link_addresses_to_contact(
+        test_pool, ["bob@corp.com", "bob@gmail.com"], display_name="Bob"
+    )
+
+    db = MailDB._from_pool(test_pool)
+    by_contact, _ = db.correspondence(contact_id=contact_id)
+    by_work, _ = db.correspondence(address="bob@corp.com")
+    by_personal, _ = db.correspondence(address="bob@gmail.com")
+
+    contact_ids = {e.message_id for e in by_contact}
+    work_ids = {e.message_id for e in by_work}
+    personal_ids = {e.message_id for e in by_personal}
+    assert contact_ids == work_ids | personal_ids
+    assert "corr-bob-work@corp.com" in contact_ids
+    assert "corr-bob-personal@gmail.com" in contact_ids
+    assert "corr-me-to-bob-work@me.com" in contact_ids
+    assert "corr-carol@other.com" not in contact_ids
+
+
+def test_correspondence_exactly_one_of_address_or_contact_id(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"[Ee]xactly one"):
+        db.correspondence()
+    with pytest.raises(ValueError, match=r"[Ee]xactly one"):
+        db.correspondence(address="a@b.com", contact_id=uuid4())
+
+
+def test_correspondence_contact_id_missing_or_empty(test_pool) -> None:  # type: ignore[no-untyped-def]
+    db = MailDB._from_pool(test_pool)
+    with pytest.raises(ValueError, match=r"does not exist"):
+        db.correspondence(contact_id=uuid4())
+
+    # Contact with no addresses
+    empty_id = uuid4()
+    with test_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO contacts (id, display_name) VALUES (%(id)s, 'Empty')",
+            {"id": empty_id},
+        )
+        conn.commit()
+    with pytest.raises(ValueError, match=r"no addresses"):
+        db.correspondence(contact_id=empty_id)
+
+
+def test_top_contacts_group_by_contact(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """group_by='contact' collapses multi-address contacts; unlinked keep contact_id=None."""
+    _clean_contacts(test_pool)
+    import_id = _contacts_insert_import(test_pool, "me@example.com")
+    # Bob work: 2 inbound, Bob personal: 1 inbound → contact total 3
+    # Carol: 1 inbound, no contact row (deleted after build)
+    emails = [
+        _contacts_email(
+            message_id=f"tc-bob-work-{i}@corp.com",
+            sender_address="bob@corp.com",
+            sender_name="Bob",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 10 + i, tzinfo=UTC),
+            import_id=import_id,
+        )
+        for i in range(2)
+    ]
+    emails.append(
+        _contacts_email(
+            message_id="tc-bob-personal@gmail.com",
+            sender_address="bob@gmail.com",
+            sender_name="Bob",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 15, tzinfo=UTC),
+            import_id=import_id,
+        )
+    )
+    emails.append(
+        _contacts_email(
+            message_id="tc-carol@other.com",
+            sender_address="carol@other.com",
+            sender_name="Carol",
+            to=["me@example.com"],
+            date=datetime(2025, 1, 16, tzinfo=UTC),
+            import_id=import_id,
+        )
+    )
+    _contacts_seed(test_pool, emails)
+    build_contacts(test_pool)
+    bob_id = _link_addresses_to_contact(
+        test_pool, ["bob@corp.com", "bob@gmail.com"], display_name="Bob Multimail"
+    )
+    # Remove Carol's contact link so she appears as unlinked address
+    with test_pool.connection() as conn:
+        carol_cid = conn.execute(
+            "SELECT contact_id FROM contact_addresses WHERE address = 'carol@other.com'"
+        ).fetchone()[0]
+        conn.execute("DELETE FROM contact_addresses WHERE address = 'carol@other.com'")
+        conn.execute("DELETE FROM contacts WHERE id = %(id)s", {"id": carol_cid})
+        conn.commit()
+
+    config = Settings(user_email="me@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+    results, total = db.top_contacts(
+        direction="inbound", group_by="contact", include_total=True, limit=20
+    )
+    assert total is not None
+    assert total == len(results)
+
+    bob_row = next(r for r in results if r.get("contact_id") == bob_id)
+    assert bob_row["display_name"] == "Bob Multimail"
+    assert int(bob_row["count"]) == 3
+
+    unlinked = [r for r in results if r.get("contact_id") is None]
+    assert any(r["display_name"] == "carol@other.com" and int(r["count"]) == 1 for r in unlinked)
+
+
+def test_unreplied_human_only(test_pool) -> None:  # type: ignore[no-untyped-def]
+    """human_only keeps kind=human and high-probability unknown; drops low-probability."""
+    _clean_contacts(test_pool)
+    import_id = _contacts_insert_import(test_pool, "alice@example.com")
+    emails = [
+        _contacts_email(
+            message_id="ho-human@x.com",
+            sender_address="human@x.com",
+            sender_name="Human",
+            to=["alice@example.com"],
+            date=datetime(2025, 4, 1, tzinfo=UTC),
+            import_id=import_id,
+            source_account="alice@example.com",
+        ),
+        _contacts_email(
+            message_id="ho-high@y.com",
+            sender_address="high@y.com",
+            sender_name="High Prob",
+            to=["alice@example.com"],
+            date=datetime(2025, 4, 2, tzinfo=UTC),
+            import_id=import_id,
+            source_account="alice@example.com",
+        ),
+        _contacts_email(
+            message_id="ho-low@z.com",
+            sender_address="low@z.com",
+            sender_name="Low Prob",
+            to=["alice@example.com"],
+            date=datetime(2025, 4, 3, tzinfo=UTC),
+            import_id=import_id,
+            source_account="alice@example.com",
+        ),
+    ]
+    _contacts_seed(test_pool, emails)
+    build_contacts(test_pool)
+
+    with test_pool.connection() as conn:
+
+        def _set_kind(addr: str, kind: str, prob: float | None) -> None:
+            cid = conn.execute(
+                "SELECT contact_id FROM contact_addresses WHERE address = %(a)s",
+                {"a": addr},
+            ).fetchone()[0]
+            conn.execute(
+                """UPDATE contacts
+                   SET kind = %(kind)s, kind_source = 'manual',
+                       human_probability = %(prob)s
+                 WHERE id = %(id)s""",
+                {"kind": kind, "prob": prob, "id": cid},
+            )
+
+        _set_kind("human@x.com", "human", 0.95)
+        _set_kind("high@y.com", "unknown", 0.8)
+        _set_kind("low@z.com", "unknown", 0.3)
+        conn.commit()
+
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    results, total = db.unreplied(direction="inbound", human_only=True, include_total=True)
+    senders = {e.sender_address for e in results}
+    assert "human@x.com" in senders
+    assert "high@y.com" in senders
+    assert "low@z.com" not in senders
+    assert total == 2
+
+    with pytest.raises(ValueError, match=r"human_only"):
+        db.unreplied(direction="outbound", human_only=True)
