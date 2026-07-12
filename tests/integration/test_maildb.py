@@ -204,7 +204,51 @@ def test_find_returns_total(test_pool, seed_emails) -> None:  # type: ignore[no-
     db = MailDB._from_pool(test_pool)
     results, total = db.find(limit=1)
     assert len(results) == 1
+    assert total is None
+
+    results, total = db.find(limit=1, include_total=True)
+    assert len(results) == 1
     assert total == 3  # seed_emails has 3 emails
+
+    results, total = db.find(limit=1, offset=100, include_total=True)
+    assert results == []
+    assert total == 3
+
+
+def test_unreplied_include_total(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    results, total = db.unreplied()
+    assert total is None
+    assert len(results) >= 2
+
+    results, total = db.unreplied(include_total=True)
+    assert total == len(results)
+    assert total >= 2
+
+    results, total = db.unreplied(limit=1, offset=1000, include_total=True)
+    assert results == []
+    assert total is not None and total >= 2
+
+
+def test_top_contacts_include_total(test_pool, seed_advanced) -> None:  # type: ignore[no-untyped-def]
+    config = Settings(user_email="alice@example.com", _env_file=None)  # type: ignore[call-arg]
+    db = MailDB._from_pool(test_pool, config=config)
+
+    contacts, total = db.top_contacts(limit=5, direction="inbound")
+    assert total is None
+    assert len(contacts) >= 2
+
+    contacts, total = db.top_contacts(limit=5, direction="inbound", include_total=True)
+    assert total == len(contacts)
+    assert total >= 2
+
+    contacts, total = db.top_contacts(
+        limit=1, offset=1000, direction="inbound", include_total=True
+    )
+    assert contacts == []
+    assert total is not None and total >= 2
 
 
 @pytest.fixture
@@ -303,7 +347,7 @@ def seed_recipient_counts(test_pool):  # type: ignore[no-untyped-def]
 
 def test_find_direct_only(test_pool, seed_recipient_counts) -> None:  # type: ignore[no-untyped-def]
     db = MailDB._from_pool(test_pool)
-    results, total = db.find(sender="alice@example.com", direct_only=True)
+    results, total = db.find(sender="alice@example.com", direct_only=True, include_total=True)
     # rcpt-1 (1 To, 0 CC) and rcpt-3 (1 To, 0 CC, 1 BCC — BCC unconstrained)
     message_ids = [e.message_id for e in results]
     assert "rcpt-1@example.com" in message_ids
@@ -1300,12 +1344,16 @@ def test_correspondence_filters_by_account(test_pool, test_settings) -> None:  #
             )
         conn.commit()
 
-    a_only, a_total = db.correspondence(address="bob@corp.com", account="a@example.com")
+    a_only, a_total = db.correspondence(
+        address="bob@corp.com", account="a@example.com", include_total=True
+    )
     assert {e.message_id for e in a_only} == {"correspondence-account-0@corp.com"}
     assert a_total == 1
 
-    unscoped, unscoped_total = db.correspondence(address="bob@corp.com")
-    none_scoped, none_scoped_total = db.correspondence(address="bob@corp.com", account=None)
+    unscoped, unscoped_total = db.correspondence(address="bob@corp.com", include_total=True)
+    none_scoped, none_scoped_total = db.correspondence(
+        address="bob@corp.com", account=None, include_total=True
+    )
     assert {e.message_id for e in unscoped} == {
         "correspondence-account-0@corp.com",
         "correspondence-account-1@corp.com",
@@ -1973,8 +2021,8 @@ def _seed_contacts_corpus(test_pool):  # type: ignore[no-untyped-def]
 
 def test_contacts_search_by_name_fragment(test_pool) -> None:  # type: ignore[no-untyped-def]
     db = _seed_contacts_corpus(test_pool)
-    results, total = db.contacts_search(query="Alice")
-    assert total >= 1
+    results, total = db.contacts_search(query="Alice", include_total=True)
+    assert total is not None and total >= 1
     assert any("alice@x.com" in (r["addresses"] or []) for r in results)
     alice = next(r for r in results if "alice@x.com" in r["addresses"])
     assert alice["display_name"] is not None
@@ -1985,7 +2033,7 @@ def test_contacts_search_by_name_fragment(test_pool) -> None:  # type: ignore[no
 
 def test_contacts_search_by_address_fragment(test_pool) -> None:  # type: ignore[no-untyped-def]
     db = _seed_contacts_corpus(test_pool)
-    results, total = db.contacts_search(query="bob@y")
+    results, total = db.contacts_search(query="bob@y", include_total=True)
     assert total == 1
     assert results[0]["addresses"] == ["bob@y.com"]
 
@@ -2003,7 +2051,7 @@ def test_contacts_search_by_tag(test_pool) -> None:  # type: ignore[no-untyped-d
         )
         conn.commit()
 
-    results, total = db.contacts_search(tag="vip")
+    results, total = db.contacts_search(tag="vip", include_total=True)
     assert total == 1
     assert results[0]["addresses"] == ["alice@x.com"]
     assert "vip" in results[0]["tags"]
@@ -2013,7 +2061,7 @@ def test_contacts_search_by_min_human_probability(test_pool) -> None:  # type: i
     db = _seed_contacts_corpus(test_pool)
     # All classified contacts have some probability; high threshold should
     # prefer Alice (personal name + inbound) over noreply.
-    results, total = db.contacts_search(min_human_probability=0.5)
+    results, total = db.contacts_search(min_human_probability=0.5, include_total=True)
     addresses = {a for r in results for a in r["addresses"]}
     assert "noreply@shop.com" not in addresses or all(
         r["human_probability"] is not None and r["human_probability"] >= 0.5 for r in results
@@ -2021,7 +2069,7 @@ def test_contacts_search_by_min_human_probability(test_pool) -> None:  # type: i
     assert all(
         r["human_probability"] is not None and r["human_probability"] >= 0.5 for r in results
     )
-    assert total == len(results) or total >= len(results)
+    assert total == len(results) or (total is not None and total >= len(results))
 
 
 def test_contacts_search_excludes_user_only(test_pool) -> None:  # type: ignore[no-untyped-def]
@@ -2033,7 +2081,7 @@ def test_contacts_search_excludes_user_only(test_pool) -> None:  # type: ignore[
 
 def test_contacts_search_deterministic_ordering(test_pool) -> None:  # type: ignore[no-untyped-def]
     db = _seed_contacts_corpus(test_pool)
-    results, total = db.contacts_search(limit=100)
+    results, total = db.contacts_search(limit=100, include_total=True)
     assert total == len(results)
     # Ordered by (messages_from + messages_to) DESC
     volumes = [r["messages_from"] + r["messages_to"] for r in results]

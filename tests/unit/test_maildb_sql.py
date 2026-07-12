@@ -95,6 +95,43 @@ def test_find_uses_deterministic_order_clauses(monkeypatch) -> None:
     assert "ORDER BY sender_address DESC, id LIMIT" in capture.sql[2]
 
 
+def test_find_default_sql_has_no_window_count(monkeypatch) -> None:
+    capture = QueryCapture()
+    monkeypatch.setattr(maildb_module, "_query_dicts", capture)
+    db = _db()
+
+    results, total = db.find()
+
+    assert "COUNT(*) OVER()" not in capture.sql[0]
+    assert "COUNT(*)" not in capture.sql[0]
+    assert total is None
+    assert results == []
+
+
+def test_find_include_total_issues_count_query(monkeypatch) -> None:
+    dicts_capture = QueryCapture()
+    monkeypatch.setattr(maildb_module, "_query_dicts", dicts_capture)
+
+    def fake_one(
+        pool: object,
+        sql: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        dicts_capture.sql.append(" ".join(sql.split()))
+        dicts_capture.params.append(params)
+        return {"n": 7}
+
+    monkeypatch.setattr(maildb_module, "_query_one_dict", fake_one)
+    db = _db()
+
+    results, total = db.find(include_total=True)
+
+    assert "COUNT(*) OVER()" not in dicts_capture.sql[0]
+    assert "SELECT COUNT(*) AS n FROM emails WHERE" in dicts_capture.sql[1]
+    assert total == 7
+    assert results == []
+
+
 def test_correspondence_uses_deterministic_order_clause(monkeypatch) -> None:
     capture = QueryCapture()
     monkeypatch.setattr(maildb_module, "_query_dicts", capture)

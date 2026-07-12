@@ -151,7 +151,7 @@ def _serialize_email(
 def _wrap_response(
     results: list[dict[str, Any]],
     *,
-    total: int,
+    total: int | None,
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
@@ -222,6 +222,7 @@ def find(
     limit: int = 50,
     offset: int = 0,
     order: str = "date DESC",
+    include_total: bool = False,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search emails by structured attribute filters.
@@ -244,12 +245,11 @@ def find(
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
       order: "date DESC" | "date ASC" | "sender_address ASC" | "sender_address DESC"
+      include_total: set true to compute an exact total (extra count query); by default total is null.
       fields: list of field names to return. Default returns headers + body_length (no body_text).
         Pass ["body_text", ...] to include body content.
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
-    total is 0 when offset is past the last matching row — stop paginating on an
-    empty page rather than comparing offset to total.
 
     Example: find(sender="disney@postmates.com", direct_only=True, limit=100)
     """
@@ -271,6 +271,7 @@ def find(
         max_recipients=max_recipients,
         direct_only=direct_only,
         account=account,
+        include_total=include_total,
     )
     valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
@@ -400,6 +401,7 @@ def top_contacts(
     account: str | None = None,
     limit: int = 10,
     offset: int = 0,
+    include_total: bool = False,
 ) -> dict[str, Any]:
     """Find most frequent email correspondents by message count.
 
@@ -412,6 +414,7 @@ def top_contacts(
         Omit to query across all accounts.
       limit: max results (default 10)
       offset: skip first N results for pagination (default 0)
+      include_total: set true to compute an exact total (extra count query); by default total is null.
 
     Returns {total, offset, limit, results: [{address: str, count: int}, ...]}
     (or {domain: str, count: int} results when group_by="domain").
@@ -427,6 +430,7 @@ def top_contacts(
         group_by=group_by,
         exclude_domains=exclude_domains,
         account=account,
+        include_total=include_total,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
@@ -490,6 +494,7 @@ def unreplied(
     account: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    include_total: bool = False,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Find emails with no reply in the same thread.
@@ -505,6 +510,7 @@ def unreplied(
         Omit to query across all accounts.
       limit: max results (default 100)
       offset: skip first N results for pagination (default 0)
+      include_total: set true to compute an exact total (extra count query); by default total is null.
       fields: list of field names to return. Default returns headers + body_length (no body_text).
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
@@ -526,6 +532,7 @@ def unreplied(
         limit=limit,
         offset=offset,
         account=account,
+        include_total=include_total,
     )
     valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
@@ -543,6 +550,7 @@ def correspondence(
     limit: int = 500,
     offset: int = 0,
     order: str = "date ASC",
+    include_total: bool = False,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get all emails exchanged with a specific person (sent by them or to them).
@@ -555,6 +563,7 @@ def correspondence(
       limit: max results (default 500, higher for full relationship history)
       offset: skip first N results for pagination (default 0)
       order: "date ASC" (default, chronological) or "date DESC"
+      include_total: set true to compute an exact total (extra count query); by default total is null.
       fields: list of field names to return. Default returns headers + body_length (no body_text).
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
@@ -570,6 +579,7 @@ def correspondence(
         limit=limit,
         offset=offset,
         order=order,
+        include_total=include_total,
     )
     valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
@@ -592,6 +602,7 @@ def mention_search(
     account: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_total: bool = False,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Search for emails containing specific text in body or subject (case-insensitive).
@@ -607,6 +618,7 @@ def mention_search(
         Omit to query across all accounts.
       limit: max results (default 50)
       offset: skip first N results for pagination (default 0)
+      include_total: set true to compute an exact total (extra count query); by default total is null.
       fields: list of field names to return. Default returns headers + body_length (no body_text).
 
     Returns {total, offset, limit, results: [{email headers + body_length}, ...]}.
@@ -627,6 +639,7 @@ def mention_search(
         max_recipients=max_recipients,
         direct_only=direct_only,
         account=account,
+        include_total=include_total,
     )
     valid = _validate_fields(fields)
     serialized = [_serialize_email(e, valid) for e in results]
@@ -676,6 +689,7 @@ def long_threads(
     account: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_total: bool = False,
 ) -> dict[str, Any]:
     """Find email threads with many messages.
 
@@ -687,6 +701,7 @@ def long_threads(
         Omit to query across all accounts.
       limit: maximum number of threads to return (default 50)
       offset: skip first N results for pagination (default 0)
+      include_total: set true to compute an exact total (extra count query); by default total is null.
 
     Returns {total, offset, limit, results: [{thread_id, message_count, first_date, last_date, participants[]}, ...]}.
 
@@ -700,6 +715,7 @@ def long_threads(
         limit=limit,
         offset=offset,
         account=account,
+        include_total=include_total,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
@@ -942,6 +958,7 @@ def contacts(
     min_human_probability: float | None = None,
     limit: int = 20,
     offset: int = 0,
+    include_total: bool = False,
 ) -> dict[str, Any]:
     """Resolve people and senders: search the address book by name fragment,
     address fragment, kind, or tag.
@@ -961,12 +978,11 @@ def contacts(
         always manually curated and may disagree with the score.
       limit: max results (default 20)
       offset: skip first N results for pagination (default 0)
+      include_total: set true to compute an exact total (extra count query); by default total is null.
 
     Returns {total, offset, limit, results: [{id, display_name, kind,
     kind_source, tags, human_probability, addresses, name_variants,
     messages_from, messages_to, first_seen, last_seen}, ...]}.
-    total is 0 when offset is past the last matching row — stop paginating
-    on an empty page rather than comparing offset to total.
     """
     db = _get_db(ctx)
     results, total = db.contacts_search(
@@ -976,6 +992,7 @@ def contacts(
         min_human_probability=min_human_probability,
         limit=limit,
         offset=offset,
+        include_total=include_total,
     )
     return _wrap_response(results, total=total, offset=offset, limit=limit)
 
