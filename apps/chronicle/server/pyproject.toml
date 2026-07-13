@@ -13,6 +13,7 @@ dependencies = [
     "psycopg-pool>=3.2",
     "structlog>=24.4",
     "maildb",
+    "nh3>=0.3.6",
 ]
 
 [dependency-groups]

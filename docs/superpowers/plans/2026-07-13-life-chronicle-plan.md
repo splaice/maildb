@@ -86,10 +86,11 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 0, Task 0.3 (source contracts + sanitizer)
+**Next up:** Phase 0, Task 0.4 (Data Health basics)
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
 | 2026-07-13 | Plan + spec committed; harness created | — | This document |
 | 2026-07-13 | 0.1 server scaffold: FastAPI, session auth, archive summary, app tables, check-app gate | chronicle-phase-0 | Approved; both gates green (app 20 tests, root 674) |
 | 2026-07-13 | 0.2 web scaffold: §13 tokens, login flow, workstation shell, summary panel | chronicle-phase-0 | Approved (1 reviewer fix: unused asset removed); gates green (web 15 tests + build) |
+| 2026-07-13 | 0.3 source contracts: stable IDs, sources/threads endpoints, nh3 sanitizer, cursor util | chronicle-phase-0 | Approved (1 reviewer fix: native nh3 link_rel over regex post-processing); 72 server tests |
