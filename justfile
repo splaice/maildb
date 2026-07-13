@@ -41,3 +41,6 @@ verify-env:
 # Catches the cv2-stub class of breakage from bad `uv add` / `uv remove`.
 smoke-marker *ARGS:
     uv run python scripts/smoke_marker.py {{ARGS}}
+
+check-app:
+    cd apps/chronicle/server && uv run ruff check . && uv run mypy src/ && uv run pytest

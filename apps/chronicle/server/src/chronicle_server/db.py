@@ -1,0 +1,100 @@
+# src/chronicle_server/db.py
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import structlog
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
+
+if TYPE_CHECKING:
+    from chronicle_server.config import ChronicleSettings
+
+logger = structlog.get_logger()
+
+_APP_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS app_users (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username   TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_login TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS app_audit (
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    username   TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    detail     JSONB NOT NULL DEFAULT '{}'
+);
+"""
+
+
+def create_pool(settings: ChronicleSettings) -> ConnectionPool:
+    """Create a psycopg3 connection pool from settings (open, autocommit off)."""
+    return ConnectionPool(
+        conninfo=settings.database_url,
+        min_size=1,
+        max_size=5,
+        open=True,
+        kwargs={"autocommit": False},
+    )
+
+
+def init_app_tables(pool: ConnectionPool) -> None:
+    """Idempotent CREATE TABLE IF NOT EXISTS for app_users and app_audit."""
+    with pool.connection() as conn:
+        conn.execute(_APP_TABLES_SQL)
+        conn.commit()
+    logger.info("app_tables_initialized")
+
+
+def ensure_user(pool: ConnectionPool, username: str) -> None:
+    """Upsert the configured single-user username into app_users."""
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_users (username)
+            VALUES (%(username)s)
+            ON CONFLICT (username) DO NOTHING
+            """,
+            {"username": username},
+        )
+        conn.commit()
+    logger.info("app_user_ensured", username=username)
+
+
+def audit(
+    pool: ConnectionPool,
+    *,
+    username: str,
+    action: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Insert one row into app_audit."""
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_audit (username, action, detail)
+            VALUES (%(username)s, %(action)s, %(detail)s)
+            """,
+            {
+                "username": username,
+                "action": action,
+                "detail": Jsonb(detail if detail is not None else {}),
+            },
+        )
+        conn.commit()
+
+
+def update_last_login(pool: ConnectionPool, username: str) -> None:
+    """Set last_login = now() for the given app_users row."""
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            UPDATE app_users
+               SET last_login = now()
+             WHERE username = %(username)s
+            """,
+            {"username": username},
+        )
+        conn.commit()

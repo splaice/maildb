@@ -86,8 +86,9 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 0, Task 0.1
+**Next up:** Phase 0, Task 0.2 (web scaffold)
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
 | 2026-07-13 | Plan + spec committed; harness created | — | This document |
+| 2026-07-13 | 0.1 server scaffold: FastAPI, session auth, archive summary, app tables, check-app gate | chronicle-phase-0 | Approved; both gates green (app 20 tests, root 674) |
