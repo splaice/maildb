@@ -450,6 +450,113 @@ def contacts_classify(
         pool.close()
 
 
+@contacts_app.command("set-kind")
+def contacts_set_kind(
+    kind: str = typer.Argument(help="Contact kind to apply (human, organization, ...)."),
+    domain: str | None = typer.Option(
+        None,
+        "--domain",
+        help="Match all contacts with an address ending @DOMAIN.",
+    ),
+    address: str | None = typer.Option(
+        None,
+        "--address",
+        help="Match the contact owning this exact address.",
+    ),
+    contact_id: str | None = typer.Option(
+        None,
+        "--contact-id",
+        help="Match this contact UUID.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report matches without writing.",
+    ),
+) -> None:
+    """Bulk-set kind on contacts matched by domain, address, or contact id."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        db = MailDB._from_pool(pool)
+        try:
+            result = db.set_kind_bulk(
+                kind=kind,
+                domain=domain,
+                address=address,
+                contact_id=contact_id,
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        if dry_run:
+            typer.echo(f"Would update {result['matched']} contact(s).")
+            for item in result["sample"]:
+                name = item.get("display_name") or "(no name)"
+                addrs = ", ".join(item.get("addresses") or [])
+                typer.echo(f"  {name}  {addrs}")
+        else:
+            typer.echo(f"Updated {result['updated']} contact(s).")
+    finally:
+        pool.close()
+
+
+@contacts_app.command("merge-candidates")
+def contacts_merge_candidates(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        help="Maximum candidate pairs to report.",
+    ),
+) -> None:
+    """List contact pairs that may be the same person (shared normalized name)."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        db = MailDB._from_pool(pool)
+        pairs = db.merge_candidates(limit=limit)
+        if not pairs:
+            typer.echo("No merge candidates found.")
+            return
+        for pair in pairs:
+            typer.echo(pair["norm_name"])
+            for side in ("a", "b"):
+                s = pair[side]
+                name = s.get("display_name") or "(no name)"
+                typer.echo(
+                    f"  {name}  {s['primary_address']}  {s['msg_count']}  {s['contact_id']}"
+                )
+    finally:
+        pool.close()
+
+
+@contacts_app.command("unmerge")
+def contacts_unmerge(
+    merge_id: str = typer.Argument(help="Merge UUID from a prior merge_contacts call."),
+) -> None:
+    """Restore a previously merged source contact from its audit snapshot."""
+    settings = Settings()
+    pool = create_pool(settings)
+    init_db(pool)
+    try:
+        db = MailDB._from_pool(pool)
+        try:
+            result = db.unmerge_contacts(merge_id=merge_id)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        for label in ("source", "target"):
+            card = result[label]
+            name = card.get("display_name") or "(no name)"
+            addrs = ", ".join(card.get("addresses") or [])
+            typer.echo(f"{label}: {name}  {addrs}  {card['id']}")
+    finally:
+        pool.close()
+
+
 process_app = typer.Typer(
     name="process_attachments",
     help="Extract + embed attachment contents for semantic search.",

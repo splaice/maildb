@@ -146,3 +146,11 @@ CREATE TABLE IF NOT EXISTS attachment_chunks (
     embedding      vector(768),
     UNIQUE (attachment_id, chunk_index)
 );
+
+CREATE TABLE IF NOT EXISTS contact_merges (
+    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id UUID NOT NULL,
+    target_id UUID NOT NULL,
+    merged_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    snapshot  JSONB NOT NULL
+);

@@ -13,6 +13,7 @@ import structlog
 from psycopg.rows import dict_row
 
 from maildb.config import Settings
+from maildb.contacts import classify_contact, classify_contacts
 from maildb.db import create_pool, init_db
 from maildb.dsl import build_where_clause, parse_query
 from maildb.embeddings import EmbeddingClient
@@ -39,6 +40,9 @@ VALID_ORDERS = {
 }
 
 VALID_CONTACT_KINDS = frozenset({"human", "organization", "automated", "mailing_list", "unknown"})
+
+# Threshold for treating kind='unknown' contacts as human in human_only filters.
+HUMAN_PROBABILITY_THRESHOLD = 0.7
 
 # Standard reciprocal-rank-fusion constant; higher values flatten the rank penalty.
 RRF_K = 60
@@ -133,6 +137,21 @@ def _query_one_dict(
     result = dict(row) if row else None
     logger.debug("sql_complete", rows=1 if result else 0, elapsed_ms=elapsed_ms)
     return result
+
+
+def _jsonable(value: Any) -> Any:
+    """Recursively convert UUIDs/datetimes for JSONB serialization."""
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    return value
 
 
 class MailDB:
@@ -487,14 +506,15 @@ class MailDB:
             period: Only count messages after this date (ISO format).
             limit: Max results to return.
             direction: 'inbound', 'outbound', or 'both'.
-            group_by: 'address' (default) or 'domain' to aggregate by domain.
+            group_by: 'address' (default), 'domain', or 'contact' to aggregate by
+                contact entity (collapses multi-address contacts).
             exclude_domains: List of domains to exclude from results.
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
             include_total: When True, compute an exact total via a separate count query.
         """
-        if group_by not in ("address", "domain"):
-            msg = f"group_by must be 'address' or 'domain', got {group_by!r}"
+        if group_by not in ("address", "domain", "contact"):
+            msg = f"group_by must be 'address', 'domain', or 'contact', got {group_by!r}"
             raise ValueError(msg)
 
         identities = self._identity_addresses(account)
@@ -527,8 +547,10 @@ class MailDB:
         else:
             account_cond = ""
 
-        label = group_by
-        if group_by == "domain":
+        # Address-level aggregation is the base scan; "contact" reuses it as a subquery.
+        agg_group = "address" if group_by == "contact" else group_by
+        label = agg_group
+        if agg_group == "domain":
             inbound_col = "sender_domain"
             outbound_col = "split_part(r.addr, '@', 2)"
         else:
@@ -594,6 +616,22 @@ class MailDB:
                     GROUP BY {outbound_col}
                 ) AS combined
                 GROUP BY {label}
+            """
+
+        if group_by == "contact":
+            # Collapse multi-address contacts; unlinked addresses keep contact_id=None.
+            base_sql = f"""
+                SELECT
+                    ca.contact_id AS contact_id,
+                    coalesce(max(c.display_name), min(addr_agg.address)) AS display_name,
+                    sum(addr_agg.count) AS count
+                FROM (
+                    {base_sql}
+                ) AS addr_agg
+                LEFT JOIN contact_addresses ca ON ca.address = addr_agg.address
+                LEFT JOIN contacts c ON c.id = ca.contact_id
+                GROUP BY ca.contact_id,
+                         CASE WHEN ca.contact_id IS NULL THEN addr_agg.address END
             """
 
         sql = f"""
@@ -840,6 +878,7 @@ class MailDB:
         direct_only: bool = False,
         account: str | None = None,
         include_total: bool = False,
+        human_only: bool = False,
     ) -> tuple[list[Email], int | None]:
         """Messages with no reply in the same thread.
 
@@ -864,6 +903,8 @@ class MailDB:
             account: Scope to a single source_account. When provided,
                 "you" = that account. When omitted, "you" = any configured user_emails.
             include_total: When True, compute an exact total via a separate count query.
+            human_only: For inbound only — restrict senders to human contacts
+                (kind='human', or kind='unknown' with human_probability >= threshold).
         """
         if direction not in ("inbound", "outbound"):
             msg = f"Invalid direction: {direction!r}. Must be 'inbound' or 'outbound'."
@@ -873,6 +914,8 @@ class MailDB:
             raise ValueError("'recipient' is only valid for direction='outbound'")
         if direction == "outbound" and (sender is not None or sender_domain is not None):
             raise ValueError("'sender'/'sender_domain' are only valid for direction='inbound'")
+        if human_only and direction == "outbound":
+            raise ValueError("'human_only' is only valid for direction='inbound'")
 
         rc_conditions, rc_params = self._build_filters(
             max_to=max_to,
@@ -915,6 +958,17 @@ class MailDB:
                     "WHERE ea.email_id = e.id AND ea.source_account = %(account)s)"
                 )
                 params["account"] = account
+            if human_only:
+                conditions.append(
+                    """e.sender_address IN (
+                        SELECT ca.address FROM contact_addresses ca
+                          JOIN contacts c ON c.id = ca.contact_id
+                         WHERE c.kind = 'human'
+                            OR (c.kind = 'unknown'
+                                AND c.human_probability >= %(human_probability_threshold)s)
+                    )"""
+                )
+                params["human_probability_threshold"] = HUMAN_PROBABILITY_THRESHOLD
 
             conditions.extend(rc_conditions)
             where = " AND ".join(conditions)
@@ -1002,7 +1056,8 @@ class MailDB:
     def correspondence(
         self,
         *,
-        address: str,
+        address: str | None = None,
+        contact_id: UUID | str | None = None,
         after: str | None = None,
         before: str | None = None,
         account: str | None = None,
@@ -1014,12 +1069,14 @@ class MailDB:
         """All emails exchanged with a specific person.
 
         Returns emails where address is sender OR is in recipients (to/cc/bcc).
+        With contact_id, matches any of the contact's addresses.
         Default chronological order, higher limit than find().
         Returns (emails, total) where total is None unless include_total=True;
         when present it is the exact count of matching rows regardless of offset.
 
         Args:
             address: Email address to match as sender or recipient.
+            contact_id: Contact UUID — match all of that contact's addresses.
             after: Only include emails on or after this date.
             before: Only include emails before this date.
             account: Scope to a single source_account. Omit to query across all accounts.
@@ -1028,20 +1085,57 @@ class MailDB:
             order: Result ordering.
             include_total: When True, compute an exact total via a separate count query.
         """
-        order_sql = _order_clause(order)
+        if (address is None) == (contact_id is None):
+            msg = "Exactly one of address or contact_id is required"
+            raise ValueError(msg)
 
-        conditions: list[str] = [
-            "(sender_address = %(address)s "
-            "OR recipients @> jsonb_build_object('to', %(address_arr)s::jsonb) "
-            "OR recipients @> jsonb_build_object('cc', %(address_arr)s::jsonb) "
-            "OR recipients @> jsonb_build_object('bcc', %(address_arr)s::jsonb))"
-        ]
+        order_sql = _order_clause(order)
         params: dict[str, Any] = {
-            "address": address,
-            "address_arr": json.dumps([address]),
             "limit": limit,
             "offset": offset,
         }
+
+        if address is not None:
+            match_cond = (
+                "(sender_address = %(address)s "
+                "OR recipients @> jsonb_build_object('to', %(address_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('cc', %(address_arr)s::jsonb) "
+                "OR recipients @> jsonb_build_object('bcc', %(address_arr)s::jsonb))"
+            )
+            params["address"] = address
+            params["address_arr"] = json.dumps([address])
+        else:
+            exists = _query_one_dict(
+                self._pool,
+                "SELECT id FROM contacts WHERE id = %(contact_id)s",
+                {"contact_id": contact_id},
+            )
+            if exists is None:
+                msg = f"Contact {contact_id} does not exist"
+                raise ValueError(msg)
+            addr_rows = _query_dicts(
+                self._pool,
+                "SELECT address FROM contact_addresses WHERE contact_id = %(contact_id)s",
+                {"contact_id": contact_id},
+            )
+            addresses = [row["address"] for row in addr_rows]
+            if not addresses:
+                msg = f"Contact {contact_id} has no addresses"
+                raise ValueError(msg)
+            # GIN-indexable containment per address, OR-ed; sender via ANY.
+            parts = ["sender_address = ANY(%(addresses)s)"]
+            params["addresses"] = addresses
+            for i, addr in enumerate(addresses):
+                key = f"address_arr_{i}"
+                parts.append(
+                    f"recipients @> jsonb_build_object('to', %({key})s::jsonb) "
+                    f"OR recipients @> jsonb_build_object('cc', %({key})s::jsonb) "
+                    f"OR recipients @> jsonb_build_object('bcc', %({key})s::jsonb)"
+                )
+                params[key] = json.dumps([addr])
+            match_cond = "(" + " OR ".join(parts) + ")"
+
+        conditions: list[str] = [match_cond]
 
         if after:
             conditions.append("date >= %(after)s")
@@ -1255,12 +1349,15 @@ class MailDB:
         limit: int = 20,
         offset: int = 0,
         include_total: bool = False,
+        needs_review: bool = False,
     ) -> tuple[list[dict[str, Any]], int | None]:
         """Search the contacts address book.
 
         Joins contacts ← contact_addresses (aggregated per contact). Excludes
         contacts whose every address is the user. Order is by total message
-        volume DESC, then last_seen DESC NULLS LAST, then id.
+        volume DESC, then last_seen DESC NULLS LAST, then id — unless
+        needs_review is True, in which case only kind='unknown' contacts are
+        returned ranked by curation priority (volume x human probability).
         Returns (contacts, total) where total is None unless include_total=True;
         when present it is the exact count of matching rows regardless of offset.
         """
@@ -1270,6 +1367,8 @@ class MailDB:
         if kind is not None:
             conditions.append("kind = %(kind)s")
             params["kind"] = kind
+        if needs_review:
+            conditions.append("kind = 'unknown'")
         if tag is not None:
             conditions.append("%(tag)s = ANY(tags)")
             params["tag"] = tag
@@ -1329,11 +1428,13 @@ class MailDB:
               FROM contact_stats
              WHERE {where}
         """
+        if needs_review:
+            order_by = "(messages_from + messages_to) * coalesce(human_probability, 0.5) DESC, id"
+        else:
+            order_by = "(messages_from + messages_to) DESC, last_seen DESC NULLS LAST, id"
         sql = f"""
             {base_sql}
-             ORDER BY (messages_from + messages_to) DESC,
-                      last_seen DESC NULLS LAST,
-                      id
+             ORDER BY {order_by}
              LIMIT %(limit)s OFFSET %(offset)s
         """
         rows = _query_dicts(self._pool, sql, params)
@@ -1470,6 +1571,398 @@ class MailDB:
             msg = f"Contact {contact_id} does not exist"
             raise ValueError(msg)
         return card
+
+    def set_kind_bulk(
+        self,
+        *,
+        kind: str,
+        domain: str | None = None,
+        address: str | None = None,
+        contact_id: UUID | str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Bulk-set kind for contacts matched by exactly one selector.
+
+        Manual curation: sets kind_source='manual'. Returns
+        ``{"matched": int, "updated": int, "sample": [...]}`` where sample is
+        up to 10 matching contacts with display_name and addresses.
+        """
+        if kind not in VALID_CONTACT_KINDS:
+            msg = (
+                f"Invalid kind {kind!r}. Must be one of: {', '.join(sorted(VALID_CONTACT_KINDS))}"
+            )
+            raise ValueError(msg)
+
+        n_selectors = sum(x is not None for x in (domain, address, contact_id))
+        if n_selectors != 1:
+            msg = "Exactly one of domain, address, or contact_id is required"
+            raise ValueError(msg)
+
+        params: dict[str, Any] = {"kind": kind}
+        if domain is not None:
+            # Full LIKE pattern in the param so pyformat does not treat %@ as a placeholder.
+            params["domain_pattern"] = f"%@{domain.lower().strip()}"
+            match_sql = """
+                SELECT DISTINCT ca.contact_id AS id
+                  FROM contact_addresses ca
+                 WHERE lower(ca.address) LIKE %(domain_pattern)s
+            """
+        elif address is not None:
+            params["address"] = address.lower().strip()
+            match_sql = """
+                SELECT ca.contact_id AS id
+                  FROM contact_addresses ca
+                 WHERE ca.address = %(address)s
+            """
+        else:
+            params["contact_id"] = contact_id
+            match_sql = """
+                SELECT c.id FROM contacts c WHERE c.id = %(contact_id)s
+            """
+
+        sample_sql = f"""
+            SELECT
+                c.display_name,
+                array_agg(DISTINCT ca.address ORDER BY ca.address) AS addresses
+              FROM contacts c
+              JOIN ({match_sql}) AS matched ON matched.id = c.id
+              JOIN contact_addresses ca ON ca.contact_id = c.id
+             GROUP BY c.id, c.display_name
+             ORDER BY c.id
+             LIMIT 10
+        """
+        sample_rows = _query_dicts(self._pool, sample_sql, params)
+        sample: list[dict[str, Any]] = [
+            {
+                "display_name": row.get("display_name"),
+                "addresses": list(row["addresses"]) if row.get("addresses") is not None else [],
+            }
+            for row in sample_rows
+        ]
+
+        count_sql = f"SELECT count(*)::int AS n FROM ({match_sql}) AS matched"
+        count_row = _query_one_dict(self._pool, count_sql, params)
+        matched = int(count_row["n"]) if count_row is not None else 0
+
+        if dry_run:
+            return {"matched": matched, "updated": 0, "sample": sample}
+
+        update_sql = f"""
+            UPDATE contacts AS c
+               SET kind = %(kind)s,
+                   kind_source = 'manual',
+                   updated_at = now()
+              FROM ({match_sql}) AS matched
+             WHERE c.id = matched.id
+         RETURNING c.id
+        """
+        updated_rows = _query_dicts(self._pool, update_sql, params)
+        return {"matched": matched, "updated": len(updated_rows), "sample": sample}
+
+    def merge_contacts(
+        self,
+        *,
+        source_id: UUID | str,
+        target_id: UUID | str,
+    ) -> dict[str, Any]:
+        """Merge source contact into target in one audited transaction.
+
+        Addresses move to target; tags are set-unioned; notes/display_name prefer
+        target (with documented fallbacks); kind/kind_source keep target's unless
+        target is unknown and source is classified. Snapshot of the source is
+        stored in contact_merges for later unmerge. Source row is deleted.
+        """
+        if str(source_id) == str(target_id):
+            msg = "source_id and target_id must be different"
+            raise ValueError(msg)
+
+        with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            cur.execute(
+                """SELECT id, display_name, kind, kind_source, tags, notes, metadata,
+                          human_probability, classification_signals, classified_at,
+                          created_at, updated_at
+                     FROM contacts WHERE id = %(id)s""",
+                {"id": source_id},
+            )
+            source = cur.fetchone()
+            if source is None:
+                msg = f"Source contact {source_id} does not exist"
+                raise ValueError(msg)
+
+            cur.execute(
+                """SELECT id, display_name, kind, kind_source, tags, notes
+                     FROM contacts WHERE id = %(id)s""",
+                {"id": target_id},
+            )
+            target = cur.fetchone()
+            if target is None:
+                msg = f"Target contact {target_id} does not exist"
+                raise ValueError(msg)
+
+            cur.execute(
+                """SELECT address, contact_id, name_variants, is_user,
+                          first_seen, last_seen, messages_from, messages_to
+                     FROM contact_addresses
+                    WHERE contact_id = %(id)s
+                    ORDER BY address""",
+                {"id": source_id},
+            )
+            source_addrs = [dict(r) for r in cur.fetchall()]
+
+            snapshot = {
+                "contact": _jsonable(dict(source)),
+                "addresses": _jsonable(source_addrs),
+            }
+            cur.execute(
+                """INSERT INTO contact_merges (source_id, target_id, snapshot)
+                   VALUES (%(source_id)s, %(target_id)s, %(snapshot)s::jsonb)
+                RETURNING id""",
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "snapshot": json.dumps(snapshot),
+                },
+            )
+            merge_row = cur.fetchone()
+            if merge_row is None:
+                msg = "Failed to insert contact_merges row"
+                raise RuntimeError(msg)
+            merge_id = merge_row["id"]
+
+            cur.execute(
+                """UPDATE contact_addresses
+                      SET contact_id = %(target_id)s
+                    WHERE contact_id = %(source_id)s""",
+                {"target_id": target_id, "source_id": source_id},
+            )
+
+            source_tags = list(source["tags"] or [])
+            target_tags = list(target["tags"] or [])
+            merged_tags = list(dict.fromkeys([*target_tags, *source_tags]))
+
+            source_notes = source["notes"]
+            target_notes = target["notes"]
+            if target_notes and source_notes:
+                merged_notes = f"{target_notes}\n---\n{source_notes}"
+            elif target_notes:
+                merged_notes = target_notes
+            else:
+                merged_notes = source_notes
+
+            display_name = (
+                target["display_name"]
+                if target["display_name"] is not None
+                else source["display_name"]
+            )
+
+            if target["kind"] == "unknown" and source["kind"] != "unknown":
+                kind = source["kind"]
+                kind_source = source["kind_source"]
+            else:
+                kind = target["kind"]
+                kind_source = target["kind_source"]
+
+            cur.execute(
+                """UPDATE contacts
+                      SET tags = %(tags)s,
+                          notes = %(notes)s,
+                          display_name = %(display_name)s,
+                          kind = %(kind)s,
+                          kind_source = %(kind_source)s,
+                          updated_at = now()
+                    WHERE id = %(target_id)s""",
+                {
+                    "tags": merged_tags,
+                    "notes": merged_notes,
+                    "display_name": display_name,
+                    "kind": kind,
+                    "kind_source": kind_source,
+                    "target_id": target_id,
+                },
+            )
+
+            cur.execute("DELETE FROM contacts WHERE id = %(id)s", {"id": source_id})
+
+        target_uuid = target_id if isinstance(target_id, UUID) else UUID(str(target_id))
+        classify_contact(self._pool, target_uuid)
+
+        card = self.get_contact(contact_id=target_id)
+        if card is None:
+            msg = f"Target contact {target_id} does not exist after merge"
+            raise ValueError(msg)
+        card["merge_id"] = str(merge_id)
+        logger.info(
+            "contacts_merged",
+            source_id=str(source_id),
+            target_id=str(target_id),
+            merge_id=str(merge_id),
+        )
+        return card
+
+    def unmerge_contacts(self, *, merge_id: UUID | str) -> dict[str, Any]:
+        """Reverse a prior merge by merge_id.
+
+        Restores the source contact row and reassigns snapshot addresses that
+        still exist. Tags/notes/display_name adopted by the target during merge
+        are NOT reverted — unmerge restores the entity split, not field history.
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """SELECT id, source_id, target_id, snapshot
+                     FROM contact_merges WHERE id = %(id)s""",
+                {"id": merge_id},
+            )
+            merge_row = cur.fetchone()
+            if merge_row is None:
+                msg = f"Merge {merge_id} does not exist"
+                raise ValueError(msg)
+
+        snapshot = merge_row["snapshot"]
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+        contact_snap = snapshot["contact"]
+        address_snaps = snapshot.get("addresses") or []
+        source_id = contact_snap["id"]
+        target_id = merge_row["target_id"]
+        address_list = [a["address"] for a in address_snaps if a.get("address")]
+
+        with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            cur.execute(
+                """INSERT INTO contacts (
+                       id, display_name, kind, kind_source, tags, notes, metadata,
+                       human_probability, classification_signals, classified_at,
+                       created_at, updated_at
+                   ) VALUES (
+                       %(id)s, %(display_name)s, %(kind)s, %(kind_source)s, %(tags)s,
+                       %(notes)s, %(metadata)s::jsonb, %(human_probability)s,
+                       %(classification_signals)s::jsonb, %(classified_at)s,
+                       %(created_at)s, %(updated_at)s
+                   )""",
+                {
+                    "id": source_id,
+                    "display_name": contact_snap.get("display_name"),
+                    "kind": contact_snap.get("kind") or "unknown",
+                    "kind_source": contact_snap.get("kind_source") or "heuristic",
+                    "tags": contact_snap.get("tags") or [],
+                    "notes": contact_snap.get("notes"),
+                    "metadata": json.dumps(contact_snap.get("metadata") or {}),
+                    "human_probability": contact_snap.get("human_probability"),
+                    "classification_signals": (
+                        json.dumps(contact_snap["classification_signals"])
+                        if contact_snap.get("classification_signals") is not None
+                        else None
+                    ),
+                    "classified_at": contact_snap.get("classified_at"),
+                    "created_at": contact_snap.get("created_at"),
+                    "updated_at": contact_snap.get("updated_at"),
+                },
+            )
+
+            if address_list:
+                cur.execute(
+                    """UPDATE contact_addresses
+                          SET contact_id = %(source_id)s
+                        WHERE address = ANY(%(addrs)s)""",
+                    {"source_id": source_id, "addrs": address_list},
+                )
+
+            cur.execute("DELETE FROM contact_merges WHERE id = %(id)s", {"id": merge_id})
+
+        source_uuid = source_id if isinstance(source_id, UUID) else UUID(str(source_id))
+        target_uuid = target_id if isinstance(target_id, UUID) else UUID(str(target_id))
+        classify_contacts(self._pool, contact_ids=[source_uuid, target_uuid])
+
+        source_card = self.get_contact(contact_id=source_id)
+        target_card = self.get_contact(contact_id=target_id)
+        if source_card is None or target_card is None:
+            msg = "Contact missing after unmerge"
+            raise ValueError(msg)
+        logger.info(
+            "contacts_unmerged",
+            merge_id=str(merge_id),
+            source_id=str(source_id),
+            target_id=str(target_id),
+        )
+        return {"source": source_card, "target": target_card}
+
+    def merge_candidates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return contact pairs that share a normalized name variant.
+
+        One set-based query. Both sides must have messages_from+messages_to >= 2
+        and neither may be user-only. Ordered by combined message volume DESC.
+        """
+        sql = """
+            WITH contact_stats AS (
+                SELECT
+                    c.id,
+                    c.display_name,
+                    coalesce(sum(ca.messages_from + ca.messages_to), 0)::int AS msg_count,
+                    (array_agg(
+                        ca.address
+                        ORDER BY (ca.messages_from + ca.messages_to) DESC, ca.address
+                    ))[1] AS primary_address
+                  FROM contacts c
+                  JOIN contact_addresses ca ON ca.contact_id = c.id
+                 GROUP BY c.id
+                HAVING coalesce(sum(ca.messages_from + ca.messages_to), 0) >= 2
+                   AND NOT bool_and(ca.is_user)
+            ),
+            variants AS (
+                SELECT DISTINCT
+                    ca.contact_id,
+                    lower(regexp_replace(v, '[^a-zA-Z0-9]', '', 'g')) AS norm_name
+                  FROM contact_addresses ca
+                  CROSS JOIN LATERAL unnest(ca.name_variants) AS v
+                 WHERE v IS NOT NULL
+                   AND btrim(v) <> ''
+                   AND lower(regexp_replace(v, '[^a-zA-Z0-9]', '', 'g')) <> ''
+            )
+            SELECT
+                v1.norm_name,
+                a.display_name AS a_display_name,
+                a.primary_address AS a_address,
+                a.msg_count AS a_msg_count,
+                a.id AS a_id,
+                b.display_name AS b_display_name,
+                b.primary_address AS b_address,
+                b.msg_count AS b_msg_count,
+                b.id AS b_id
+              FROM variants v1
+              JOIN variants v2
+                ON v1.norm_name = v2.norm_name
+               AND v1.contact_id < v2.contact_id
+              JOIN contact_stats a ON a.id = v1.contact_id
+              JOIN contact_stats b ON b.id = v2.contact_id
+             ORDER BY (a.msg_count + b.msg_count) DESC, v1.norm_name, a.id, b.id
+             LIMIT %(limit)s
+        """
+        rows = _query_dicts(self._pool, sql, {"limit": limit})
+        return [
+            {
+                "norm_name": row["norm_name"],
+                "a": {
+                    "display_name": row["a_display_name"],
+                    "primary_address": row["a_address"],
+                    "msg_count": row["a_msg_count"],
+                    "contact_id": str(row["a_id"]),
+                },
+                "b": {
+                    "display_name": row["b_display_name"],
+                    "primary_address": row["b_address"],
+                    "msg_count": row["b_msg_count"],
+                    "contact_id": str(row["b_id"]),
+                },
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def _format_contact_row(row: dict[str, Any], *, full: bool) -> dict[str, Any]:

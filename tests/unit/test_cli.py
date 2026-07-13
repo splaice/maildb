@@ -168,3 +168,152 @@ def test_ingest_reset_with_yes_calls_reset():
         result = runner.invoke(app, ["ingest", "reset", "--yes"])
     assert result.exit_code == 0, result.output
     mock_reset.assert_called_once()
+
+
+def test_contacts_set_kind_passes_args():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.return_value = {"matched": 3, "updated": 3, "sample": []}
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(
+            app,
+            ["contacts", "set-kind", "organization", "--domain", "corp.com"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_db.set_kind_bulk.assert_called_once_with(
+        kind="organization",
+        domain="corp.com",
+        address=None,
+        contact_id=None,
+        dry_run=False,
+    )
+    assert "Updated 3 contact(s)." in result.output
+
+
+def test_contacts_set_kind_dry_run_output():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.return_value = {
+        "matched": 2,
+        "updated": 0,
+        "sample": [
+            {"display_name": "Alice", "addresses": ["alice@corp.com"]},
+            {"display_name": None, "addresses": ["bob@corp.com"]},
+        ],
+    }
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(
+            app,
+            ["contacts", "set-kind", "human", "--address", "alice@corp.com", "--dry-run"],
+        )
+    assert result.exit_code == 0, result.output
+    mock_db.set_kind_bulk.assert_called_once_with(
+        kind="human",
+        domain=None,
+        address="alice@corp.com",
+        contact_id=None,
+        dry_run=True,
+    )
+    assert "Would update 2 contact(s)." in result.output
+    assert "Alice" in result.output
+    assert "alice@corp.com" in result.output
+    assert "bob@corp.com" in result.output
+
+
+def test_contacts_set_kind_value_error_exits_1():
+    mock_db = MagicMock()
+    mock_db.set_kind_bulk.side_effect = ValueError(
+        "Exactly one of domain, address, or contact_id is required"
+    )
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "set-kind", "human"])
+    assert result.exit_code == 1
+    assert "Exactly one" in result.output
+
+
+def test_contacts_merge_candidates_passes_limit():
+    mock_db = MagicMock()
+    mock_db.merge_candidates.return_value = [
+        {
+            "norm_name": "sampoole",
+            "a": {
+                "display_name": "Sam A",
+                "primary_address": "a@x.com",
+                "msg_count": 5,
+                "contact_id": "id-a",
+            },
+            "b": {
+                "display_name": "Sam B",
+                "primary_address": "b@x.com",
+                "msg_count": 3,
+                "contact_id": "id-b",
+            },
+        }
+    ]
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "merge-candidates", "--limit", "10"])
+    assert result.exit_code == 0, result.output
+    mock_db.merge_candidates.assert_called_once_with(limit=10)
+    assert "sampoole" in result.output
+    assert "a@x.com" in result.output
+    assert "id-a" in result.output
+
+
+def test_contacts_unmerge_passes_merge_id():
+    mock_db = MagicMock()
+    mock_db.unmerge_contacts.return_value = {
+        "source": {
+            "id": "src",
+            "display_name": "Sam A",
+            "addresses": ["a@x.com"],
+        },
+        "target": {
+            "id": "tgt",
+            "display_name": "Sam B",
+            "addresses": ["b@x.com"],
+        },
+    }
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "unmerge", "merge-uuid-1"])
+    assert result.exit_code == 0, result.output
+    mock_db.unmerge_contacts.assert_called_once_with(merge_id="merge-uuid-1")
+    assert "source:" in result.output
+    assert "target:" in result.output
+    assert "a@x.com" in result.output
+
+
+def test_contacts_unmerge_value_error_exits_1():
+    mock_db = MagicMock()
+    mock_db.unmerge_contacts.side_effect = ValueError("Merge x does not exist")
+    with (
+        patch("maildb.cli.create_pool") as mock_pool,
+        patch("maildb.cli.init_db"),
+        patch("maildb.cli.MailDB._from_pool", return_value=mock_db),
+    ):
+        mock_pool.return_value = MagicMock()
+        result = runner.invoke(app, ["contacts", "unmerge", "missing"])
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
