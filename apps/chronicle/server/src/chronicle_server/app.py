@@ -12,6 +12,7 @@ from chronicle_server.archive import router as archive_router
 from chronicle_server.auth import router as auth_router
 from chronicle_server.config import ChronicleSettings
 from chronicle_server.db import create_pool, ensure_user, init_app_tables
+from chronicle_server.health import router as health_router
 from chronicle_server.sources import router as sources_router
 
 if TYPE_CHECKING:
@@ -58,6 +59,7 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(auth_router, prefix="/api/auth")
     app.include_router(archive_router, prefix="/api/archive")
+    app.include_router(health_router, prefix="/api/health")
     app.include_router(sources_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved

@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router'
 import { LoginPage } from './auth/LoginPage'
 import { RequireAuth } from './auth/RequireAuth'
 import { ChroniclePage } from './routes/ChroniclePage'
+import { DataHealthPage } from './routes/DataHealthPage'
 import { StubPage } from './routes/StubPage'
 import { Workstation } from './shell/Workstation'
 
@@ -23,7 +24,7 @@ export function App() {
         <Route path="topics" element={<StubPage title="Topics" />} />
         <Route path="people" element={<StubPage title="People" />} />
         <Route path="files" element={<StubPage title="Files" />} />
-        <Route path="data-health" element={<StubPage title="Data Health" />} />
+        <Route path="data-health" element={<DataHealthPage />} />
         <Route path="settings" element={<StubPage title="Settings" />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

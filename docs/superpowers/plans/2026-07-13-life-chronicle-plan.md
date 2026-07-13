@@ -86,7 +86,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 0, Task 0.4 (Data Health basics)
+**Next up:** Phase 1, Task 1.1 (chronicle buckets endpoint) — elaborate Phase 1 specs at session start; Phase 0 PR #106 awaiting user merge
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -94,3 +94,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 0.1 server scaffold: FastAPI, session auth, archive summary, app tables, check-app gate | chronicle-phase-0 | Approved; both gates green (app 20 tests, root 674) |
 | 2026-07-13 | 0.2 web scaffold: §13 tokens, login flow, workstation shell, summary panel | chronicle-phase-0 | Approved (1 reviewer fix: unused asset removed); gates green (web 15 tests + build) |
 | 2026-07-13 | 0.3 source contracts: stable IDs, sources/threads endpoints, nh3 sanitizer, cursor util | chronicle-phase-0 | Approved (1 reviewer fix: native nh3 link_rel over regex post-processing); 72 server tests |
+| 2026-07-13 | 0.4 Data Health: /api/health/archive + /data-health page | chronicle-phase-0 | Approved; Phase 0 complete (75 server + 17 web tests) |
