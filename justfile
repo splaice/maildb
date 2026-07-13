@@ -44,3 +44,4 @@ smoke-marker *ARGS:
 
 check-app:
     cd apps/chronicle/server && uv run ruff check . && uv run mypy src/ && uv run pytest
+    cd apps/chronicle/web && pnpm exec tsc -b --noEmit && pnpm exec vitest run && pnpm build
