@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS app_cache (
+    key          TEXT PRIMARY KEY,
+    data_version TEXT NOT NULL,
+    value        JSONB NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

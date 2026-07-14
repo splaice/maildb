@@ -7,14 +7,21 @@ they remain reachable via list endpoints.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from chronicle_server.archive import (
+    if_none_match,
+    not_modified,
+    response_etag,
+)
 from chronicle_server.auth import require_user
+from chronicle_server.cache import cache_key, cached, data_version
 from chronicle_server.scope import QueryScope, scope_filters, scope_fingerprint
 
 if TYPE_CHECKING:
@@ -739,8 +746,11 @@ def _events_lane(
 def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
     """Compute lane aggregates, density series, and scope extent (read-only)."""
     pixel_width = clamp_pixel_width(body.pixel_width)
-    vp_from = parse_iso_datetime(body.viewport.from_)
-    vp_to = parse_iso_datetime(body.viewport.to)
+    try:
+        vp_from = parse_iso_datetime(body.viewport.from_)
+        vp_to = parse_iso_datetime(body.viewport.to)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid viewport datetime: {exc}") from exc
     if vp_to <= vp_from:
         raise HTTPException(
             status_code=422,
@@ -850,15 +860,49 @@ def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
     )
 
 
-@router.post("/buckets", response_model=BucketsResponse)
+def buckets_etag(pool: ConnectionPool, body: BucketsRequest, request: Request) -> str:
+    """Deterministic ETag for buckets: scope + viewport/params + data-version."""
+    fingerprint = scope_fingerprint(body.scope)
+    params = json.dumps(
+        {
+            "viewport": {"from": body.viewport.from_, "to": body.viewport.to},
+            "pixel_width": clamp_pixel_width(body.pixel_width),
+            "aggregation": body.aggregation,
+            "lanes": list(body.lanes),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    data_ver = data_version(pool, request)
+    return response_etag(fingerprint, params, data_ver)
+
+
+@router.post("/buckets", response_model=None)
 def chronicle_buckets(
     body: BucketsRequest,
     request: Request,
+    response: Response,
     _user: str = Depends(require_user),
-) -> BucketsResponse:
-    """Time-bucketed lane aggregates for a working-set scope and viewport."""
+) -> BucketsResponse | Response:
+    """Time-bucketed lane aggregates for a working-set scope and viewport.
+
+    Honors ``If-None-Match`` on POST (private API): matching ETag → 304.
+    Whole-response cache keyed by canonical request + data version.
+    """
     pool: ConnectionPool = request.app.state.pool
-    return get_buckets(pool, body)
+    etag = buckets_etag(pool, body, request)
+    if if_none_match(request, etag):
+        return not_modified(etag)
+    ver = data_version(pool, request)
+    payload = body.model_dump(mode="json", by_alias=True)
+    result_dict = cached(
+        pool,
+        key=cache_key("buckets", payload),
+        data_version=ver,
+        compute=lambda: get_buckets(pool, body).model_dump(mode="json", by_alias=True),
+    )
+    response.headers["ETag"] = etag
+    return BucketsResponse.model_validate(result_dict)
 
 
 def durations_aligned(dur_a: timedelta, dur_b: timedelta) -> bool:
@@ -1027,12 +1071,46 @@ def get_compare(pool: ConnectionPool, body: CompareRequest) -> CompareResponse:
     )
 
 
-@router.post("/compare", response_model=CompareResponse)
+def compare_etag(pool: ConnectionPool, body: CompareRequest, request: Request) -> str:
+    """Deterministic ETag for compare: scope + ranges/params + data-version."""
+    fingerprint = scope_fingerprint(body.scope)
+    params = json.dumps(
+        {
+            "a": {"from": body.a.from_, "to": body.a.to},
+            "b": {"from": body.b.from_, "to": body.b.to},
+            "pixel_width": clamp_pixel_width(body.pixel_width),
+            "lanes": list(body.lanes),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    data_ver = data_version(pool, request)
+    return response_etag(fingerprint, params, data_ver)
+
+
+@router.post("/compare", response_model=None)
 def chronicle_compare(
     body: CompareRequest,
     request: Request,
+    response: Response,
     _user: str = Depends(require_user),
-) -> CompareResponse:
-    """Aligned / small-multiple comparison datasets for two date ranges."""
+) -> CompareResponse | Response:
+    """Aligned / small-multiple comparison datasets for two date ranges.
+
+    Honors ``If-None-Match`` on POST (private API): matching ETag → 304.
+    Whole-response cache keyed by canonical request + data version.
+    """
     pool: ConnectionPool = request.app.state.pool
-    return get_compare(pool, body)
+    etag = compare_etag(pool, body, request)
+    if if_none_match(request, etag):
+        return not_modified(etag)
+    ver = data_version(pool, request)
+    payload = body.model_dump(mode="json", by_alias=True)
+    result_dict = cached(
+        pool,
+        key=cache_key("compare", payload),
+        data_version=ver,
+        compute=lambda: get_compare(pool, body).model_dump(mode="json", by_alias=True),
+    )
+    response.headers["ETag"] = etag
+    return CompareResponse.model_validate(result_dict)

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chronicle_server.auth import require_user
+from chronicle_server.cache import cache_key, cached, data_version
 from chronicle_server.cursor import decode_cursor, encode_cursor
 from chronicle_server.ids import encode_source_id
 from chronicle_server.querysyntax import parse_query
@@ -478,7 +479,11 @@ def _run_semantic(
     free_text: str | None,
     fetch_limit: int,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """Return (cards, error). error set when embedding service unavailable."""
+    """Return (cards, error). error set when embedding service unavailable.
+
+    Empty free_text skips the embedding call entirely (empty-query hybrid is
+    exact-only; calling the embedder would be pure waste).
+    """
     if not free_text:
         return [], None
 
@@ -650,9 +655,20 @@ def run_search(
 
     facets: dict[str, Any] | None = None
     facet_basis: str | None = None
-    # Facets only when requested and not paging (cursor unset)
+    # Facets only when requested and not paging (cursor unset).
+    # Cache facets only (scope + free_text + data_version); result ranking stays live.
     if body.include_facets and body.cursor is None:
-        facets = compute_facets(pool, merged, free_text)
+        facet_payload = {
+            "scope": merged.model_dump(mode="json", by_alias=True, exclude_none=True),
+            "free_text": free_text,
+        }
+        ver = data_version(pool)
+        facets = cached(
+            pool,
+            key=cache_key("facets", facet_payload),
+            data_version=ver,
+            compute=lambda: compute_facets(pool, merged, free_text),
+        )
         facet_basis = "exact"
 
     took_ms = int((time.perf_counter() - t0) * 1000)

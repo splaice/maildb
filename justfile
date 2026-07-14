@@ -45,3 +45,12 @@ smoke-marker *ARGS:
 check-app:
     cd apps/chronicle/server && uv run ruff check . && uv run mypy src/ && uv run pytest
     cd apps/chronicle/web && pnpm exec tsc -b --noEmit && pnpm exec vitest run && pnpm build
+
+# Live-archive timing harness for §16.2 targets (NOT part of check-app).
+# Two-terminal flow:
+#   Terminal 1: cd apps/chronicle/server && uv run python -m chronicle_server
+#   Terminal 2: just perf-app --user <user> --password <password>
+# Optional: --base-url http://127.0.0.1:8400  -n 5  --out-dir …
+# Writes apps/chronicle/server/perf/results-<date>.json
+perf-app *ARGS:
+    cd apps/chronicle/server && uv run python perf/harness.py {{ARGS}}

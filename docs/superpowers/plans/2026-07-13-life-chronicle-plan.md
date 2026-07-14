@@ -110,7 +110,7 @@ Tasks are cheap-coder-sized (≈ one focused PR or less). One PR per phase, one 
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 5, Task 5.4 (performance & scale). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 5, Task 5.5 (release: workflows C/E, verification report, docs) — FINAL task. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -149,3 +149,4 @@ Tasks are cheap-coder-sized (≈ one focused PR or less). One PR per phase, one 
 | 2026-07-13 | 5.1 security: rate limit, reauth-for-export, CSP, adversarial corpus, redaction | chronicle-phase-5 | Approved; 332 server / 298 web tests |
 | 2026-07-13 | 5.2 command bar + Ctrl+K palette (G-004) + §14.2 registry + ? reference | chronicle-phase-5 | Approved; 323 web tests |
 | 2026-07-13 | 5.3 settings (§11.2, per-action AI gating) + a11y hardening (skip/landmarks/contrast) | chronicle-phase-5 | Approved; 347 server / 364 web tests |
+| 2026-07-14 | 5.4+5.4b perf: ETags, data-versioned cache; LIVE harness: 5/7 targets pass (summary 170ms, buckets 173ms), search soft-miss documented | chronicle-phase-5 | Approved; 369 server tests |

@@ -1012,3 +1012,61 @@ def test_compare_unaligned_flag(db_client: TestClient, db_pool: ConnectionPool) 
         assert body["unit"] == choose_aggregation(longer, half)
     finally:
         _cleanup_bucket_emails(db_pool)
+
+
+def test_buckets_cancellation_leaves_server_healthy(
+    db_client: TestClient,
+    db_pool: ConnectionPool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Client disconnect / short timeout must not leave the server unhealthy.
+
+    PERF-003 / §16.1: obsolete requests cancel; the assertion is no 500s and
+    the endpoint remains healthy for the next request (psycopg cancellation is
+    driver-level — we verify no unhandled exception error logs).
+    """
+    import contextlib
+    import logging
+
+    _cleanup_bucket_emails(db_pool)
+    try:
+        _insert_email(
+            db_pool,
+            date=datetime(2020, 6, 15, 12, 0, tzinfo=UTC),
+        )
+        _login(db_client)
+        payload = {
+            "scope": {},
+            "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+            "pixel_width": 920,
+            "aggregation": "month",
+            "lanes": ["messages", "attachments", "people"],
+        }
+
+        # Client disconnect: open a streaming POST and close without reading.
+        # Server-side work may still finish in-process under TestClient; the
+        # contract under test is no 500s / unhandled errors and a healthy
+        # follow-up request (PERF-003).
+        with (
+            caplog.at_level(logging.ERROR),
+            contextlib.suppress(Exception),
+            db_client.stream(
+                "POST",
+                "/api/chronicle/buckets",
+                json=payload,
+            ) as stream_resp,
+        ):
+            stream_resp.close()
+
+        # Endpoint remains healthy for the next request (no 500).
+        r = db_client.post("/api/chronicle/buckets", json=payload)
+        assert r.status_code == 200, r.text
+        assert "lanes" in r.json()
+
+        # No unhandled-exception error logs from the cancelled/short attempt.
+        error_text = " ".join(f"{rec.levelname}:{rec.getMessage()}" for rec in caplog.records)
+        assert "Traceback" not in error_text
+        assert "Unhandled" not in error_text
+        assert "500" not in error_text
+    finally:
+        _cleanup_bucket_emails(db_pool)

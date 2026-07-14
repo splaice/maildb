@@ -21,9 +21,15 @@ from uuid import UUID
 
 import numpy as np
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from chronicle_server.archive import (
+    if_none_match,
+    not_modified,
+    response_etag,
+    topics_data_version,
+)
 from chronicle_server.auth import require_user
 from chronicle_server.chronicle import VALID_UNITS, choose_aggregation
 from chronicle_server.cursor import decode_cursor, encode_cursor
@@ -1604,15 +1610,37 @@ def topics_generate(
     )
 
 
-@router.get("/topics")
+def topics_list_etag(
+    pool: ConnectionPool,
+    *,
+    include_hidden: bool,
+    request: Request,
+) -> str:
+    """ETag for topics list: params + emails/topics/events data-version."""
+    params = f"include_hidden={include_hidden}"
+    data_ver = topics_data_version(pool, request)
+    return response_etag("topics/list", params, data_ver)
+
+
+@router.get("/topics", response_model=None)
 def topics_list(
     request: Request,
+    response: Response,
     include_hidden: bool = Query(default=False),
     _user: str = Depends(require_user),
-) -> dict[str, Any]:
-    """Topic tree (parents + children); visible by default."""
+) -> dict[str, Any] | Response:
+    """Topic tree (parents + children); visible by default.
+
+    Supports ``If-None-Match`` / ``ETag``; data-version includes
+    ``max(updated_at)`` of app_topics and app_events so curation busts cache.
+    """
     pool: ConnectionPool = request.app.state.pool
-    return {"topics": list_topics(pool, include_hidden=include_hidden)}
+    etag = topics_list_etag(pool, include_hidden=include_hidden, request=request)
+    if if_none_match(request, etag):
+        return not_modified(etag)
+    body = {"topics": list_topics(pool, include_hidden=include_hidden)}
+    response.headers["ETag"] = etag
+    return body
 
 
 @router.get("/topics/river")
