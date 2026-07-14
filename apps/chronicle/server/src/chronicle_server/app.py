@@ -19,6 +19,7 @@ from chronicle_server.files import router as files_router
 from chronicle_server.generate import router as generate_router
 from chronicle_server.health import router as health_router
 from chronicle_server.interpret import router as interpret_router
+from chronicle_server.people import router as people_router
 from chronicle_server.search import router as search_router
 from chronicle_server.sources import router as sources_router
 from chronicle_server.topics import router as topics_router
@@ -82,6 +83,8 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(events_router, prefix="/api")
     # topics before any catch-all; generate path is under the same router
     app.include_router(topics_router, prefix="/api")
+    # people: list/merge-candidates before {id}
+    app.include_router(people_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved
     return app

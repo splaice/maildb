@@ -7,6 +7,8 @@ import { FilesPage } from './files/FilesPage'
 import { SourcePage } from './reader/SourcePage'
 import { ResearchDeskPage } from './research/ResearchDeskPage'
 import { ResearchNavShortcut } from './research/ResearchNavShortcut'
+import { PeoplePage } from './people/PeoplePage'
+import { PersonProfilePage } from './people/PersonProfilePage'
 import { ChroniclePage } from './routes/ChroniclePage'
 import { DataHealthPage } from './routes/DataHealthPage'
 import { StubPage } from './routes/StubPage'
@@ -37,7 +39,8 @@ export function App() {
           <Route path="source/:sid" element={<SourcePage />} />
           <Route path="research" element={<ResearchDeskPage />} />
           <Route path="topics" element={<TopicsPage />} />
-          <Route path="people" element={<StubPage title="People" />} />
+          <Route path="people" element={<PeoplePage />} />
+          <Route path="people/:id" element={<PersonProfilePage />} />
           <Route path="files" element={<FilesPage />} />
           <Route path="workspaces" element={<WorkspacesListPage />} />
           <Route path="workspaces/:id" element={<WorkspacePage />} />

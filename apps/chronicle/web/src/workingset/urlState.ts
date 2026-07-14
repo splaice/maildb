@@ -112,6 +112,11 @@ export interface UrlWorkingState {
    * filesView; keeps topic context when inspector selection becomes a message.
    */
   topicSelected?: string | null
+  /**
+   * People lens search query (URL param `pq`). Optional so store-driven
+   * encodes that omit it preserve the current location value.
+   */
+  peopleQuery?: string
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -130,6 +135,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   filesQuery: '',
   topicView: 'hierarchy',
   topicSelected: null,
+  peopleQuery: '',
 }
 
 /**
@@ -456,6 +462,20 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
   const tsel = (topicSelected ?? '').trim()
   if (tsel) params.set('tsel', tsel)
 
+  // People lens: pq. When omitted from state, preserve from current location
+  // so store-driven URL rewrites do not wipe people search.
+  let peopleQuery = state.peopleQuery
+  if (typeof window !== 'undefined' && peopleQuery === undefined) {
+    try {
+      const current = new URLSearchParams(window.location.search)
+      peopleQuery = current.get('pq') ?? ''
+    } catch {
+      peopleQuery = ''
+    }
+  }
+  const pq = (peopleQuery ?? '').trim()
+  if (pq) params.set('pq', pq)
+
   return params
 }
 
@@ -514,6 +534,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
   const filesQuery = params.get('fq') ?? ''
   const topicView = parseTopicView(params.get('tv'))
   const topicSelected = params.get('tsel')
+  const peopleQuery = params.get('pq') ?? ''
 
   return {
     scope,
@@ -531,6 +552,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     filesQuery,
     topicView,
     topicSelected,
+    peopleQuery,
   }
 }
 

@@ -194,6 +194,25 @@ describe('encodeState / decodeState', () => {
     expect(decoded.topicView).toBe('hierarchy')
     expect(decoded.topicSelected).toBe('topic-1')
   })
+
+  it('roundtrips people search param pq', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      peopleQuery: 'alice',
+    }
+    const encoded = encodeState(state)
+    expect(encoded.get('pq')).toBe('alice')
+    const decoded = decodeState(encoded)
+    expect(decoded.peopleQuery).toBe('alice')
+  })
+
+  it('omits empty people query pq', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      peopleQuery: '',
+    })
+    expect(params.has('pq')).toBe(false)
+  })
 })
 
 describe('isScopePristine', () => {

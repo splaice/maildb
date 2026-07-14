@@ -1057,3 +1057,117 @@ export interface WorkspaceManifestRow {
   subject_or_filename?: string | null
   excerpt_hash?: string | null
 }
+
+/** People & Organizations (GET /api/people) */
+
+export type ContactKind =
+  | 'human'
+  | 'organization'
+  | 'automated'
+  | 'mailing_list'
+  | 'unknown'
+
+export type AddressClass = 'owner' | 'external'
+
+export interface ContactSummary {
+  id: string
+  display_name: string | null
+  kind: ContactKind | string
+  kind_source: string | null
+  tags: string[]
+  human_probability: number | null
+  addresses: string[]
+  name_variants: string[]
+  messages_from: number
+  messages_to: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface PeopleListResponse {
+  items: ContactSummary[]
+  total: number | null
+  next_cursor: string | null
+  limit: number
+  offset: number
+}
+
+export interface ContactAddressDetail {
+  address: string
+  is_user: boolean
+  messages_from: number
+  messages_to: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface ContactActivityBucket {
+  bucket: string
+  count: number
+}
+
+export interface ContactTopic {
+  id: string
+  label: string
+  count: number
+}
+
+export interface ContactMergeRecord {
+  id: string
+  source_id: string
+  target_id: string
+  merged_at: string | null
+}
+
+/** GET /api/people/:id */
+export interface ContactCard extends ContactSummary {
+  notes: string | null
+  metadata: Record<string, unknown>
+  classification_signals: Record<string, number> | null
+  classified_at: string | null
+  address_classes: Record<string, AddressClass | string>
+  address_details: ContactAddressDetail[]
+  activity: ContactActivityBucket[]
+  topics: ContactTopic[]
+  thread_count: number
+  merges?: ContactMergeRecord[]
+  merge_id?: string | null
+}
+
+export interface ContactPatchRequest {
+  kind?: ContactKind
+  tags?: string[]
+  notes?: string | null
+  display_name?: string | null
+}
+
+export interface MergeCandidateSide {
+  display_name: string | null
+  primary_address: string | null
+  msg_count: number
+  contact_id: string
+}
+
+export interface MergeCandidatePair {
+  norm_name: string
+  a: MergeCandidateSide
+  b: MergeCandidateSide
+}
+
+export interface MergeCandidatesResponse {
+  items: MergeCandidatePair[]
+}
+
+export interface MergeRequest {
+  source_id: string
+  target_id: string
+}
+
+export interface UnmergeRequest {
+  merge_id: string
+}
+
+export interface UnmergeResponse {
+  source: ContactCard
+  target: ContactCard
+}
