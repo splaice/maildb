@@ -7,6 +7,10 @@ import { describe, expect, it } from 'vitest'
 // Vite raw imports — all people/** sources (exclude this audit file).
 import activityBars from './ActivityBars.tsx?raw'
 import api from './api.ts?raw'
+import egoGraph from './EgoGraph.tsx?raw'
+import egoGraphTest from './EgoGraph.test.tsx?raw'
+import egoLayout from './egoLayout.ts?raw'
+import egoLayoutTest from './egoLayout.test.ts?raw'
 import peoplePage from './PeoplePage.tsx?raw'
 import peoplePageTest from './PeoplePage.test.tsx?raw'
 import personProfile from './PersonProfilePage.tsx?raw'
@@ -15,6 +19,10 @@ import personProfileTest from './PersonProfilePage.test.tsx?raw'
 const SOURCES: { name: string; text: string }[] = [
   { name: 'ActivityBars.tsx', text: activityBars },
   { name: 'api.ts', text: api },
+  { name: 'EgoGraph.tsx', text: egoGraph },
+  { name: 'EgoGraph.test.tsx', text: egoGraphTest },
+  { name: 'egoLayout.ts', text: egoLayout },
+  { name: 'egoLayout.test.ts', text: egoLayoutTest },
   { name: 'PeoplePage.tsx', text: peoplePage },
   { name: 'PeoplePage.test.tsx', text: peoplePageTest },
   { name: 'PersonProfilePage.tsx', text: personProfile },

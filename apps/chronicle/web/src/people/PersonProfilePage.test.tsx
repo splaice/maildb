@@ -73,6 +73,45 @@ function mockCard(overrides: Partial<ContactCard> = {}): ContactCard {
   }
 }
 
+function emptyGraph(contactId = CONTACT_ID, label = 'Alice Example') {
+  return {
+    nodes: [{ id: contactId, label, kind: 'human', is_ego: true }],
+    edges: [] as [],
+    truncated: false,
+    total_coparticipants: 0,
+  }
+}
+
+/** Fetch mock that serves the person card and an empty ego graph. */
+function personFetch(card: ContactCard, extra?: (url: string, init?: RequestInit) => Response | null) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (extra) {
+      const hit = extra(url, init)
+      if (hit) return hit
+    }
+    if (url.includes('/graph')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => emptyGraph(card.id, card.display_name ?? 'Contact'),
+      } as Response
+    }
+    if (url.includes(`/api/people/${CONTACT_ID}`) && !url.includes('merge')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => card,
+      } as Response
+    }
+    return {
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    } as Response
+  })
+}
+
 function renderProfile(initial = `/people/${CONTACT_ID}`) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -103,24 +142,7 @@ describe('PersonProfilePage', () => {
 
   it('renders profile sections from mocked card incl. signals and owner badges', async () => {
     const card = mockCard()
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input)
-        if (url.includes(`/api/people/${CONTACT_ID}`) && !url.includes('merge')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => card,
-          } as Response
-        }
-        return {
-          ok: false,
-          status: 404,
-          json: async () => ({}),
-        } as Response
-      }),
-    )
+    vi.stubGlobal('fetch', personFetch(card))
 
     renderProfile()
     expect(await screen.findByTestId('person-profile')).toBeInTheDocument()
@@ -135,6 +157,7 @@ describe('PersonProfilePage', () => {
     expect(
       screen.getByTestId('address-class-alice@example.com'),
     ).toHaveTextContent('external')
+    expect(await screen.findByTestId('ego-graph')).toBeInTheDocument()
 
     // Expand signals details
     fireEvent.click(screen.getByTestId('person-signals').querySelector('summary')!)
@@ -144,8 +167,7 @@ describe('PersonProfilePage', () => {
 
   it('kind PATCH with kind_source explanation', async () => {
     const card = mockCard({ kind_source: 'heuristic', kind: 'unknown' })
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+    const fetchMock = personFetch(card, (_url, init) => {
       if (init?.method === 'PATCH') {
         const body = JSON.parse(String(init.body)) as { kind?: string }
         return {
@@ -158,18 +180,7 @@ describe('PersonProfilePage', () => {
             }),
         } as Response
       }
-      if (url.includes(`/api/people/${CONTACT_ID}`)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => card,
-        } as Response
-      }
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-      } as Response
+      return null
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -201,8 +212,7 @@ describe('PersonProfilePage', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input)
+      personFetch(card, (url) => {
         if (url.includes('/api/people?') && url.includes('q=')) {
           return {
             ok: true,
@@ -231,18 +241,7 @@ describe('PersonProfilePage', () => {
             }),
           } as Response
         }
-        if (url.includes(`/api/people/${CONTACT_ID}`)) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => card,
-          } as Response
-        }
-        return {
-          ok: false,
-          status: 404,
-          json: async () => ({}),
-        } as Response
+        return null
       }),
     )
 
@@ -263,8 +262,7 @@ describe('PersonProfilePage', () => {
   it('unmerge from merge history', async () => {
     const card = mockCard()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+    const fetchMock = personFetch(card, (url, init) => {
       if (init?.method === 'POST' && url.includes('/api/people/unmerge')) {
         return {
           ok: true,
@@ -275,18 +273,7 @@ describe('PersonProfilePage', () => {
           }),
         } as Response
       }
-      if (url.includes(`/api/people/${CONTACT_ID}`)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => card,
-        } as Response
-      }
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-      } as Response
+      return null
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -308,14 +295,7 @@ describe('PersonProfilePage', () => {
 
   it('Open in Chronicle sets sender scope and viewport from span', async () => {
     const card = mockCard()
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => card,
-      })),
-    )
+    vi.stubGlobal('fetch', personFetch(card))
 
     renderProfile()
     await screen.findByTestId('open-in-chronicle')
@@ -327,14 +307,7 @@ describe('PersonProfilePage', () => {
 
   it('View correspondence sets scope senders and navigates to research exact mode', async () => {
     const card = mockCard()
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => card,
-      })),
-    )
+    vi.stubGlobal('fetch', personFetch(card))
 
     renderProfile()
     await screen.findByTestId('view-correspondence')
@@ -351,14 +324,7 @@ describe('PersonProfilePage', () => {
 
   it('topic link navigates with tsel', async () => {
     const card = mockCard()
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => card,
-      })),
-    )
+    vi.stubGlobal('fetch', personFetch(card))
 
     renderProfile()
     fireEvent.click(await screen.findByTestId(`topic-link-${TOPIC_ID}`))

@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from chronicle_server.cursor import encode_cursor
+from chronicle_server.ids import encode_source_id
 from chronicle_server.people import (
     _activity_buckets,
+    _ego_graph,
     _enrich_card,
     _top_topics,
 )
@@ -544,3 +546,291 @@ def test_people_list_db_search(db_client: TestClient, db_pool: ConnectionPool) -
         assert body["total"] is not None
     finally:
         _cleanup_contacts(db_pool, [cid], [addr])
+
+
+# --- ego graph ---
+
+
+def test_people_graph_requires_auth(client: TestClient) -> None:
+    r = client.get(f"/api/people/{uuid4()}/graph")
+    assert r.status_code == 401
+
+
+def test_people_graph_depth_not_one_422(client: TestClient) -> None:
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = _sample_card()
+    with patch("chronicle_server.people._maildb", return_value=mock_db):
+        _login(client)
+        r = client.get(f"/api/people/{uuid4()}/graph?depth=2")
+    assert r.status_code == 422
+    assert "depth=1" in r.json()["detail"]
+
+
+def test_people_graph_404(client: TestClient) -> None:
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = None
+    with patch("chronicle_server.people._maildb", return_value=mock_db):
+        _login(client)
+        r = client.get(f"/api/people/{uuid4()}/graph")
+    assert r.status_code == 404
+
+
+def _graph_row(
+    node_id: str,
+    label: str,
+    kind: str,
+    shared: int,
+    first: datetime,
+    last: datetime,
+    threads: list[str],
+    total: int,
+) -> tuple[Any, ...]:
+    return (node_id, label, kind, shared, first, last, threads, total)
+
+
+def test_people_graph_shape_two_coparticipants(client: TestClient) -> None:
+    """Graph shape: ego + 2 co-participants, edges with evidence thr_* ids."""
+    ego_id = uuid4()
+    bob_id = str(uuid4())
+    card = _sample_card(id=str(ego_id), display_name="Ego Person", kind="human")
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = card
+
+    thr_a, thr_b, thr_c = "thread-a", "thread-b", "thread-c"
+    rows = [
+        _graph_row(
+            bob_id,
+            "Bob Co",
+            "human",
+            3,
+            datetime(2014, 1, 1, tzinfo=UTC),
+            datetime(2016, 6, 1, tzinfo=UTC),
+            [thr_a, thr_b, thr_c],
+            2,
+        ),
+        _graph_row(
+            "addr:stranger@example.com",
+            "stranger@example.com",
+            "address",
+            1,
+            datetime(2015, 3, 1, tzinfo=UTC),
+            datetime(2015, 3, 2, tzinfo=UTC),
+            ["thread-x"],
+            2,
+        ),
+    ]
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connection() -> Any:
+        yield conn
+
+    pool = MagicMock()
+    pool.connection = connection
+
+    with (
+        patch("chronicle_server.people._maildb", return_value=mock_db),
+        patch.object(client.app.state, "pool", pool, create=True),
+    ):
+        client.app.state.pool = pool
+        _login(client)
+        r = client.get(f"/api/people/{ego_id}/graph?max_nodes=25")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["truncated"] is False
+    assert body["total_coparticipants"] == 2
+    assert len(body["nodes"]) == 3  # ego + 2
+    ego_nodes = [n for n in body["nodes"] if n["is_ego"]]
+    assert len(ego_nodes) == 1
+    assert ego_nodes[0]["id"] == str(ego_id)
+    assert ego_nodes[0]["label"] == "Ego Person"
+    assert any(n["id"] == bob_id and n["kind"] == "human" for n in body["nodes"])
+    assert any(
+        n["id"] == "addr:stranger@example.com" and n["kind"] == "address" for n in body["nodes"]
+    )
+    assert len(body["edges"]) == 2
+    for edge in body["edges"]:
+        assert edge["source"] == str(ego_id)
+        assert edge["kind"] == "thread_co_participation"
+        assert "shared_threads" in edge
+        assert "first" in edge and "last" in edge
+        thr_ids = edge["evidence"]["thread_ids"]
+        assert all(tid.startswith("thr_") for tid in thr_ids)
+        # Encoded form matches encode_source_id
+        if edge["target"] == bob_id:
+            assert edge["shared_threads"] == 3
+            assert thr_ids == [
+                encode_source_id("thr", thr_a),
+                encode_source_id("thr", thr_b),
+                encode_source_id("thr", thr_c),
+            ]
+            assert edge["first"] == "2014-01-01"
+            assert edge["last"] == "2016-06-01"
+
+
+def test_people_graph_ranking_cap_truncated() -> None:
+    """Ranking by shared_threads desc + cap sets truncated and total honesty."""
+    ego_id = uuid4()
+    # Simulate SQL already capped to max_nodes=2 but total=5
+    rows = [
+        _graph_row(
+            str(uuid4()),
+            "Top",
+            "human",
+            10,
+            datetime(2010, 1, 1, tzinfo=UTC),
+            datetime(2011, 1, 1, tzinfo=UTC),
+            ["t1"],
+            5,
+        ),
+        _graph_row(
+            str(uuid4()),
+            "Second",
+            "human",
+            5,
+            datetime(2010, 1, 1, tzinfo=UTC),
+            datetime(2011, 1, 1, tzinfo=UTC),
+            ["t2"],
+            5,
+        ),
+    ]
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connection() -> Any:
+        yield conn
+
+    pool = MagicMock()
+    pool.connection = connection
+
+    out = _ego_graph(
+        pool,
+        contact_id=ego_id,
+        ego_label="Ego",
+        ego_kind="human",
+        max_nodes=2,
+        date_from=None,
+        date_to=None,
+    )
+    assert out["truncated"] is True
+    assert out["total_coparticipants"] == 5
+    assert len(out["edges"]) == 2
+    assert out["edges"][0]["shared_threads"] >= out["edges"][1]["shared_threads"]
+    # SQL receives max_nodes
+    params = conn.execute.call_args[0][1]
+    assert params["max_nodes"] == 2
+
+
+def test_people_graph_evidence_thread_ids_bounded() -> None:
+    """Evidence thread ids are thr_* and capped at 20."""
+    ego_id = uuid4()
+    raw_threads = [f"thread-{i}" for i in range(25)]
+    rows = [
+        _graph_row(
+            "addr:x@y.com",
+            "x@y.com",
+            "address",
+            25,
+            datetime(2012, 1, 1, tzinfo=UTC),
+            datetime(2013, 1, 1, tzinfo=UTC),
+            raw_threads,  # server still slices to 20
+            1,
+        )
+    ]
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = rows
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connection() -> Any:
+        yield conn
+
+    pool = MagicMock()
+    pool.connection = connection
+
+    out = _ego_graph(
+        pool,
+        contact_id=ego_id,
+        ego_label="Ego",
+        ego_kind="human",
+        max_nodes=25,
+        date_from=None,
+        date_to=None,
+    )
+    thr_ids = out["edges"][0]["evidence"]["thread_ids"]
+    assert len(thr_ids) == 20
+    assert all(t.startswith("thr_") for t in thr_ids)
+    params = conn.execute.call_args[0][1]
+    assert params["ev_cap"] == 20
+
+
+def test_people_graph_date_filtering_passed_to_sql(client: TestClient) -> None:
+    ego_id = uuid4()
+    card = _sample_card(id=str(ego_id))
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = card
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = []
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connection() -> Any:
+        yield conn
+
+    pool = MagicMock()
+    pool.connection = connection
+
+    with (
+        patch("chronicle_server.people._maildb", return_value=mock_db),
+        patch.object(client.app.state, "pool", pool, create=True),
+    ):
+        client.app.state.pool = pool
+        _login(client)
+        r = client.get(
+            f"/api/people/{ego_id}/graph?date_from=2014-01-01&date_to=2018-12-31&max_nodes=10"
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["nodes"][0]["is_ego"] is True
+    assert body["edges"] == []
+    assert body["total_coparticipants"] == 0
+    assert body["truncated"] is False
+    params = conn.execute.call_args[0][1]
+    assert params["date_from"] is not None
+    assert params["date_to"] is not None
+    assert params["date_from"].year == 2014
+    assert params["date_to"].year == 2018
+    assert params["max_nodes"] == 10
+    sql = conn.execute.call_args[0][0].lower()
+    assert "ego_threads" in sql or "ego_addrs" in sql
+    assert "thread_co_participation" not in sql  # edge kind is response-only
+
+
+def test_people_graph_invalid_date_422(client: TestClient) -> None:
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = _sample_card()
+    with patch("chronicle_server.people._maildb", return_value=mock_db):
+        _login(client)
+        r = client.get(f"/api/people/{uuid4()}/graph?date_from=not-a-date")
+    assert r.status_code == 422
+
+
+def test_people_graph_max_nodes_hard_cap(client: TestClient) -> None:
+    mock_db = MagicMock()
+    mock_db.get_contact.return_value = _sample_card()
+    with patch("chronicle_server.people._maildb", return_value=mock_db):
+        _login(client)
+        r = client.get(f"/api/people/{uuid4()}/graph?max_nodes=100")
+    # FastAPI Query le=50 → 422
+    assert r.status_code == 422

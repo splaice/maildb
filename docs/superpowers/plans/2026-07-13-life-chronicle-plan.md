@@ -102,7 +102,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 4, Task 4.4 (ego graph). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 4, Task 4.5 (version families + workflows B/D) — last task of Phase 4. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -135,3 +135,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 4.1 topics subsystem: seeded k-means, one-statement assignment, manual precedence, topics lane | chronicle-phase-4 | Approved; 238 server / 246 web tests |
 | 2026-07-13 | 4.2 Topic Atlas: hierarchy/river/matrix/projection + members list | chronicle-phase-4 | Approved; 243 server / 263 web tests |
 | 2026-07-13 | 4.3 People & Orgs UI over contacts subsystem (merge/split, signals, owner classes) | chronicle-phase-4 | Approved; 260 server / 279 web tests |
+| 2026-07-13 | 4.4 ego graph: bounded evidence-backed edges, radial SVG, table alt | chronicle-phase-4 | Approved; 269 server / 290 web tests |

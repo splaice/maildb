@@ -13,6 +13,7 @@ import {
   unmergePeople,
 } from './api'
 import { ActivityBars } from './ActivityBars'
+import { EgoGraph } from './EgoGraph'
 
 const btnClass =
   'rounded-md border border-steel bg-graphite-800 px-2 py-1 text-[12px] text-text-primary enabled:hover:bg-graphite-900 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-action'
@@ -470,6 +471,9 @@ export function PersonProfilePage() {
           </ul>
         )}
       </section>
+
+      {/* Co-participation ego graph */}
+      <EgoGraph contactId={id} card={card} />
 
       {/* Sources */}
       <section data-testid="person-sources" className="space-y-1">

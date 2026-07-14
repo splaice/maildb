@@ -1171,3 +1171,35 @@ export interface UnmergeResponse {
   source: ContactCard
   target: ContactCard
 }
+
+/** GET /api/people/:id/graph — depth-1 co-participation ego network (PE-003). */
+
+export type EgoGraphNodeKind = ContactKind | 'address' | string
+
+export interface EgoGraphNode {
+  id: string
+  label: string
+  kind: EgoGraphNodeKind
+  is_ego: boolean
+}
+
+export interface EgoGraphEdgeEvidence {
+  thread_ids: string[]
+}
+
+export interface EgoGraphEdge {
+  source: string
+  target: string
+  kind: 'thread_co_participation' | string
+  shared_threads: number
+  first: string | null
+  last: string | null
+  evidence: EgoGraphEdgeEvidence
+}
+
+export interface EgoGraphResponse {
+  nodes: EgoGraphNode[]
+  edges: EgoGraphEdge[]
+  truncated: boolean
+  total_coparticipants: number
+}

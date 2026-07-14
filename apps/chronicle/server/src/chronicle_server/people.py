@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from chronicle_server.auth import require_user
 from chronicle_server.cursor import decode_cursor, encode_cursor
 from chronicle_server.db import audit
+from chronicle_server.ids import encode_source_id
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -30,6 +31,9 @@ _LIST_MAX_LIMIT = 500
 _CANDIDATES_DEFAULT_LIMIT = 20
 _CANDIDATES_MAX_LIMIT = 100
 _TOP_TOPICS = 5
+_GRAPH_DEFAULT_MAX_NODES = 25
+_GRAPH_HARD_MAX_NODES = 50
+_GRAPH_EVIDENCE_THREAD_CAP = 20
 
 ContactKind = Literal["human", "organization", "automated", "mailing_list", "unknown"]
 VALID_KINDS: frozenset[str] = frozenset(
@@ -217,6 +221,223 @@ def _merge_history(pool: ConnectionPool, contact_id: UUID) -> list[dict[str, Any
     ]
 
 
+def _parse_optional_date(raw: str | None, *, field: str) -> datetime | None:
+    """Parse optional ISO date or datetime query param to timezone-aware UTC."""
+    if raw is None or raw == "":
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            dt = datetime(int(text[0:4]), int(text[5:7]), int(text[8:10]), tzinfo=UTC)
+        else:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid {field}") from exc
+    return dt
+
+
+def _date_only(value: Any) -> str | None:
+    """ISO calendar date (YYYY-MM-DD) for edge first/last fields."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return dt.astimezone(UTC).date().isoformat()
+    if hasattr(value, "isoformat"):
+        s = str(value.isoformat())
+        return s[:10] if len(s) >= 10 else s
+    s = str(value)
+    return s[:10] if len(s) >= 10 else s
+
+
+def _ego_graph(
+    pool: ConnectionPool,
+    *,
+    contact_id: UUID,
+    ego_label: str,
+    ego_kind: str,
+    max_nodes: int,
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> dict[str, Any]:
+    """Bounded depth-1 co-participation graph around one contact (PE-003).
+
+    One set-based pipeline: ego threads (sender or recipient) → co-senders →
+    identity join → rank/cap. Deeper neighborhoods arrive on demand later.
+    """
+    ego_id = str(contact_id)
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """
+            WITH ego_addrs AS (
+                SELECT lower(btrim(address)) AS address
+                  FROM contact_addresses
+                 WHERE contact_id = %(cid)s
+                   AND address IS NOT NULL
+                   AND btrim(address) <> ''
+            ),
+            ego_threads AS (
+                SELECT DISTINCT e.thread_id
+                  FROM emails e
+                 WHERE e.thread_id IS NOT NULL
+                   AND (%(date_from)s::timestamptz IS NULL
+                        OR e.date >= %(date_from)s::timestamptz)
+                   AND (%(date_to)s::timestamptz IS NULL
+                        OR e.date <= %(date_to)s::timestamptz)
+                   AND (
+                        lower(btrim(e.sender_address)) IN (SELECT address FROM ego_addrs)
+                        OR EXISTS (
+                            SELECT 1
+                              FROM ego_addrs a
+                             WHERE e.recipients @> jsonb_build_object(
+                                       'to', to_jsonb(ARRAY[a.address])
+                                   )
+                                OR e.recipients @> jsonb_build_object(
+                                       'cc', to_jsonb(ARRAY[a.address])
+                                   )
+                                OR e.recipients @> jsonb_build_object(
+                                       'bcc', to_jsonb(ARRAY[a.address])
+                                   )
+                        )
+                   )
+            ),
+            co_raw AS (
+                SELECT
+                    CASE
+                        WHEN ca.contact_id IS NOT NULL THEN ca.contact_id::text
+                        ELSE 'addr:' || lower(btrim(e.sender_address))
+                    END AS node_id,
+                    CASE
+                        WHEN ca.contact_id IS NOT NULL THEN
+                            coalesce(
+                                nullif(btrim(c.display_name), ''),
+                                lower(btrim(e.sender_address))
+                            )
+                        ELSE lower(btrim(e.sender_address))
+                    END AS label,
+                    CASE
+                        WHEN ca.contact_id IS NOT NULL THEN coalesce(c.kind, 'unknown')
+                        ELSE 'address'
+                    END AS kind,
+                    e.thread_id,
+                    e.date
+                  FROM emails e
+                  JOIN ego_threads t ON t.thread_id = e.thread_id
+                  LEFT JOIN contact_addresses ca
+                         ON lower(btrim(ca.address)) = lower(btrim(e.sender_address))
+                  LEFT JOIN contacts c ON c.id = ca.contact_id
+                 WHERE e.sender_address IS NOT NULL
+                   AND btrim(e.sender_address) <> ''
+                   AND lower(btrim(e.sender_address)) NOT IN (SELECT address FROM ego_addrs)
+                   AND (%(date_from)s::timestamptz IS NULL
+                        OR e.date >= %(date_from)s::timestamptz)
+                   AND (%(date_to)s::timestamptz IS NULL
+                        OR e.date <= %(date_to)s::timestamptz)
+            ),
+            co_threads AS (
+                SELECT node_id,
+                       thread_id,
+                       min(date) AS thread_first,
+                       max(date) AS thread_last,
+                       (array_agg(label ORDER BY label))[1] AS label,
+                       (array_agg(kind ORDER BY kind))[1] AS kind
+                  FROM co_raw
+                 GROUP BY node_id, thread_id
+            ),
+            agg AS (
+                SELECT
+                    node_id,
+                    (array_agg(label ORDER BY label))[1] AS label,
+                    (array_agg(kind ORDER BY kind))[1] AS kind,
+                    count(*)::int AS shared_thread_count,
+                    min(thread_first) AS first_shared,
+                    max(thread_last) AS last_shared,
+                    (array_agg(thread_id ORDER BY thread_id))[1:%(ev_cap)s] AS sample_threads
+                  FROM co_threads
+                 GROUP BY node_id
+            ),
+            ranked AS (
+                SELECT
+                    a.*,
+                    count(*) OVER ()::int AS total_coparticipants,
+                    row_number() OVER (
+                        ORDER BY a.shared_thread_count DESC, a.node_id ASC
+                    ) AS rn
+                  FROM agg a
+            )
+            SELECT node_id, label, kind, shared_thread_count,
+                   first_shared, last_shared, sample_threads,
+                   total_coparticipants
+              FROM ranked
+             WHERE rn <= %(max_nodes)s
+             ORDER BY shared_thread_count DESC, node_id ASC
+            """,
+            {
+                "cid": contact_id,
+                "date_from": date_from,
+                "date_to": date_to,
+                "max_nodes": max_nodes,
+                "ev_cap": _GRAPH_EVIDENCE_THREAD_CAP,
+            },
+        ).fetchall()
+
+    total = int(rows[0][7]) if rows else 0
+    truncated = total > max_nodes
+
+    nodes: list[dict[str, Any]] = [
+        {
+            "id": ego_id,
+            "label": ego_label,
+            "kind": ego_kind,
+            "is_ego": True,
+        }
+    ]
+    edges: list[dict[str, Any]] = []
+    for r in rows:
+        node_id = str(r[0])
+        label = str(r[1] or node_id)
+        kind = str(r[2] or "unknown")
+        shared = int(r[3] or 0)
+        first = _date_only(r[4])
+        last = _date_only(r[5])
+        sample = r[6] or []
+        if not isinstance(sample, (list, tuple)):
+            sample = list(sample) if sample else []
+        thr_ids = [encode_source_id("thr", str(tid)) for tid in sample if tid is not None][
+            :_GRAPH_EVIDENCE_THREAD_CAP
+        ]
+
+        nodes.append(
+            {
+                "id": node_id,
+                "label": label,
+                "kind": kind,
+                "is_ego": False,
+            }
+        )
+        edges.append(
+            {
+                "source": ego_id,
+                "target": node_id,
+                "kind": "thread_co_participation",
+                "shared_threads": shared,
+                "first": first,
+                "last": last,
+                "evidence": {"thread_ids": thr_ids},
+            }
+        )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "truncated": truncated,
+        "total_coparticipants": total,
+    }
+
+
 def _enrich_card(pool: ConnectionPool, card: dict[str, Any]) -> dict[str, Any]:
     """Full profile: card + address classes, activity, topics, merges."""
     contact_id = UUID(str(card["id"]))
@@ -317,6 +538,55 @@ def people_get(
     if card is None:
         raise HTTPException(status_code=404, detail="Contact not found")
     return _enrich_card(pool, card)
+
+
+@router.get("/people/{contact_id}/graph")
+def people_graph(
+    contact_id: UUID,
+    request: Request,
+    depth: int = Query(default=1, ge=1),
+    max_nodes: int = Query(default=_GRAPH_DEFAULT_MAX_NODES, ge=1, le=_GRAPH_HARD_MAX_NODES),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Bounded depth-1 ego co-participation graph (spec §7.3, PE-003, PERF-002).
+
+    depth=1 only — deeper neighborhoods arrive on demand later. Never a global graph.
+    """
+    if depth != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="depth=1 only; deeper neighborhoods arrive on demand later",
+        )
+    pool: ConnectionPool = request.app.state.pool
+    db = _maildb(pool)
+    card = db.get_contact(contact_id=contact_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    df = _parse_optional_date(date_from, field="date_from")
+    dt = _parse_optional_date(date_to, field="date_to")
+    # Inclusive end-of-day when only a calendar date was supplied.
+    if dt is not None and date_to is not None and len(date_to.strip()) == 10:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    ego_label = str(card.get("display_name") or "")
+    if not ego_label:
+        addrs = card.get("addresses") or []
+        ego_label = str(addrs[0]) if addrs else str(contact_id)
+    ego_kind = str(card.get("kind") or "unknown")
+    lim = min(max(1, max_nodes), _GRAPH_HARD_MAX_NODES)
+
+    return _ego_graph(
+        pool,
+        contact_id=contact_id,
+        ego_label=ego_label,
+        ego_kind=ego_kind,
+        max_nodes=lim,
+        date_from=df,
+        date_to=dt,
+    )
 
 
 @router.patch("/people/{contact_id}")
