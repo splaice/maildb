@@ -26,6 +26,46 @@ CREATE TABLE IF NOT EXISTS app_audit (
     action     TEXT NOT NULL,
     detail     JSONB NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS app_answers (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question          TEXT NOT NULL,
+    scope_fingerprint TEXT NOT NULL,
+    model_route       TEXT NOT NULL,
+    policy_version    TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('complete','error','cancelled')),
+    answer_text       TEXT,
+    retrieval         JSONB NOT NULL DEFAULT '[]',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_citations (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    answer_id   UUID NOT NULL REFERENCES app_answers(id) ON DELETE CASCADE,
+    marker      TEXT NOT NULL,
+    source_id   TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    location    JSONB,
+    excerpt     TEXT,
+    excerpt_hash TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_workspaces (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    description TEXT,
+    scope       JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    version     INT NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS app_workspace_blocks (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES app_workspaces(id) ON DELETE CASCADE,
+    position     INT NOT NULL,
+    block_type   TEXT NOT NULL CHECK (block_type IN ('heading','note','pin','answer')),
+    content      JSONB NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

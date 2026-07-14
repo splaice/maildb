@@ -130,6 +130,36 @@ describe('encodeState / decodeState', () => {
       '2014-01-01T00:00:00Z',
     )
   })
+
+  it('roundtrips files view params fv and fq', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      filesView: 'gallery',
+      filesQuery: 'invoice',
+    }
+    const encoded = encodeState(state)
+    expect(encoded.get('fv')).toBe('gallery')
+    expect(encoded.get('fq')).toBe('invoice')
+    const decoded = decodeState(encoded)
+    expect(decoded.filesView).toBe('gallery')
+    expect(decoded.filesQuery).toBe('invoice')
+  })
+
+  it('omits default files table view and empty fq', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      filesView: 'table',
+      filesQuery: '',
+    })
+    expect(params.has('fv')).toBe(false)
+    expect(params.has('fq')).toBe(false)
+  })
+
+  it('decodes unknown fv as table', () => {
+    const decoded = decodeState(new URLSearchParams({ fv: 'map', fq: 'x' }))
+    expect(decoded.filesView).toBe('table')
+    expect(decoded.filesQuery).toBe('x')
+  })
 })
 
 describe('isScopePristine', () => {
@@ -145,15 +175,17 @@ describe('isScopePristine', () => {
 })
 
 describe('selection codec (sel)', () => {
-  it('roundtrips bucket and message selections', () => {
+  it('roundtrips bucket, message, and attachment selections', () => {
     const bucket = {
       kind: 'bucket' as const,
       lane: 'messages',
       bucketIso: '2014-01-01T00:00:00.000Z',
     }
     const msg = { kind: 'message' as const, sid: 'msg_12345' }
+    const att = { kind: 'attachment' as const, sid: 'att_99' }
     expect(decodeSelection(encodeSelection(bucket))).toEqual(bucket)
     expect(decodeSelection(encodeSelection(msg))).toEqual(msg)
+    expect(decodeSelection(encodeSelection(att))).toEqual(att)
     expect(encodeSelection(null)).toBeNull()
     expect(decodeSelection(null)).toBeNull()
   })
@@ -166,6 +198,9 @@ describe('selection codec (sel)', () => {
     expect(decodeSelection('b:messages:not-a-date')).toBeNull()
     expect(decodeSelection('m:')).toBeNull()
     expect(decodeSelection('m:bad')).toBeNull()
+    expect(decodeSelection('m:att_1')).toBeNull()
+    expect(decodeSelection('a:')).toBeNull()
+    expect(decodeSelection('a:msg_1')).toBeNull()
   })
 
   it('encodes into URL params via encodeState', () => {
@@ -174,6 +209,42 @@ describe('selection codec (sel)', () => {
       selection: { kind: 'message', sid: 'msg_99' },
     })
     expect(params.get('sel')).toBe('m:msg_99')
+    const attParams = encodeState({
+      ...DEFAULT_URL_STATE,
+      selection: { kind: 'attachment', sid: 'att_7' },
+    })
+    expect(attParams.get('sel')).toBe('a:att_7')
+  })
+})
+
+describe('research URL params (q / mode / grp)', () => {
+  it('roundtrips query, mode, and grouping', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      query: 'from:alice roof',
+      mode: 'exact',
+      grouping: 'thread',
+    }
+    const params = encodeState(state)
+    expect(params.get('q')).toBe('from:alice roof')
+    expect(params.get('mode')).toBe('exact')
+    expect(params.get('grp')).toBe('thread')
+    const decoded = decodeState(params)
+    expect(decoded.query).toBe('from:alice roof')
+    expect(decoded.mode).toBe('exact')
+    expect(decoded.grouping).toBe('thread')
+  })
+
+  it('omits defaults hybrid / none / empty q', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      query: '',
+      mode: 'hybrid',
+      grouping: 'none',
+    })
+    expect(params.has('q')).toBe(false)
+    expect(params.has('mode')).toBe(false)
+    expect(params.has('grp')).toBe(false)
   })
 })
 

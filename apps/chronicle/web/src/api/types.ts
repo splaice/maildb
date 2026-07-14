@@ -116,6 +116,15 @@ export interface QueryScope {
   date?: QueryScopeDate | null
   mailboxes?: string[]
   senders?: string[]
+  /** v2 additive fields (search / query-syntax) */
+  recipients?: string[]
+  participants?: string[]
+  subject_contains?: string | null
+  has_attachment?: boolean | null
+  file_types?: string[]
+  filenames?: string[]
+  source_types?: string[]
+  free_text?: string | null
 }
 
 export interface ChronicleTimeRange {
@@ -300,4 +309,346 @@ export interface ThreadResponse {
   message_count: number
   messages: ThreadMessage[]
   truncated: boolean
+}
+
+/** POST /api/search */
+
+export type SearchMode = 'hybrid' | 'exact' | 'semantic'
+
+export interface SearchRequest {
+  query?: string
+  mode?: SearchMode
+  scope?: QueryScope
+  limit?: number
+  cursor?: string | null
+  include_facets?: boolean
+}
+
+export interface ExactMatchInfo {
+  kind: 'exact'
+  field?: string
+}
+
+export interface SemanticMatchInfo {
+  kind: 'semantic'
+  similarity?: number | null
+}
+
+export interface HybridMatchInfo {
+  kind: 'hybrid'
+  exact_rank?: number | null
+  semantic_rank?: number | null
+  similarity?: number | null
+}
+
+export type MatchInfo = ExactMatchInfo | SemanticMatchInfo | HybridMatchInfo
+
+export interface MessageSearchResult {
+  result_type: 'message'
+  id: string
+  subject: string | null
+  sender: string | null
+  sender_name?: string | null
+  date: string | null
+  mailbox: string | null
+  thread_id: string | null
+  snippet: string
+  has_attachment: boolean
+  /** Optional; badge when present and > 1 */
+  thread_size?: number
+  match: MatchInfo
+}
+
+export interface AttachmentSearchResult {
+  result_type: 'attachment'
+  id: string
+  filename: string
+  content_type: string | null
+  source_message_id: string | null
+  sender: string | null
+  date: string | null
+  snippet: string
+  extraction_status: string | null
+  match: MatchInfo
+}
+
+export type SearchResult = MessageSearchResult | AttachmentSearchResult
+
+export interface FacetBucket {
+  value: string | number | boolean
+  count: number
+}
+
+export interface SearchFacets {
+  mailbox?: FacetBucket[]
+  year?: FacetBucket[]
+  has_attachment?: FacetBucket[]
+  [key: string]: FacetBucket[] | undefined
+}
+
+export interface SearchResponse {
+  results: SearchResult[]
+  next_cursor: string | null
+  scope: QueryScope
+  unsupported: string[]
+  scope_fingerprint: string
+  mode: SearchMode
+  took_ms: number
+  duplicates_suppressed: number
+  facets: SearchFacets | null
+  facet_basis: string | null
+  degraded: Record<string, string> | null
+}
+
+/** POST /api/query/interpret */
+
+export type ChipOrigin = 'syntax' | 'model'
+
+export interface InterpretChip {
+  kind: string
+  value: string
+  origin: ChipOrigin | string
+  display?: string | null
+}
+
+export interface InterpretRequest {
+  text: string
+  scope?: QueryScope
+}
+
+export interface InterpretResponse {
+  scope: QueryScope
+  free_text: string
+  chips: InterpretChip[]
+  model_used: boolean
+}
+
+/** POST /api/ask */
+
+export type DeskMode = 'search' | 'ask'
+
+export interface AskRequest {
+  question: string
+  scope?: QueryScope
+  mode?: 'scope'
+}
+
+export interface AskUnavailableResponse {
+  available: false
+  reason: string
+}
+
+export interface AskRetrievalPayload {
+  count: number
+  types: { message?: number; attachment?: number; [k: string]: number | undefined }
+  degraded: Record<string, string> | null
+}
+
+export interface AskCitationPayload {
+  marker: string
+  source_id: string
+  source_type: string
+  excerpt: string
+  location: { char_start?: number; char_end?: number; [k: string]: unknown } | null
+}
+
+export interface AskDonePayload {
+  answer_id: string
+  model_route: string
+  policy_version: string
+  generated_at: string
+  unmatched_markers: string[]
+}
+
+/** POST /api/attachments/list */
+
+export type ContentTypeFamily =
+  | 'pdf'
+  | 'image'
+  | 'spreadsheet'
+  | 'document'
+  | 'text'
+  | 'other'
+
+export interface AttachmentListFilters {
+  filename?: string | null
+  content_type_family?: ContentTypeFamily | null
+  status?: string | null
+  date_from?: string | null
+  date_to?: string | null
+}
+
+export interface AttachmentListRequest {
+  scope?: QueryScope
+  filters?: AttachmentListFilters
+  cursor?: string | null
+  limit?: number
+  group_duplicates?: boolean
+}
+
+export interface ExtractionInfo {
+  status: string
+  reason?: string | null
+}
+
+export interface AttachmentOccurrence {
+  id: string
+  subject: string | null
+  sender: string | null
+  date: string | null
+}
+
+export interface AttachmentListItem {
+  id: string
+  filename: string
+  content_type: string | null
+  size: number | null
+  date: string | null
+  sender_name: string | null
+  sender_address: string | null
+  source_message_id: string
+  source_subject: string | null
+  extraction: ExtractionInfo
+  sha256: string
+  duplicate_count: number
+  occurrences?: AttachmentOccurrence[] | null
+}
+
+export interface AttachmentListResponse {
+  items: AttachmentListItem[]
+  next_cursor: string | null
+  scope_fingerprint: string
+}
+
+export interface PreviewDenied {
+  preview: false
+  reason: string
+}
+
+/** Workspaces (GET/POST /api/workspaces) */
+
+export type WorkspaceBlockType = 'heading' | 'note' | 'pin' | 'answer'
+
+export interface WorkspaceCounts {
+  blocks: number
+  pins: number
+  notes: number
+  answers: number
+  headings: number
+}
+
+export interface WorkspaceListItem {
+  id: string
+  name: string
+  updated_at: string | null
+  counts: WorkspaceCounts
+}
+
+export interface WorkspaceListResponse {
+  items: WorkspaceListItem[]
+}
+
+export interface HeadingBlockContent {
+  text: string
+}
+
+export interface NoteBlockContent {
+  text: string
+}
+
+export interface PinBlockContent {
+  source_id: string
+  source_type: string
+  title: string
+  date?: string | null
+  sender?: string | null
+  excerpt?: string | null
+}
+
+export interface AnswerBlockContent {
+  answer_id: string
+}
+
+export type WorkspaceBlockContent =
+  | HeadingBlockContent
+  | NoteBlockContent
+  | PinBlockContent
+  | AnswerBlockContent
+
+export interface WorkspaceAnswerCitation {
+  marker: string
+  source_id: string
+  source_type: string
+  excerpt?: string | null
+  excerpt_hash?: string | null
+  location?: Record<string, unknown> | null
+}
+
+export interface WorkspaceAnswerHydration {
+  answer_id: string
+  question?: string | null
+  answer_text?: string | null
+  status?: string | null
+  model_route?: string | null
+  policy_version?: string | null
+  scope_fingerprint?: string | null
+  created_at?: string | null
+  citations: WorkspaceAnswerCitation[]
+}
+
+export interface WorkspaceBlock {
+  id: string
+  workspace_id: string
+  position: number
+  block_type: WorkspaceBlockType
+  content: WorkspaceBlockContent & Record<string, unknown>
+  created_at?: string | null
+  updated_at?: string | null
+  answer?: WorkspaceAnswerHydration
+}
+
+export interface Workspace {
+  id: string
+  name: string
+  description?: string | null
+  scope: QueryScope
+  created_at?: string | null
+  updated_at?: string | null
+  version: number
+  blocks?: WorkspaceBlock[]
+}
+
+export interface WorkspaceCreateRequest {
+  name: string
+  description?: string | null
+  scope?: QueryScope
+}
+
+export interface WorkspacePatchRequest {
+  version: number
+  name?: string
+  description?: string | null
+  scope?: QueryScope
+}
+
+export interface BlockCreateRequest {
+  block_type: WorkspaceBlockType
+  content: WorkspaceBlockContent
+  position?: number | null
+}
+
+export interface BlockPatchRequest {
+  content?: WorkspaceBlockContent
+  position?: number | null
+}
+
+export type WorkspaceExportFormat = 'markdown' | 'json' | 'csv'
+
+export interface WorkspaceManifestRow {
+  source_id: string
+  source_type: string
+  date?: string | null
+  sender?: string | null
+  subject_or_filename?: string | null
+  excerpt_hash?: string | null
 }

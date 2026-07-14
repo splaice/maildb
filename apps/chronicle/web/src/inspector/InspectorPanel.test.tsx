@@ -155,4 +155,145 @@ describe('InspectorPanel flow', () => {
       expect(useWorkingSetStore.getState().selection?.kind).toBe('bucket')
     })
   })
+
+  it('attachment selection shows attachment metadata card', async () => {
+    const attSource = {
+      kind: 'att' as const,
+      id: 'att_42',
+      filename: 'invoice.pdf',
+      content_type: 'application/pdf',
+      size: 2048,
+      source_message_id: 'msg_1',
+      source_envelope: {
+        id: 'msg_1',
+        thread_id: null,
+        subject: 'Invoice',
+        sender_name: 'Bob',
+        sender_address: 'bob@example.com',
+        recipients: {},
+        date: '2015-01-01T00:00:00Z',
+        mailbox: 'me@example.com',
+        labels: [],
+        has_attachment: true,
+        attachments: [],
+      },
+      extraction_status: 'extracted',
+      extraction_reason: null,
+      markdown: 'line one of extracted text',
+      truncated: false,
+      text_offset: 0,
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/sources/att_42')) {
+          return { ok: true, status: 200, json: async () => attSource } as Response
+        }
+        if (String(url).includes('/preview')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/pdf' }),
+            text: async () => '',
+            json: async () => ({}),
+          } as Response
+        }
+        throw new Error(`unexpected: ${url}`)
+      }),
+    )
+
+    useWorkingSetStore.getState().setSelection({ kind: 'attachment', sid: 'att_42' })
+    renderPanel()
+    expect(await screen.findByTestId('attachment-card')).toBeInTheDocument()
+    expect(screen.getByText('invoice.pdf')).toBeInTheDocument()
+    expect(screen.getByText(/application\/pdf/)).toBeInTheDocument()
+    expect(screen.getByText(/Extraction:\s*extracted/i)).toBeInTheDocument()
+    expect(screen.getByTestId('attachment-extracted')).toHaveTextContent(
+      'line one of extracted text',
+    )
+    expect(screen.getByTestId('attachment-download')).toHaveAttribute(
+      'href',
+      '/api/attachments/att_42/download',
+    )
+    fireEvent.click(screen.getByTestId('attachment-preview'))
+    expect(await screen.findByTestId('preview-panel')).toBeInTheDocument()
+  })
+
+  it('pins message source to a workspace via menu', async () => {
+    const posts: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/sources/msg_1') && method === 'GET') {
+          return { ok: true, status: 200, json: async () => msgSource } as Response
+        }
+        if (
+          u.includes('/api/workspaces') &&
+          method === 'GET' &&
+          !u.includes('/blocks')
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  id: 'ws-1',
+                  name: 'Case',
+                  updated_at: null,
+                  counts: {
+                    blocks: 0,
+                    pins: 0,
+                    notes: 0,
+                    answers: 0,
+                    headings: 0,
+                  },
+                },
+              ],
+            }),
+          } as Response
+        }
+        if (u.includes('/api/workspaces/ws-1/blocks') && method === 'POST') {
+          posts.push(JSON.parse(String(init?.body || '{}')))
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({
+              id: 'blk-1',
+              workspace_id: 'ws-1',
+              position: 0,
+              block_type: 'pin',
+              content: posts[0],
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+
+    useWorkingSetStore.getState().setSelection({ kind: 'message', sid: 'msg_1' })
+    renderPanel()
+    expect(await screen.findByTestId('message-card')).toBeInTheDocument()
+    expect(screen.getByTestId('pin-to-workspace-btn')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('pin-to-workspace-btn'))
+    expect(await screen.findByTestId('pin-workspace-menu')).toBeInTheDocument()
+    fireEvent.click(await screen.findByTestId('pin-workspace-ws-1'))
+
+    await waitFor(() => {
+      expect(posts.length).toBe(1)
+    })
+    const body = posts[0] as {
+      block_type: string
+      content: { source_id: string; source_type: string; title: string }
+    }
+    expect(body.block_type).toBe('pin')
+    expect(body.content.source_id).toBe('msg_1')
+    expect(body.content.source_type).toBe('message')
+    expect(body.content.title).toMatch(/Hello world/)
+    expect(await screen.findByTestId('pin-status')).toHaveTextContent('Pinned')
+  })
 })
