@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ArchiveSummary, LaneData } from '../api/types'
 import { isBucketSeries } from '../api/types'
@@ -19,6 +19,8 @@ import {
 import { useChronicleBuckets } from '../chronicle/useChronicleBuckets'
 import { GeneratePanel } from '../events/GeneratePanel'
 import { FocusModeConnected } from '../focus/FocusMode'
+import { useShortcuts, type ShortcutBinding } from '../keyboard'
+import { useRegisterCommands, type Command } from '../palette'
 import { useWorkingSetStore } from '../workingset/store'
 import { useArchiveSummary } from './useArchiveSummary'
 
@@ -160,6 +162,8 @@ export function ChroniclePage() {
   // False until URL hydrate or extent bootstrap resolves (layout hydrate may set
   // viewport after this component's first render).
   const [bootstrapped, setBootstrapped] = useState(false)
+  /** F toggles the lens filter/config rail (§14.2). */
+  const [configRailOpen, setConfigRailOpen] = useState(true)
 
   const activeViewport = viewport ?? BOOTSTRAP_VIEWPORT
   const laneSpecs = useMemo(() => specsForKeys(lanes), [lanes])
@@ -236,60 +240,152 @@ export function ChroniclePage() {
     setCompare(compareRangesFromEntry(vp, br))
   }, [setCompare])
 
-  // Keyboard shortcuts [ / ] zoom, Enter → focus, Shift+C compare, Escape —
-  // page-scoped, cleaned up on unmount.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable)
-      ) {
-        return
-      }
-      if (e.key === '[') {
-        e.preventDefault()
-        zoomAroundCenter(2) // zoom out
-      } else if (e.key === ']') {
-        e.preventDefault()
-        zoomAroundCenter(0.5) // zoom in
-      } else if (e.key === 'Escape') {
-        const cmp = useWorkingSetStore.getState().compare
-        if (cmp) {
-          e.preventDefault()
-          exitCompare()
-          return
-        }
-        setBrush(null)
-      } else if (e.key === 'Enter') {
-        // Focus period when a brush exists (spec §4.6 entry).
-        const b = useWorkingSetStore.getState().brush
-        if (b && b.toMs > b.fromMs) {
-          e.preventDefault()
-          setFocus(b)
-        }
-      } else if (
-        (e.key === 'c' || e.key === 'C') &&
-        e.shiftKey &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey
-      ) {
-        // Shift+C: start or exit compare mode (spec §14.2).
-        e.preventDefault()
-        const cmp = useWorkingSetStore.getState().compare
-        if (cmp) {
-          exitCompare()
-        } else {
-          enterCompare()
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [enterCompare, exitCompare, setBrush, setFocus, zoomAroundCenter])
+  const zoomRef = useRef(zoomAroundCenter)
+  zoomRef.current = zoomAroundCenter
+  const enterCompareRef = useRef(enterCompare)
+  enterCompareRef.current = enterCompare
+  const exitCompareRef = useRef(exitCompare)
+  exitCompareRef.current = exitCompare
+  const setBrushRef = useRef(setBrush)
+  setBrushRef.current = setBrush
+  const setFocusRef = useRef(setFocus)
+  setFocusRef.current = setFocus
+
+  // §14.2 Chronicle shortcuts via central registry (identical behavior).
+  const chronicleShortcuts = useMemo((): ShortcutBinding[] => {
+    return [
+      {
+        id: 'chronicle.zoom-out',
+        chord: { key: '[' },
+        description: 'Zoom Chronicle out',
+        group: 'Chronicle',
+        run: () => {
+          zoomRef.current(2)
+        },
+      },
+      {
+        id: 'chronicle.zoom-in',
+        chord: { key: ']' },
+        description: 'Zoom Chronicle in',
+        group: 'Chronicle',
+        run: () => {
+          zoomRef.current(0.5)
+        },
+      },
+      {
+        id: 'chronicle.escape',
+        chord: { key: 'Escape' },
+        description: 'Clear brush or exit compare',
+        group: 'Chronicle',
+        run: () => {
+          const cmp = useWorkingSetStore.getState().compare
+          if (cmp) {
+            exitCompareRef.current()
+            return true
+          }
+          setBrushRef.current(null)
+          return true
+        },
+      },
+      {
+        id: 'chronicle.enter-focus',
+        chord: { key: 'Enter' },
+        description: 'Enter Focus mode on brush',
+        group: 'Chronicle',
+        run: () => {
+          const b = useWorkingSetStore.getState().brush
+          if (b && b.toMs > b.fromMs) {
+            setFocusRef.current(b)
+            return true
+          }
+          return false
+        },
+      },
+      {
+        id: 'chronicle.compare',
+        chord: { key: 'c', shift: true },
+        description: 'Start or exit compare mode',
+        group: 'Chronicle',
+        run: () => {
+          const cmp = useWorkingSetStore.getState().compare
+          if (cmp) exitCompareRef.current()
+          else enterCompareRef.current()
+        },
+      },
+      {
+        id: 'chronicle.toggle-filters',
+        chord: { key: 'f' },
+        description: 'Toggle filter / config rail',
+        group: 'Chronicle',
+        run: () => setConfigRailOpen((v) => !v),
+      },
+      {
+        id: 'chronicle.space-preview',
+        chord: { key: ' ' },
+        description: 'Preview selected object in the inspector',
+        group: 'Chronicle',
+        run: () => {
+          const el = document.querySelector(
+            '[data-testid="evidence-inspector"]',
+          ) as HTMLElement | null
+          el?.focus?.()
+        },
+      },
+    ]
+  }, [])
+
+  useShortcuts(chronicleShortcuts)
+
+  const chronicleCommands = useMemo((): Command[] => {
+    return [
+      {
+        id: 'chronicle.focus-period',
+        title: 'Focus period…',
+        group: 'Actions',
+        keywords: ['focus', 'brush'],
+        when: () => {
+          const b = useWorkingSetStore.getState().brush
+          return !!(b && b.toMs > b.fromMs)
+        },
+        run: () => {
+          const b = useWorkingSetStore.getState().brush
+          if (b) setFocus(b)
+        },
+      },
+      {
+        id: 'chronicle.compare-periods',
+        title: 'Compare periods',
+        group: 'Actions',
+        keywords: ['compare'],
+        run: () => {
+          const cmp = useWorkingSetStore.getState().compare
+          if (cmp) exitCompare()
+          else enterCompare()
+        },
+      },
+      {
+        id: 'chronicle.toggle-table',
+        title: 'Toggle table view',
+        group: 'Actions',
+        keywords: ['table', 'canvas'],
+        run: () => {
+          const v = useWorkingSetStore.getState().view
+          setView(v === 'canvas' ? 'table' : 'canvas')
+        },
+      },
+      {
+        id: 'chronicle.generate-events',
+        title: 'Generate events for visible range',
+        group: 'Actions',
+        keywords: ['events', 'generate'],
+        run: () => {
+          window.dispatchEvent(new CustomEvent('chronicle:generate-events'))
+        },
+      },
+    ]
+  }, [enterCompare, exitCompare, setFocus, setView])
+
+  useRegisterCommands(chronicleCommands)
 
   const unit = buckets.data?.unit ?? buckets.data?.aggregation ?? 'month'
   const densityBuckets = buckets.data?.density.buckets ?? []
@@ -369,14 +465,19 @@ export function ChroniclePage() {
             {/* Config rail (left) + canvas/table — shell has no config slot yet. */}
             {showTimeline && (buckets.data || !buckets.isError) ? (
               <div className="flex gap-2" data-testid="timeline-with-config">
-                <div className="flex w-[220px] shrink-0 flex-col gap-2">
-                  <LaneConfigPanel
-                    lanes={lanes}
-                    onToggle={toggleLane}
-                    onMove={moveLane}
-                  />
-                  <GeneratePanel scope={scope} viewport={viewport} />
-                </div>
+                {configRailOpen ? (
+                  <div
+                    className="flex w-[220px] shrink-0 flex-col gap-2"
+                    data-testid="chronicle-config-rail"
+                  >
+                    <LaneConfigPanel
+                      lanes={lanes}
+                      onToggle={toggleLane}
+                      onMove={moveLane}
+                    />
+                    <GeneratePanel scope={scope} viewport={viewport} />
+                  </div>
+                ) : null}
                 <div className="min-w-0 flex-1">
                   {viewMode === 'table' ? (
                     <TimelineTable

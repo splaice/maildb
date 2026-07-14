@@ -1,12 +1,23 @@
-import { Navigate, Route, Routes } from 'react-router'
+import { useMemo, type ReactNode } from 'react'
+import { Navigate, Route, Routes, useNavigate } from 'react-router'
 
 import { LoginPage } from './auth/LoginPage'
 import { RequireAuth } from './auth/RequireAuth'
 import { ReconstructionView } from './events/ReconstructionView'
 import { FilesPage } from './files/FilesPage'
+import {
+  setStatusHint,
+  ShortcutProvider,
+  useRegisterNavigationShortcuts,
+  useShortcuts,
+} from './keyboard'
+import {
+  CommandPalette,
+  CommandRegistryProvider,
+  ContextCommands,
+} from './palette'
 import { SourcePage } from './reader/SourcePage'
 import { ResearchDeskPage } from './research/ResearchDeskPage'
-import { ResearchNavShortcut } from './research/ResearchNavShortcut'
 import { PeoplePage } from './people/PeoplePage'
 import { PersonProfilePage } from './people/PersonProfilePage'
 import { ChroniclePage } from './routes/ChroniclePage'
@@ -17,10 +28,60 @@ import { TopicsPage } from './topics/TopicsPage'
 import { WorkspacePage } from './workspaces/WorkspacePage'
 import { WorkspacesListPage } from './workspaces/WorkspacesListPage'
 
+/** Binds T/R/M navigation custom events to react-router + G person-graph. */
+function NavigationBindings() {
+  const navigate = useNavigate()
+  useRegisterNavigationShortcuts((to) => {
+    navigate(to)
+  })
+  return null
+}
+
+function GlobalPersonGraphShortcut() {
+  // G: open person graph when a person profile is in context; else status hint.
+  const navigate = useNavigate()
+  const bindings = useMemo(
+    () => [
+      {
+        id: 'global.person-graph',
+        chord: { key: 'g' as const },
+        description: 'Open person graph when a person is selected',
+        group: 'Navigation',
+        run: () => {
+          const path = window.location.pathname
+          const m = /^\/people\/([^/]+)/.exec(path)
+          if (m) {
+            navigate(`/people/${encodeURIComponent(m[1]!)}`)
+            return true
+          }
+          setStatusHint('Select a person first to open the graph')
+          return true
+        },
+      },
+    ],
+    [navigate],
+  )
+  useShortcuts(bindings)
+  return null
+}
+
+function AppProviders({ children }: { children: ReactNode }) {
+  return (
+    <ShortcutProvider>
+      <CommandRegistryProvider>
+        <NavigationBindings />
+        <GlobalPersonGraphShortcut />
+        <ContextCommands />
+        <CommandPalette />
+        {children}
+      </CommandRegistryProvider>
+    </ShortcutProvider>
+  )
+}
+
 export function App() {
   return (
-    <>
-      <ResearchNavShortcut />
+    <AppProviders>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
@@ -49,7 +110,7 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </>
+    </AppProviders>
   )
 }
 

@@ -99,8 +99,8 @@ describe('Workstation shell', () => {
     expect(logout.tagName).toBe('BUTTON')
     const links = within(shell).getAllByRole('link')
     expect(links.length).toBeGreaterThanOrEqual(7)
-    // Search input is present (disabled) then logout; nav links follow in DOM order.
+    // Universal command bar is enabled (Phase 5.2); nav links follow in DOM order.
     const search = within(shell).getByLabelText(/universal search/i)
-    expect(search).toBeDisabled()
+    expect(search).not.toBeDisabled()
   })
 })
