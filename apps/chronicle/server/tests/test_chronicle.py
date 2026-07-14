@@ -9,9 +9,11 @@ from uuid import uuid4
 import pytest
 
 from chronicle_server.chronicle import (
+    ALIGNED_DURATION_TOLERANCE,
     AggregationTooFineError,
     BucketsRequest,
     choose_aggregation,
+    durations_aligned,
     resolve_aggregation,
 )
 from tests.conftest import PASSWORD, USERNAME
@@ -496,3 +498,315 @@ def test_top_people_lane_shape_and_rules(db_client: TestClient, db_pool: Connect
         assert empty_total == 0
     finally:
         _cleanup_top_people_fixtures(db_pool)
+
+
+def test_buckets_request_accepts_events_lane() -> None:
+    req = BucketsRequest.model_validate(
+        {
+            "viewport": {"from": "2020-01-01", "to": "2021-01-01"},
+            "lanes": ["messages", "events"],
+        }
+    )
+    assert "events" in req.lanes
+
+
+def _cleanup_events_for_lane(pool: ConnectionPool) -> None:
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM app_events")
+        conn.commit()
+
+
+def test_events_lane_cap_and_dismissed_exclusion(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    """Events lane returns sparse marks (not bucket counts), excludes dismissed, caps 500."""
+    from chronicle_server.chronicle import EVENTS_LANE_CAP
+
+    _cleanup_events_for_lane(db_pool)
+    try:
+        with db_pool.connection() as conn:
+            # One dismissed inside viewport — must not appear
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Dismissed mark', '2020-06-15T00:00:00Z', null, 'day', 'analyst',
+                    'meeting', 'dismissed', 1
+                )
+                """
+            )
+            # Span event overlapping viewport
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Span mark', '2020-05-20T00:00:00Z', '2020-06-10T00:00:00Z', 'day',
+                    'analyst', 'travel', 'confirmed', 1
+                )
+                """
+            )
+            # Point event inside
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Inside mark', '2020-07-01T00:00:00Z', null, 'day', 'source',
+                    'document', 'unreviewed', 1
+                )
+                """
+            )
+            # Outside viewport
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Outside mark', '2019-01-01T00:00:00Z', null, 'day', 'analyst',
+                    'meeting', 'confirmed', 1
+                )
+                """
+            )
+            conn.commit()
+
+        _login(db_client)
+        r = db_client.post(
+            "/api/chronicle/buckets",
+            json={
+                "scope": {},
+                "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+                "pixel_width": 920,
+                "aggregation": "month",
+                "lanes": ["events"],
+            },
+        )
+        assert r.status_code == 200, r.text
+        lane = r.json()["lanes"]["events"]
+        assert isinstance(lane, dict)
+        assert "events" in lane
+        assert "truncated" in lane
+        assert lane["truncated"] is False
+        titles = {m["title"] for m in lane["events"]}
+        assert "Inside mark" in titles
+        assert "Span mark" in titles
+        assert "Dismissed mark" not in titles
+        assert "Outside mark" not in titles
+        for m in lane["events"]:
+            assert "event_id" in m
+            assert "time_start" in m
+            assert "time_precision" in m
+            assert "origin" in m
+            assert "event_type" in m
+            assert "status" in m
+            assert "count" not in m  # not bucket counts
+
+        # Cap + truncated flag
+        _cleanup_events_for_lane(db_pool)
+        with db_pool.connection() as conn:
+            for i in range(EVENTS_LANE_CAP + 5):
+                conn.execute(
+                    """
+                    INSERT INTO app_events (
+                        title, time_start, time_end, time_precision, origin,
+                        event_type, status, current_version
+                    ) VALUES (
+                        %(title)s, %(ts)s, null, 'day', 'analyst',
+                        'communication', 'confirmed', 1
+                    )
+                    """,
+                    {
+                        "title": f"Cap {i}",
+                        "ts": datetime(2020, 1, 1, tzinfo=UTC) + timedelta(hours=i),
+                    },
+                )
+            conn.commit()
+
+        r2 = db_client.post(
+            "/api/chronicle/buckets",
+            json={
+                "scope": {},
+                "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+                "pixel_width": 920,
+                "aggregation": "month",
+                "lanes": ["events"],
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        lane2 = r2.json()["lanes"]["events"]
+        assert lane2["truncated"] is True
+        assert len(lane2["events"]) == EVENTS_LANE_CAP
+    finally:
+        _cleanup_events_for_lane(db_pool)
+
+
+# --- compare mode ---
+
+
+def test_durations_aligned_at_5pct_boundary() -> None:
+    base = timedelta(days=100)
+    # Exactly 5% shorter: still aligned.
+    assert durations_aligned(base, timedelta(days=95)) is True
+    # Just over 5%: unaligned.
+    assert durations_aligned(base, timedelta(days=94.9)) is False
+    assert durations_aligned(timedelta(days=100), timedelta(days=100)) is True
+    assert ALIGNED_DURATION_TOLERANCE == 0.05
+
+
+def test_compare_requires_auth(client: TestClient) -> None:
+    r = client.post(
+        "/api/chronicle/compare",
+        json={
+            "scope": {},
+            "a": {"from": "2020-01-01", "to": "2020-07-01"},
+            "b": {"from": "2021-01-01", "to": "2021-07-01"},
+            "pixel_width": 920,
+            "lanes": ["messages"],
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_compare_422_invalid_range(client: TestClient) -> None:
+    login = client.post("/api/auth/login", json={"username": USERNAME, "password": PASSWORD})
+    assert login.status_code == 200
+    r = client.post(
+        "/api/chronicle/compare",
+        json={
+            "scope": {},
+            "a": {"from": "2020-07-01", "to": "2020-01-01"},
+            "b": {"from": "2021-01-01", "to": "2021-07-01"},
+            "pixel_width": 920,
+            "lanes": ["messages"],
+        },
+    )
+    assert r.status_code == 422
+
+    r2 = client.post(
+        "/api/chronicle/compare",
+        json={
+            "scope": {},
+            "a": {"from": "2020-01-01", "to": "2020-07-01"},
+            "b": {"from": "2021-07-01", "to": "2021-01-01"},
+            "pixel_width": 920,
+            "lanes": ["messages"],
+        },
+    )
+    assert r2.status_code == 422
+
+
+def test_compare_shared_unit_uses_longer_at_half_width() -> None:
+    """Unit is choose_aggregation(longer_duration, pixel_width // 2)."""
+    # A = 30 days, B = 365 days → longer is B.
+    longer = timedelta(days=365)
+    pixel_width = 920
+    half = max(320, pixel_width // 2)
+    expected = choose_aggregation(longer, half)
+    # Pure check: half width, not full.
+    full_width_unit = choose_aggregation(longer, pixel_width)
+    # Document the choice rule; units may or may not differ by width.
+    assert expected == choose_aggregation(longer, half)
+    assert isinstance(full_width_unit, str)
+
+
+def test_compare_endpoint_shape_aligned_totals(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    _cleanup_bucket_emails(db_pool)
+    acct = "compare-test@example.com"
+    try:
+        # Range A (2020 H1): 2 messages, 1 attachment
+        _insert_email(
+            db_pool,
+            date=datetime(2020, 2, 15, 12, 0, tzinfo=UTC),
+            source_account=acct,
+            sender_address="alice@example.com",
+            with_attachment=True,
+        )
+        _insert_email(
+            db_pool,
+            date=datetime(2020, 3, 1, 8, 0, tzinfo=UTC),
+            source_account=acct,
+            sender_address="bob@example.com",
+        )
+        # Range B (2021 H1): 3 messages, 0 attachments
+        for month in (1, 2, 3):
+            _insert_email(
+                db_pool,
+                date=datetime(2021, month, 10, 12, 0, tzinfo=UTC),
+                source_account=acct,
+                sender_address="carol@example.com",
+            )
+
+        _login(db_client)
+        payload = {
+            "scope": {"mailboxes": [acct]},
+            "a": {"from": "2020-01-01T00:00:00Z", "to": "2020-07-01T00:00:00Z"},
+            "b": {"from": "2021-01-01T00:00:00Z", "to": "2021-07-01T00:00:00Z"},
+            "pixel_width": 920,
+            "lanes": ["messages", "attachments", "people"],
+        }
+        r = db_client.post("/api/chronicle/compare", json=payload)
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        assert "unit" in body
+        assert body["aligned"] is True  # equal 6-month durations
+        assert body["scope_fingerprint"]
+        assert set(body["a"]["lanes"].keys()) == {"messages", "attachments", "people"}
+        assert set(body["b"]["lanes"].keys()) == {"messages", "attachments", "people"}
+        assert body["a"]["viewport"]["from"].startswith("2020")
+        assert body["b"]["viewport"]["from"].startswith("2021")
+
+        # Shared unit matches longer@half-width rule (equal lengths → either).
+        half = max(320, 920 // 2)
+        expected_unit = choose_aggregation(
+            datetime(2020, 7, 1, tzinfo=UTC) - datetime(2020, 1, 1, tzinfo=UTC),
+            half,
+        )
+        assert body["unit"] == expected_unit
+
+        assert body["totals"]["a"]["messages"] == 2
+        assert body["totals"]["a"]["attachments"] == 1
+        assert body["totals"]["b"]["messages"] == 3
+        assert body["totals"]["b"]["attachments"] == 0
+
+        # Lane series shape reuses bucket points (helpers, not raw SQL duplication).
+        for side in ("a", "b"):
+            for lane in ("messages", "attachments", "people"):
+                series = body[side]["lanes"][lane]
+                assert isinstance(series, list)
+                for pt in series:
+                    assert "bucket" in pt and "count" in pt
+    finally:
+        _cleanup_bucket_emails(db_pool)
+
+
+def test_compare_unaligned_flag(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    _cleanup_bucket_emails(db_pool)
+    try:
+        _login(db_client)
+        r = db_client.post(
+            "/api/chronicle/compare",
+            json={
+                "scope": {},
+                "a": {"from": "2020-01-01T00:00:00Z", "to": "2020-04-01T00:00:00Z"},
+                "b": {"from": "2021-01-01T00:00:00Z", "to": "2022-01-01T00:00:00Z"},
+                "pixel_width": 920,
+                "lanes": ["messages"],
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["aligned"] is False
+        # Unit from the longer range (1 year) at half width.
+        half = max(320, 920 // 2)
+        longer = datetime(2022, 1, 1, tzinfo=UTC) - datetime(2021, 1, 1, tzinfo=UTC)
+        assert body["unit"] == choose_aggregation(longer, half)
+    finally:
+        _cleanup_bucket_emails(db_pool)

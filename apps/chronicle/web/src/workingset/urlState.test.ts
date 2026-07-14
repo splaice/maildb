@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import type { Unit } from '../chronicle/timeScale'
 import {
+  decodeCompareRange,
   decodeSelection,
   decodeState,
   DEFAULT_LANES,
   DEFAULT_URL_STATE,
+  encodeCompareRange,
   encodeSelection,
   encodeState,
   isScopePristine,
@@ -175,7 +177,7 @@ describe('isScopePristine', () => {
 })
 
 describe('selection codec (sel)', () => {
-  it('roundtrips bucket, message, and attachment selections', () => {
+  it('roundtrips bucket, message, attachment, and event selections', () => {
     const bucket = {
       kind: 'bucket' as const,
       lane: 'messages',
@@ -183,9 +185,14 @@ describe('selection codec (sel)', () => {
     }
     const msg = { kind: 'message' as const, sid: 'msg_12345' }
     const att = { kind: 'attachment' as const, sid: 'att_99' }
+    const evt = {
+      kind: 'event' as const,
+      eventId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    }
     expect(decodeSelection(encodeSelection(bucket))).toEqual(bucket)
     expect(decodeSelection(encodeSelection(msg))).toEqual(msg)
     expect(decodeSelection(encodeSelection(att))).toEqual(att)
+    expect(decodeSelection(encodeSelection(evt))).toEqual(evt)
     expect(encodeSelection(null)).toBeNull()
     expect(decodeSelection(null)).toBeNull()
   })
@@ -201,6 +208,8 @@ describe('selection codec (sel)', () => {
     expect(decodeSelection('m:att_1')).toBeNull()
     expect(decodeSelection('a:')).toBeNull()
     expect(decodeSelection('a:msg_1')).toBeNull()
+    expect(decodeSelection('e:')).toBeNull()
+    expect(decodeSelection('e:bad id')).toBeNull()
   })
 
   it('encodes into URL params via encodeState', () => {
@@ -214,6 +223,11 @@ describe('selection codec (sel)', () => {
       selection: { kind: 'attachment', sid: 'att_7' },
     })
     expect(attParams.get('sel')).toBe('a:att_7')
+    const evtParams = encodeState({
+      ...DEFAULT_URL_STATE,
+      selection: { kind: 'event', eventId: 'evt-uuid-1' },
+    })
+    expect(evtParams.get('sel')).toBe('e:evt-uuid-1')
   })
 })
 
@@ -245,6 +259,72 @@ describe('research URL params (q / mode / grp)', () => {
     expect(params.has('q')).toBe(false)
     expect(params.has('mode')).toBe(false)
     expect(params.has('grp')).toBe(false)
+  })
+})
+
+describe('compare URL params (ca / cb)', () => {
+  it('encodeCompareRange / decodeCompareRange roundtrip', () => {
+    const vp = {
+      fromMs: Date.UTC(2015, 0, 1),
+      toMs: Date.UTC(2015, 6, 1),
+    }
+    const encoded = encodeCompareRange(vp)
+    expect(encoded).toBe('2015-01-01T00:00:00Z..2015-07-01T00:00:00Z')
+    const decoded = decodeCompareRange(encoded)
+    expect(decoded?.fromMs).toBe(vp.fromMs)
+    expect(decoded?.toMs).toBe(vp.toMs)
+  })
+
+  it('decodeCompareRange is total on bad values', () => {
+    expect(decodeCompareRange(null)).toBeNull()
+    expect(decodeCompareRange('')).toBeNull()
+    expect(decodeCompareRange('no-sep')).toBeNull()
+    expect(decodeCompareRange('2015-01-01T00:00:00Z..bad')).toBeNull()
+    expect(
+      decodeCompareRange('2015-07-01T00:00:00Z..2015-01-01T00:00:00Z'),
+    ).toBeNull()
+  })
+
+  it('encodeState / decodeState roundtrip ca/cb', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      compare: {
+        a: {
+          fromMs: Date.UTC(2014, 0, 1),
+          toMs: Date.UTC(2015, 0, 1),
+        },
+        b: {
+          fromMs: Date.UTC(2015, 0, 1),
+          toMs: Date.UTC(2016, 0, 1),
+        },
+      },
+    }
+    const params = encodeState(state)
+    expect(params.get('ca')).toBe('2014-01-01T00:00:00Z..2015-01-01T00:00:00Z')
+    expect(params.get('cb')).toBe('2015-01-01T00:00:00Z..2016-01-01T00:00:00Z')
+    const decoded = decodeState(params)
+    expect(decoded.compare?.a.fromMs).toBe(state.compare!.a.fromMs)
+    expect(decoded.compare?.a.toMs).toBe(state.compare!.a.toMs)
+    expect(decoded.compare?.b.fromMs).toBe(state.compare!.b.fromMs)
+    expect(decoded.compare?.b.toMs).toBe(state.compare!.b.toMs)
+  })
+
+  it('omits ca/cb when compare is null', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      compare: null,
+    })
+    expect(params.has('ca')).toBe(false)
+    expect(params.has('cb')).toBe(false)
+  })
+
+  it('partial ca/cb yields null compare', () => {
+    const decoded = decodeState(
+      new URLSearchParams({
+        ca: '2014-01-01T00:00:00Z..2015-01-01T00:00:00Z',
+      }),
+    )
+    expect(decoded.compare).toBeNull()
   })
 })
 

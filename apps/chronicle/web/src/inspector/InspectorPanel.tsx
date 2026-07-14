@@ -4,6 +4,7 @@ import { Link } from 'react-router'
 
 import { apiGet } from '../api/client'
 import type { AttachmentSource, SourceResponse } from '../api/types'
+import { EventCard } from '../events/EventCard'
 import { downloadUrl } from '../files/format'
 import { PreviewPanel } from '../files/PreviewPanel'
 import { useWorkingSetStore } from '../workingset/store'
@@ -190,6 +191,15 @@ export function InspectorPanel({ bucketCount }: InspectorPanelProps) {
     return (
       <AttachmentCard
         sid={selection.sid}
+        onClose={() => setSelection(null)}
+      />
+    )
+  }
+
+  if (selection.kind === 'event') {
+    return (
+      <EventCard
+        eventId={selection.eventId}
         onClose={() => setSelection(null)}
       />
     )

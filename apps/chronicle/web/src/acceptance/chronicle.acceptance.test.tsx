@@ -1,14 +1,16 @@
 /**
  * Chronicle acceptance tests — spec §4.10 criteria 1–8.
  * Mocked-API integration (no real server). One `it` per criterion.
- *
- * Criterion 4 (generated events) is deferred to Phase 3 as `it.todo`.
  */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { BrowserRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChronicleBuckets } from '../api/types'
+import { App } from '../App'
 import {
+  createTestQueryClient,
   mockArchiveSummary,
   mockSessionOk,
   renderApp,
@@ -272,8 +274,142 @@ describe('Chronicle acceptance (§4.10)', () => {
     )
   })
 
-  // Phase 3: generated events expose origin/evidence/derivation — not in Phase 1.
-  it.todo('generated events expose origin/evidence/derivation')
+  it('generated events expose origin/evidence/derivation', async () => {
+    const eventId = 'evt-auto-1'
+    const automaticEvent = {
+      id: eventId,
+      title: 'Roof material decision',
+      time_start: '2015-06-15T00:00:00Z',
+      time_end: null,
+      time_precision: 'day',
+      origin: 'automatic',
+      event_type: 'decision',
+      status: 'unreviewed',
+      evidence_strength: 'high',
+      current_version: 1,
+      summary: 'Chose metal roofing after comparing quotes.',
+      derivation: {
+        generated_at: '2026-07-13T12:00:00Z',
+        process_version: 'event-v1',
+        model_route: 'local-llama',
+        scope_fingerprint: 'qs_acceptance',
+      },
+      version: {
+        version: 1,
+        author: 'automatic',
+        title: 'Roof material decision',
+        summary: 'Chose metal roofing after comparing quotes.',
+        derivation: {
+          generated_at: '2026-07-13T12:00:00Z',
+          process_version: 'event-v1',
+          model_route: 'local-llama',
+          scope_fingerprint: 'qs_acceptance',
+        },
+      },
+      claims: [
+        {
+          id: 'c-direct',
+          position: 0,
+          text: 'Metal was selected',
+          status: 'direct',
+          citations: [
+            {
+              source_id: 'msg_roof_1',
+              source_type: 'message',
+              subject: 'Quote A',
+              sender: 'Alice',
+              date: '2015-06-10T12:00:00Z',
+              excerpt: 'we go with metal',
+            },
+            {
+              source_id: 'msg_roof_2',
+              source_type: 'message',
+              subject: 'Confirm metal',
+              sender: 'Bob',
+              date: '2015-06-12T12:00:00Z',
+              excerpt: 'metal confirmed',
+            },
+          ],
+        },
+      ],
+    }
+
+    installFetch(async (url) => {
+      if (url.includes('/api/chronicle/buckets')) {
+        return mockBuckets({
+          lanes: {
+            messages: [
+              { bucket: '2015-01-01T00:00:00.000Z', count: 200 },
+              { bucket: '2015-06-01T00:00:00.000Z', count: 80 },
+            ],
+            attachments: [],
+            events: {
+              events: [
+                {
+                  event_id: eventId,
+                  title: automaticEvent.title,
+                  time_start: automaticEvent.time_start,
+                  time_end: null,
+                  time_precision: 'day',
+                  origin: 'automatic',
+                  event_type: 'decision',
+                  status: 'unreviewed',
+                  evidence_strength: 'high',
+                },
+              ],
+              truncated: false,
+            },
+          },
+        })
+      }
+      if (url.includes(`/api/events/${eventId}`) && !url.includes('/versions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => automaticEvent,
+        } as Response
+      }
+      return undefined
+    })
+
+    window.history.replaceState(null, '', '/')
+    const client = createTestQueryClient()
+    render(
+      <QueryClientProvider client={client}>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByTestId('workstation-shell')).toBeInTheDocument()
+
+    // Select the automatic event diamond (store equivalent of canvas hit).
+    useWorkingSetStore.getState().setSelection({
+      kind: 'event',
+      eventId,
+    })
+
+    expect(await screen.findByTestId('event-card')).toBeInTheDocument()
+    expect(screen.getByTestId('event-origin-badge')).toHaveTextContent(/Automatic/)
+    expect(screen.getByTestId('event-evidence-strength')).toHaveTextContent(/high/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(/Generated 2026-07-13/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(/event-v1/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(
+      /model route local-llama/,
+    )
+    expect(screen.getByTestId('event-confirm')).toBeInTheDocument()
+    expect(screen.getByTestId('event-dismiss')).toBeInTheDocument()
+    expect(screen.getByTestId('event-edit')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('event-reconstruction'))
+    expect(await screen.findByTestId('reconstruction-view')).toBeInTheDocument()
+    expect(screen.getByTestId('claim-matrix')).toBeInTheDocument()
+    const claimRows = screen.getAllByTestId('claim-matrix-row')
+    expect(claimRows.length).toBeGreaterThanOrEqual(1)
+    expect(claimRows[0]).toHaveTextContent(/2 citations/)
+    expect(claimRows[0]).toHaveTextContent(/Metal was selected/)
+  })
 
   it('open source and return restores viewport and selection', async () => {
     // Re-assert the 1.4 return contract through focus mode:

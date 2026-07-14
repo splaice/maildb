@@ -14,6 +14,8 @@ export interface TimelineToolbarProps {
   onToggleViewMode: () => void
   /** Enter focus mode on the brushed range (enabled when brush exists). */
   onFocusPeriod?: () => void
+  /** Enter compare mode (Shift+C). Always available when viewport is set. */
+  onCompare?: () => void
 }
 
 const btnClass =
@@ -31,6 +33,7 @@ export function TimelineToolbar({
   onClearSelection,
   onToggleViewMode,
   onFocusPeriod,
+  onCompare,
 }: TimelineToolbarProps) {
   const period = formatPeriodRange(viewport)
   const unitLabel = unit ? `${unit} buckets` : 'buckets'
@@ -79,6 +82,16 @@ export function TimelineToolbar({
         >
           Focus period
         </button>
+        <button
+          type="button"
+          className={btnClass}
+          onClick={onCompare}
+          disabled={!onCompare}
+          title="Compare periods (Shift+C)"
+          data-testid="compare-btn"
+        >
+          Compare <span className="text-text-muted">⇧C</span>
+        </button>
         <button type="button" className={btnClass} onClick={onToggleViewMode}>
           {viewMode === 'canvas' ? 'View as table' : 'View as canvas'}
         </button>
@@ -87,7 +100,8 @@ export function TimelineToolbar({
         className="w-full text-[11px] text-text-muted"
         data-testid="toolbar-focus-hint"
       >
-        Double-click a mark to enter focus · Alt+double-click zooms ×4
+        Double-click a mark to enter focus · Alt+double-click zooms ×4 · Shift+C
+        compare
       </span>
     </div>
   )

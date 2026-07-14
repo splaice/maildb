@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
 import { apiGet } from '../api/client'
-import type { ArchiveHealth } from '../api/types'
+import type { ArchiveHealth, AuditTailRow } from '../api/types'
 
 export const archiveHealthQueryKey = ['health', 'archive'] as const
 
@@ -374,6 +374,66 @@ function ImportsSection({ data }: { data: ArchiveHealth['imports'] }) {
   )
 }
 
+function formatDetail(detail: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(detail)
+  } catch {
+    return String(detail)
+  }
+}
+
+function AuditTailSection({ data }: { data: AuditTailRow[] }) {
+  return (
+    <Panel title="Model & export activity">
+      <table
+        className="w-full border-collapse text-left"
+        data-testid="audit-tail-table"
+      >
+        <caption className="sr-only">Model and export audit tail</caption>
+        <thead>
+          <tr className="border-b border-steel text-text-muted">
+            <th scope="col" className="py-1.5 pr-4 font-sans font-normal">
+              At
+            </th>
+            <th scope="col" className="py-1.5 pr-4 font-sans font-normal">
+              User
+            </th>
+            <th scope="col" className="py-1.5 pr-4 font-sans font-normal">
+              Action
+            </th>
+            <th scope="col" className="py-1.5 font-sans font-normal">
+              Detail
+            </th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums font-mono text-text-primary">
+          {data.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="py-1.5 text-text-muted">
+                No model or export activity
+              </td>
+            </tr>
+          ) : (
+            data.map((row, i) => (
+              <tr
+                key={`${row.at ?? 'none'}-${row.action}-${i}`}
+                className="border-b border-steel last:border-0"
+              >
+                <td className="py-1.5 pr-4">{row.at ?? '—'}</td>
+                <td className="py-1.5 pr-4">{row.username}</td>
+                <td className="py-1.5 pr-4">{row.action}</td>
+                <td className="max-w-md truncate py-1.5 text-xs text-text-muted">
+                  {formatDetail(row.detail ?? {})}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </Panel>
+  )
+}
+
 function formatGeneratedAt(iso: string): string {
   try {
     return new Date(iso).toLocaleString()
@@ -425,6 +485,7 @@ export function DataHealthPage() {
           <ExtractionSection data={data.extraction} />
           <EmbeddingsSection data={data.embeddings} />
           <ImportsSection data={data.imports} />
+          <AuditTailSection data={data.audit_tail ?? []} />
         </div>
       ) : null}
     </div>

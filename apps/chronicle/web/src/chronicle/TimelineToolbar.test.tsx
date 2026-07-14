@@ -111,4 +111,62 @@ describe('TimelineToolbar', () => {
       /Alt\+double-click/i,
     )
   })
+
+  it('Compare button dispatches onCompare', () => {
+    const onCompare = vi.fn()
+    render(
+      <TimelineToolbar
+        viewport={viewport}
+        unit="month"
+        brush={null}
+        viewMode="canvas"
+        onZoomIn={() => {}}
+        onZoomOut={() => {}}
+        onFitAll={() => {}}
+        onZoomToSelection={() => {}}
+        onClearSelection={() => {}}
+        onToggleViewMode={() => {}}
+        onCompare={onCompare}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('compare-btn'))
+    expect(onCompare).toHaveBeenCalledTimes(1)
+  })
+
+  it('Compare button disabled without onCompare', () => {
+    render(
+      <TimelineToolbar
+        viewport={viewport}
+        unit="month"
+        brush={null}
+        viewMode="canvas"
+        onZoomIn={() => {}}
+        onZoomOut={() => {}}
+        onFitAll={() => {}}
+        onZoomToSelection={() => {}}
+        onClearSelection={() => {}}
+        onToggleViewMode={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('compare-btn')).toBeDisabled()
+  })
+
+  it('documents Shift+C compare in toolbar hint', () => {
+    render(
+      <TimelineToolbar
+        viewport={viewport}
+        unit="month"
+        brush={null}
+        viewMode="canvas"
+        onZoomIn={() => {}}
+        onZoomOut={() => {}}
+        onFitAll={() => {}}
+        onZoomToSelection={() => {}}
+        onClearSelection={() => {}}
+        onToggleViewMode={() => {}}
+        onCompare={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('toolbar-focus-hint')).toHaveTextContent(/Shift\+C/)
+  })
 })

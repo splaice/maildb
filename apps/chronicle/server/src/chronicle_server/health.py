@@ -29,6 +29,10 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+_AUDIT_TAIL_ACTIONS = ("ask", "events_generate", "workspace_export", "download")
+_AUDIT_TAIL_LIMIT = 25
+
+
 def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
     """Read-only archive health aggregates over existing maildb tables."""
     summary = get_archive_summary(pool)
@@ -94,6 +98,20 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
             """
         ).fetchone()
 
+        audit_rows = conn.execute(
+            """
+            SELECT at, username, action, detail
+              FROM app_audit
+             WHERE action = ANY(%(actions)s)
+             ORDER BY at DESC
+             LIMIT %(limit)s
+            """,
+            {
+                "actions": list(_AUDIT_TAIL_ACTIONS),
+                "limit": _AUDIT_TAIL_LIMIT,
+            },
+        ).fetchall()
+
     assert threading_row is not None
     assert chunk_emb_row is not None
 
@@ -108,6 +126,16 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
             "messages_skipped": rec.messages_skipped,
         }
         for rec in import_records
+    ]
+
+    audit_tail = [
+        {
+            "at": _iso(r[0]),
+            "username": r[1],
+            "action": r[2],
+            "detail": r[3] if isinstance(r[3], dict) else {},
+        }
+        for r in audit_rows
     ]
 
     return {
@@ -146,6 +174,7 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
             },
         },
         "imports": imports,
+        "audit_tail": audit_tail,
         "generated_at": datetime.now(UTC).isoformat(),
     }
 

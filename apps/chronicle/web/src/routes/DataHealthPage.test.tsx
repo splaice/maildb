@@ -61,6 +61,20 @@ const mockHealth: ArchiveHealth = {
       messages_skipped: 10,
     },
   ],
+  audit_tail: [
+    {
+      at: '2024-12-01T14:00:00+00:00',
+      username: 'owner',
+      action: 'events_generate',
+      detail: { bursts: 3, created: 1, model: 'llama3.2' },
+    },
+    {
+      at: '2024-12-01T13:00:00+00:00',
+      username: 'owner',
+      action: 'ask',
+      detail: { status: 'complete' },
+    },
+  ],
   generated_at: '2024-12-01T15:30:00+00:00',
 }
 
@@ -97,6 +111,9 @@ describe('DataHealthPage', () => {
     expect(screen.getByRole('heading', { name: 'Extraction' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Embeddings' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Recent imports' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Model & export activity' }),
+    ).toBeInTheDocument()
 
     expect(
       screen.getByText('unsupported format: application/octet-stream'),
@@ -110,6 +127,11 @@ describe('DataHealthPage', () => {
     expect(screen.getByText('1,280,000')).toBeInTheDocument()
     expect(screen.getByText('Attachment chunks')).toBeInTheDocument()
     expect(screen.getByText('90,000')).toBeInTheDocument()
+
+    // Audit tail table (sixth section)
+    expect(screen.getByTestId('audit-tail-table')).toBeInTheDocument()
+    expect(screen.getByText('events_generate')).toBeInTheDocument()
+    expect(screen.getByText('ask')).toBeInTheDocument()
   })
 
   it('shows Retry on error state', async () => {

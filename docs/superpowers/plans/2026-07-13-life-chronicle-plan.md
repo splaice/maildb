@@ -63,9 +63,17 @@ Tasks are cheap-coder-sized (≈ one focused PR or less). One PR per phase, one 
 | 2.5 | Files & Attachments: browser views, sandboxed preview (PDF/image/text), extraction status, duplicate groups (hash exists in schema) |
 | 2.6 | Workspaces v1: CRUD, pins, notes, notebook layout; Markdown/CSV/JSON manifest export |
 
-### Phase 3 — Chronicle intelligence (elaborate at start)
+### Phase 3 — Chronicle intelligence (PR: `cheap-coder/chronicle-phase-3`)
 
-Event schema (`app_events` + versions + claims + citations), generation job over scope fingerprints, event lanes, reconstruction view (claim-to-evidence matrix), confirm/edit/dismiss with no-clobber, focus narrative, compare mode.
+| Task | Scope |
+| --- | --- |
+| 3.1 | Events foundation: `app_events`/`app_event_versions`/`app_event_claims` tables (origin/status/time-precision per spec Table 15), analyst-event CRUD, events lane in buckets + diamond rendering, event inspector card |
+| 3.2 | Event generation: burst detection (set-based gap/volume heuristic) + gateway summarization into typed events with claims + `[S#]` citations; versioned regeneration that never clobbers analyst edits (AI-005); generation endpoint + Data Health visibility |
+| 3.3 | Reconstruction UI: claim-to-evidence matrix (direct/supported/conflicting/unresolved), confirm/edit/dismiss/regenerate status flows, dismissed-events list, conflict display with both source chains |
+| 3.4 | Compare mode: two-period aligned lanes / small multiples (§4.7 Table 16 periods rows), before/after event anchor, absolute/normalized toggle |
+| 3.5 | Acceptance: workflow A (reconstruct a decision) end-to-end; un-todo §4.10 criterion 4; event keyboard flows |
+
+**Phase 3 exit criterion (spec §20.1):** generated events are reviewable, evidence-backed, and versioned.
 
 ### Phase 4 — Secondary exploration (elaborate at start)
 
@@ -86,7 +94,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 3 (Chronicle intelligence) — elaborate task table, then 3.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 4 (secondary exploration) — elaborate task table, then 4.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -109,3 +117,9 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 2.2 NL interpret: whitelist extraction, contacts person resolution, origin chips | chronicle-phase-2-app | Approved; 171 server / 152 web tests |
 | 2026-07-13 | 2.5 files browser: sandboxed preview (magic+containment), duplicate groups | chronicle-phase-2-app | Approved; 180 server / 166 web tests |
 | 2026-07-13 | 2.6 workspaces v1: notebook blocks, optimistic concurrency, manifest exports | chronicle-phase-2-app | Approved; Phase 2 complete (188 server / 176 web tests) |
+| 2026-07-13 | Phase 2 PR #108 merged (15d19e3) | #108 | CI green |
+| 2026-07-13 | 3.1 events foundation: versioned schema, analyst CRUD, events lane, EventCard | chronicle-phase-3 | Approved; 199 server / 185 web tests |
+| 2026-07-13 | 3.2 event generation: burst detection, gateway extraction, no-clobber matrix | chronicle-phase-3 | Approved; 219 server / 189 web tests |
+| 2026-07-13 | 3.3 reconstruction: claim-evidence matrix, adopt/suggestions, stale checks, dismissed list | chronicle-phase-3 | Approved; 222 server / 203 web tests |
+| 2026-07-13 | 3.4 compare mode: aligned/small-multiples, normalize, event anchor | chronicle-phase-3 | Approved; 228 server / 238 web tests |
+| 2026-07-13 | 3.5 workflow A acceptance + criterion 4; keyboard glue | chronicle-phase-3 | Approved; Phase 3 complete (244 web tests, 0 todos) |

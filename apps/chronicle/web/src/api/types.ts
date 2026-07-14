@@ -95,13 +95,55 @@ export interface ImportHistoryRow {
   messages_skipped: number
 }
 
+/** Last 25 model/export audit rows (ask, events_generate, workspace_export, download). */
+export interface AuditTailRow {
+  at: string | null
+  username: string
+  action: string
+  detail: Record<string, unknown>
+}
+
 export interface ArchiveHealth {
   coverage: HealthCoverage
   threading: HealthThreading
   extraction: HealthExtraction
   embeddings: HealthEmbeddings
   imports: ImportHistoryRow[]
+  /** Model & export activity (spec §11.1 Audit). */
+  audit_tail?: AuditTailRow[]
   generated_at: string
+}
+
+/** POST /api/events/generate */
+
+export interface EventGenerateRequest {
+  scope?: QueryScope
+  viewport: ChronicleTimeRange
+}
+
+export interface EventGenerateResult {
+  bursts: number
+  created: number
+  superseded: number
+  suggested: number
+  skipped_unavailable: boolean
+}
+
+export interface EventGenerateUnavailable {
+  available: false
+}
+
+export type EventGenerateResponse = EventGenerateResult | EventGenerateUnavailable
+
+export function isEventGenerateUnavailable(
+  body: EventGenerateResponse,
+): body is EventGenerateUnavailable {
+  return (
+    body != null &&
+    typeof body === 'object' &&
+    'available' in body &&
+    (body as EventGenerateUnavailable).available === false
+  )
 }
 
 /** POST /api/chronicle/buckets */
@@ -149,8 +191,27 @@ export interface TopPeopleLane {
   contacts: TopPeopleContact[]
 }
 
-/** A bars-style lane is BucketPoint[]; top_people is nested contact series. */
-export type LaneData = BucketPoint[] | TopPeopleLane
+/** Sparse event diamond mark on the events lane. */
+export interface EventLaneMark {
+  event_id: string
+  title: string
+  time_start: string
+  time_end: string | null
+  time_precision: string
+  origin: string
+  event_type: string
+  status: string
+  evidence_strength: string | null
+}
+
+/** events lane payload (sparse diamonds, not bucket counts). */
+export interface EventsLane {
+  events: EventLaneMark[]
+  truncated: boolean
+}
+
+/** A bars-style lane is BucketPoint[]; top_people / events are nested objects. */
+export type LaneData = BucketPoint[] | TopPeopleLane | EventsLane
 
 export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLane {
   return (
@@ -161,8 +222,182 @@ export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLa
   )
 }
 
+export function isEventsLane(data: LaneData | undefined): data is EventsLane {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray((data as EventsLane).events)
+  )
+}
+
 export function isBucketSeries(data: LaneData | undefined): data is BucketPoint[] {
   return Array.isArray(data)
+}
+
+/** Event origin (Table 15). */
+export type EventOrigin = 'source' | 'imported' | 'automatic' | 'analyst'
+
+export type EventTimePrecision =
+  | 'year'
+  | 'quarter'
+  | 'month'
+  | 'week'
+  | 'day'
+  | 'hour'
+
+export type EventType =
+  | 'decision'
+  | 'meeting'
+  | 'travel'
+  | 'purchase'
+  | 'deadline'
+  | 'transition'
+  | 'document'
+  | 'communication'
+  | 'user_defined'
+
+export type EventStatus =
+  | 'unreviewed'
+  | 'confirmed'
+  | 'edited'
+  | 'dismissed'
+  | 'superseded'
+  | 'unresolved'
+
+export type ClaimStatus = 'direct' | 'supported' | 'conflicting' | 'unresolved'
+
+export interface EventCitation {
+  source_id: string
+  source_type: string
+  excerpt?: string | null
+  excerpt_hash?: string | null
+  location?: Record<string, unknown> | null
+  /** Hydrated display metadata */
+  date?: string | null
+  sender?: string | null
+  subject?: string | null
+}
+
+export interface EventClaim {
+  id: string
+  position: number
+  text: string
+  status: ClaimStatus | string
+  citations: EventCitation[]
+}
+
+export interface EventVersion {
+  version: number
+  author: string
+  title: string
+  summary: string | null
+  derivation: Record<string, unknown>
+  created_at?: string | null
+}
+
+/** Conflict row on GET /api/events/:id (claim statuses for UI conflict panel). */
+export interface EventConflict {
+  claim_position: number
+  statuses: string[]
+}
+
+export interface ChronicleEvent {
+  id: string
+  title: string
+  time_start: string
+  time_end: string | null
+  time_precision: EventTimePrecision | string
+  origin: EventOrigin | string
+  event_type: EventType | string
+  status: EventStatus | string
+  evidence_strength: string | null
+  scope_fingerprint?: string | null
+  current_version: number
+  created_at?: string | null
+  updated_at?: string | null
+  summary?: string | null
+  derivation?: Record<string, unknown>
+  version?: EventVersion | null
+  claims?: EventClaim[]
+  /** True when any version number is higher than current_version. */
+  has_suggestions?: boolean
+  /** Claims with conflicting status or source-overlap conflicts. */
+  conflicts?: EventConflict[]
+}
+
+/** One version row from GET /api/events/:id/versions. */
+export interface EventVersionDetail extends EventVersion {
+  claims: EventClaim[]
+  is_suggestion: boolean
+}
+
+/** GET /api/events/:id/versions */
+export interface EventVersionsResponse {
+  event_id: string
+  current_version: number
+  versions: EventVersionDetail[]
+}
+
+/** POST /api/events/:id/adopt/:version */
+export interface EventAdoptRequest {
+  current_version: number
+}
+
+/** POST /api/events/list */
+export interface EventListRequest {
+  scope?: QueryScope
+  viewport: ChronicleTimeRange
+  include_dismissed?: boolean
+  cursor?: string | null
+  limit?: number
+}
+
+export interface EventListResponse {
+  items: ChronicleEvent[]
+  next_cursor: string | null
+}
+
+/** GET /api/sources/:sid/context */
+export interface SourceContext {
+  id: string
+  start: number
+  end: number
+  excerpt: string
+  context_before: string
+  context_after: string
+  sha256: string
+  window: number
+}
+
+export interface EventCreateRequest {
+  title: string
+  time_start: string
+  time_end?: string | null
+  time_precision: EventTimePrecision | string
+  event_type: EventType | string
+  summary?: string | null
+  claims?: Array<{
+    text: string
+    citations?: string[]
+    status?: ClaimStatus | string
+  }>
+}
+
+export interface EventPatchRequest {
+  current_version: number
+  title?: string
+  time_start?: string
+  time_end?: string | null
+  time_precision?: EventTimePrecision | string
+  event_type?: EventType | string
+  summary?: string | null
+  claims?: Array<{
+    text: string
+    citations?: string[]
+    status?: ClaimStatus | string
+  }>
+  status?: EventStatus | string
 }
 
 export interface DensitySeries {
@@ -194,6 +429,41 @@ export interface ChronicleBuckets {
   density: DensitySeries
   extent: ChronicleExtent
   generated_at: string
+}
+
+/** POST /api/chronicle/compare */
+
+export interface ChronicleCompareRequest {
+  scope?: QueryScope
+  a: ChronicleTimeRange
+  b: ChronicleTimeRange
+  pixel_width?: number
+  lanes?: string[]
+}
+
+export interface ChronicleCompareSide {
+  viewport: ChronicleTimeRange
+  lanes: Record<string, LaneData>
+}
+
+export interface ChronicleCompareTotalsSide {
+  messages: number
+  attachments: number
+}
+
+export interface ChronicleCompareTotals {
+  a: ChronicleCompareTotalsSide
+  b: ChronicleCompareTotalsSide
+}
+
+/** Response body for POST /api/chronicle/compare */
+export interface ChronicleCompare {
+  unit: string
+  aligned: boolean
+  a: ChronicleCompareSide
+  b: ChronicleCompareSide
+  totals: ChronicleCompareTotals
+  scope_fingerprint: string
 }
 
 /** POST /api/sources/list */

@@ -25,12 +25,13 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["chronicle"])
 
 VALID_UNITS: tuple[str, ...] = ("hour", "day", "week", "month", "quarter", "year")
-VALID_LANES = frozenset({"messages", "attachments", "people", "top_people"})
+VALID_LANES = frozenset({"messages", "attachments", "people", "top_people", "events"})
 MAX_BUCKETS = 2000
 MIN_PIXEL_WIDTH = 320
 MAX_PIXEL_WIDTH = 8192
 DENSITY_PIXEL_WIDTH = 1600
 TOP_PEOPLE_LIMIT = 8
+EVENTS_LANE_CAP = 500
 
 # Approximate unit widths for bucket-count estimation (pixel-width rule).
 _UNIT_SECONDS: dict[str, float] = {
@@ -91,6 +92,27 @@ class TopPeopleLaneData(BaseModel):
     contacts: list[TopPeopleContactSeries]
 
 
+class EventLaneMark(BaseModel):
+    """Sparse event diamond mark for the events lane (not a bucket count)."""
+
+    event_id: str
+    title: str
+    time_start: str
+    time_end: str | None = None
+    time_precision: str
+    origin: str
+    event_type: str
+    status: str
+    evidence_strength: str | None = None
+
+
+class EventsLaneData(BaseModel):
+    """events lane: individual marks (sparse diamonds), capped per viewport."""
+
+    events: list[EventLaneMark]
+    truncated: bool = False
+
+
 class DensitySeries(BaseModel):
     unit: str
     buckets: list[BucketPoint]
@@ -120,17 +142,70 @@ class BucketsRequest(BaseModel):
         return value
 
 
+LanePayload = list[BucketPoint] | TopPeopleLaneData | EventsLaneData
+
+
 class BucketsResponse(BaseModel):
     scope_fingerprint: str
     aggregation: str
     unit: str
     viewport: TimeRange
-    lanes: dict[str, list[BucketPoint] | TopPeopleLaneData]
+    lanes: dict[str, LanePayload]
     density: DensitySeries
     extent: ExtentRange
     generated_at: str
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class CompareRequest(BaseModel):
+    """Two-range comparison request (spec §4.7 Table 16)."""
+
+    scope: QueryScope = Field(default_factory=QueryScope)
+    a: TimeRange
+    b: TimeRange
+    pixel_width: int = 920
+    lanes: list[str] = Field(default_factory=lambda: ["messages", "attachments", "people"])
+
+    @field_validator("lanes")
+    @classmethod
+    def _check_lanes(cls, value: list[str]) -> list[str]:
+        unknown = [lane for lane in value if lane not in VALID_LANES]
+        if unknown:
+            raise ValueError(f"lanes must be subset of {sorted(VALID_LANES)}; unknown: {unknown}")
+        return value
+
+
+class CompareSide(BaseModel):
+    viewport: TimeRange
+    lanes: dict[str, LanePayload]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CompareTotalsSide(BaseModel):
+    messages: int
+    attachments: int
+
+
+class CompareTotals(BaseModel):
+    a: CompareTotalsSide
+    b: CompareTotalsSide
+
+
+class CompareResponse(BaseModel):
+    unit: str
+    aligned: bool
+    a: CompareSide
+    b: CompareSide
+    totals: CompareTotals
+    scope_fingerprint: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+# Align durations when relative difference is within this fraction.
+ALIGNED_DURATION_TOLERANCE = 0.05
 
 
 # --- pure helpers ---
@@ -493,6 +568,67 @@ _LANE_HANDLERS = {
 }
 
 
+def _events_lane(
+    pool: ConnectionPool,
+    *,
+    viewport_from: str,
+    viewport_to: str,
+    scope: QueryScope,
+) -> EventsLaneData:
+    """Individual events for the viewport (NOT bucket counts); dismissed excluded.
+
+    Set-based single query. Cap EVENTS_LANE_CAP with truncated flag.
+    Scope date only when present (person/topic scoping arrives later).
+    Intersection: time_start < to AND coalesce(time_end, time_start) >= from.
+    """
+    conditions = [
+        "time_start < %(viewport_to)s",
+        "coalesce(time_end, time_start) >= %(viewport_from)s",
+        "status <> 'dismissed'",
+    ]
+    params: dict[str, Any] = {
+        "viewport_from": viewport_from,
+        "viewport_to": viewport_to,
+        "cap": EVENTS_LANE_CAP + 1,
+    }
+    if scope.date is not None:
+        if scope.date.from_ is not None:
+            conditions.append("time_start >= %(scope_from)s")
+            params["scope_from"] = scope.date.from_
+        if scope.date.to is not None:
+            conditions.append("time_start < %(scope_to)s")
+            params["scope_to"] = scope.date.to
+
+    sql = f"""
+        SELECT id, title, time_start, time_end, time_precision, origin,
+               event_type, status, evidence_strength
+          FROM app_events
+         WHERE {" AND ".join(conditions)}
+         ORDER BY time_start ASC, id ASC
+         LIMIT %(cap)s
+    """
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    truncated = len(rows) > EVENTS_LANE_CAP
+    marks: list[EventLaneMark] = []
+    for row in rows[:EVENTS_LANE_CAP]:
+        marks.append(
+            EventLaneMark(
+                event_id=str(row[0]),
+                title=str(row[1]),
+                time_start=_iso_utc(row[2]) or "",
+                time_end=_iso_utc(row[3]),
+                time_precision=str(row[4]),
+                origin=str(row[5]),
+                event_type=str(row[6]),
+                status=str(row[7]),
+                evidence_strength=str(row[8]) if row[8] is not None else None,
+            )
+        )
+    return EventsLaneData(events=marks, truncated=truncated)
+
+
 def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
     """Compute lane aggregates, density series, and scope extent (read-only)."""
     pixel_width = clamp_pixel_width(body.pixel_width)
@@ -526,7 +662,7 @@ def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
     viewport_from_s = body.viewport.from_
     viewport_to_s = body.viewport.to
 
-    lane_data: dict[str, list[BucketPoint] | TopPeopleLaneData] = {}
+    lane_data: dict[str, LanePayload] = {}
     for lane in body.lanes:
         if lane == "top_people":
             lane_data[lane] = _top_people_buckets(
@@ -536,6 +672,13 @@ def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
                 viewport_to=viewport_to_s,
                 scope_conds=scope_conds,
                 scope_params=scope_params,
+            )
+        elif lane == "events":
+            lane_data[lane] = _events_lane(
+                pool,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope=body.scope,
             )
         else:
             handler = _LANE_HANDLERS[lane]
@@ -600,3 +743,171 @@ def chronicle_buckets(
     """Time-bucketed lane aggregates for a working-set scope and viewport."""
     pool: ConnectionPool = request.app.state.pool
     return get_buckets(pool, body)
+
+
+def durations_aligned(dur_a: timedelta, dur_b: timedelta) -> bool:
+    """True when the two durations differ by at most 5% of the longer one."""
+    a = abs(dur_a.total_seconds())
+    b = abs(dur_b.total_seconds())
+    longer = max(a, b)
+    if longer <= 0:
+        return True
+    return abs(a - b) / longer <= ALIGNED_DURATION_TOLERANCE
+
+
+def _lane_total(points: list[BucketPoint]) -> int:
+    return sum(p.count for p in points)
+
+
+def _fetch_lanes_for_viewport(
+    pool: ConnectionPool,
+    *,
+    unit: str,
+    viewport: TimeRange,
+    lanes: list[str],
+    scope: QueryScope,
+    scope_conds: list[str],
+    scope_params: dict[str, Any],
+) -> dict[str, LanePayload]:
+    """Run existing per-lane helpers for one viewport (no duplicated SQL)."""
+    viewport_from_s = viewport.from_
+    viewport_to_s = viewport.to
+    lane_data: dict[str, LanePayload] = {}
+    for lane in lanes:
+        if lane == "top_people":
+            lane_data[lane] = _top_people_buckets(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
+        elif lane == "events":
+            lane_data[lane] = _events_lane(
+                pool,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope=scope,
+            )
+        else:
+            handler = _LANE_HANDLERS[lane]
+            lane_data[lane] = handler(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
+    return lane_data
+
+
+def _validate_range_bucket_ceiling(duration: timedelta, unit: str) -> None:
+    """Raise 422 when *unit* would exceed the per-range bucket ceiling."""
+    if estimated_bucket_count(duration, unit) <= MAX_BUCKETS:
+        return
+    smallest_valid = "year"
+    for candidate in VALID_UNITS:
+        if estimated_bucket_count(duration, candidate) <= MAX_BUCKETS:
+            smallest_valid = candidate
+            break
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "aggregation_exceeds_max_buckets",
+            "max_buckets": MAX_BUCKETS,
+            "requested": unit,
+            "smallest_valid_unit": smallest_valid,
+        },
+    )
+
+
+def get_compare(pool: ConnectionPool, body: CompareRequest) -> CompareResponse:
+    """Compare two date ranges with a shared aggregation unit."""
+    pixel_width = clamp_pixel_width(body.pixel_width)
+    a_from = parse_iso_datetime(body.a.from_)
+    a_to = parse_iso_datetime(body.a.to)
+    b_from = parse_iso_datetime(body.b.from_)
+    b_to = parse_iso_datetime(body.b.to)
+
+    if a_to <= a_from:
+        raise HTTPException(
+            status_code=422,
+            detail="a.to must be after a.from",
+        )
+    if b_to <= b_from:
+        raise HTTPException(
+            status_code=422,
+            detail="b.to must be after b.from",
+        )
+
+    dur_a = a_to - a_from
+    dur_b = b_to - b_from
+    longer = dur_a if dur_a >= dur_b else dur_b
+    # Each panel gets half the canvas width for aggregation choice.
+    half_width = max(MIN_PIXEL_WIDTH, pixel_width // 2)
+    unit = choose_aggregation(longer, half_width)
+
+    # Bucket ceiling applies per range with the shared unit.
+    _validate_range_bucket_ceiling(dur_a, unit)
+    _validate_range_bucket_ceiling(dur_b, unit)
+
+    scope_conds, scope_params = scope_filters(body.scope)
+    lanes_a = _fetch_lanes_for_viewport(
+        pool,
+        unit=unit,
+        viewport=body.a,
+        lanes=body.lanes,
+        scope=body.scope,
+        scope_conds=scope_conds,
+        scope_params=scope_params,
+    )
+    lanes_b = _fetch_lanes_for_viewport(
+        pool,
+        unit=unit,
+        viewport=body.b,
+        lanes=body.lanes,
+        scope=body.scope,
+        scope_conds=scope_conds,
+        scope_params=scope_params,
+    )
+
+    def side_totals(lanes: dict[str, LanePayload]) -> CompareTotalsSide:
+        messages = lanes.get("messages")
+        attachments = lanes.get("attachments")
+        msg_n = _lane_total(messages) if isinstance(messages, list) else 0
+        att_n = _lane_total(attachments) if isinstance(attachments, list) else 0
+        return CompareTotalsSide(messages=msg_n, attachments=att_n)
+
+    fingerprint = scope_fingerprint(body.scope)
+    aligned = durations_aligned(dur_a, dur_b)
+
+    logger.info(
+        "chronicle_compare",
+        unit=unit,
+        aligned=aligned,
+        lanes=list(body.lanes),
+        pixel_width=pixel_width,
+        scope_fingerprint=fingerprint,
+    )
+
+    return CompareResponse(
+        unit=unit,
+        aligned=aligned,
+        a=CompareSide(viewport=body.a, lanes=lanes_a),
+        b=CompareSide(viewport=body.b, lanes=lanes_b),
+        totals=CompareTotals(a=side_totals(lanes_a), b=side_totals(lanes_b)),
+        scope_fingerprint=fingerprint,
+    )
+
+
+@router.post("/compare", response_model=CompareResponse)
+def chronicle_compare(
+    body: CompareRequest,
+    request: Request,
+    _user: str = Depends(require_user),
+) -> CompareResponse:
+    """Aligned / small-multiple comparison datasets for two date ranges."""
+    pool: ConnectionPool = request.app.state.pool
+    return get_compare(pool, body)

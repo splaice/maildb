@@ -34,6 +34,11 @@ export interface WorkingSetState {
    * Analytical intent on enter/exit.
    */
   focus: Viewport | null
+  /**
+   * Compare mode: two date ranges (URL params `ca`/`cb`). Analytical on
+   * enter/exit/range update. Null when not comparing.
+   */
+  compare: { a: Viewport; b: Viewport } | null
   /** Timeline / inspector selection; URL param `sel`; transient intent. */
   selection: Selection
   /**
@@ -67,6 +72,12 @@ export interface WorkingSetState {
    * exit focus (always temporary until this action). Analytical.
    */
   applyFocusAsScopeDate: () => void
+  /** Enter or update compare mode with two ranges; clears brush; analytical. */
+  setCompare: (compare: { a: Viewport; b: Viewport }) => void
+  /** Update one side of an active compare (brush re-fetch); analytical. */
+  setCompareSide: (side: 'a' | 'b', range: Viewport) => void
+  /** Exit compare mode; analytical (URL drops ca/cb; Back is equivalent). */
+  exitCompare: () => void
   setScopeDate: (date: QueryScopeDate | null) => void
   addMailbox: (mailbox: string) => void
   removeMailbox: (mailbox: string) => void
@@ -106,6 +117,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   view: DEFAULT_URL_STATE.view,
   brush: null,
   focus: null,
+  compare: null,
   selection: DEFAULT_URL_STATE.selection,
   priorBucket: null,
   resultCount: null,
@@ -160,6 +172,42 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
       focus: null,
       historyIntent: 'analytical',
     })
+  },
+
+  setCompare: (compare) => {
+    if (
+      !compare ||
+      !(compare.a.toMs > compare.a.fromMs) ||
+      !(compare.b.toMs > compare.b.fromMs)
+    ) {
+      return
+    }
+    set({
+      compare: {
+        a: { fromMs: compare.a.fromMs, toMs: compare.a.toMs },
+        b: { fromMs: compare.b.fromMs, toMs: compare.b.toMs },
+      },
+      brush: null,
+      historyIntent: 'analytical',
+    })
+  },
+
+  setCompareSide: (side, range) => {
+    const current = get().compare
+    if (!current || !(range.toMs > range.fromMs)) return
+    set({
+      compare: {
+        ...current,
+        [side]: { fromMs: range.fromMs, toMs: range.toMs },
+      },
+      brush: null,
+      historyIntent: 'analytical',
+    })
+  },
+
+  exitCompare: () => {
+    if (get().compare == null) return
+    set({ compare: null, historyIntent: 'analytical' })
   },
 
   setScopeDate: (date) => {
@@ -323,6 +371,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
         decoded.selection?.kind === 'bucket' ? decoded.selection : get().priorBucket,
       lanes: resolveLanes(decoded.lanes),
       focus: decoded.focus ?? null,
+      compare: decoded.compare ?? null,
       query: decoded.query ?? '',
       mode: decoded.mode ?? 'hybrid',
       grouping: decoded.grouping ?? 'none',
@@ -340,6 +389,7 @@ export function resetWorkingSetStore(): void {
     view: 'canvas',
     brush: null,
     focus: null,
+    compare: null,
     selection: null,
     priorBucket: null,
     resultCount: null,

@@ -19,6 +19,7 @@ export const ALL_LANE_KEYS = [
   'attachments',
   'people',
   'top_people',
+  'events',
 ] as const
 
 export type LaneKey = (typeof ALL_LANE_KEYS)[number]
@@ -54,6 +55,7 @@ export type Selection =
   | { kind: 'bucket'; bucketIso: string; lane: string }
   | { kind: 'message'; sid: string }
   | { kind: 'attachment'; sid: string }
+  | { kind: 'event'; eventId: string }
   | null
 
 /** Serializable working-set slice for the URL codec. */
@@ -70,6 +72,12 @@ export interface UrlWorkingState {
    * older call sites remain valid; decode always returns Viewport | null.
    */
   focus?: Viewport | null
+  /**
+   * Compare mode ranges (URL params `ca`/`cb` as `from..to` ISO pairs).
+   * Optional on encode so older call sites remain valid; decode always
+   * returns `{ a, b } | null`.
+   */
+  compare?: { a: Viewport; b: Viewport } | null
   /** Research query text (URL param `q`). */
   query?: string
   /** Research retrieval mode (URL param `mode`); default hybrid. */
@@ -93,6 +101,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   selection: null,
   lanes: null,
   focus: null,
+  compare: null,
   query: '',
   mode: 'hybrid',
   grouping: 'none',
@@ -105,6 +114,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
  * - bucket: `b:<lane>:<bucketIso>`
  * - message: `m:<sid>`
  * - attachment: `a:<sid>`
+ * - event: `e:<event_id>`
  */
 export function encodeSelection(selection: Selection): string | null {
   if (!selection) return null
@@ -119,6 +129,10 @@ export function encodeSelection(selection: Selection): string | null {
   if (selection.kind === 'attachment') {
     if (!selection.sid) return null
     return `a:${selection.sid}`
+  }
+  if (selection.kind === 'event') {
+    if (!selection.eventId) return null
+    return `e:${selection.eventId}`
   }
   return null
 }
@@ -150,6 +164,12 @@ export function decodeSelection(raw: string | null): Selection {
     if (!sid || !/^att_[A-Za-z0-9_-]+$/.test(sid)) return null
     return { kind: 'attachment', sid }
   }
+  if (raw.startsWith('e:')) {
+    const eventId = raw.slice(2)
+    // UUID (with or without hyphens) or any non-empty opaque id.
+    if (!eventId || !/^[A-Za-z0-9_-]+$/.test(eventId)) return null
+    return { kind: 'event', eventId }
+  }
   return null
 }
 
@@ -171,6 +191,28 @@ function parseViewportIso(value: string | null): number | null {
   const ms = Date.parse(value)
   if (!Number.isFinite(ms)) return null
   return ms
+}
+
+/**
+ * Encode a compare range as `from..to` ISO pair (second precision).
+ * Returns null when the range is invalid.
+ */
+export function encodeCompareRange(vp: Viewport): string | null {
+  if (!(vp.toMs > vp.fromMs)) return null
+  return `${toIsoSeconds(vp.fromMs)}..${toIsoSeconds(vp.toMs)}`
+}
+
+/**
+ * Decode `ca`/`cb` param (`from..to` ISO). Total: bad values → null.
+ */
+export function decodeCompareRange(raw: string | null): Viewport | null {
+  if (!raw) return null
+  const sep = raw.indexOf('..')
+  if (sep <= 0) return null
+  const fromMs = parseViewportIso(raw.slice(0, sep))
+  const toMs = parseViewportIso(raw.slice(sep + 2))
+  if (fromMs == null || toMs == null || !(toMs > fromMs)) return null
+  return { fromMs, toMs }
 }
 
 function parseCsv(value: string | null): string[] {
@@ -298,6 +340,29 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
     params.set('ft', toIsoSeconds(focus.toMs))
   }
 
+  // Compare ranges (analytical): ca/cb as from..to ISO pairs.
+  // When omitted from state, preserve from current location (like filesView).
+  let compare = state.compare
+  if (typeof window !== 'undefined' && compare === undefined) {
+    try {
+      const current = new URLSearchParams(window.location.search)
+      const a = decodeCompareRange(current.get('ca'))
+      const b = decodeCompareRange(current.get('cb'))
+      if (a && b) compare = { a, b }
+      else compare = null
+    } catch {
+      compare = null
+    }
+  }
+  if (compare && compare.a && compare.b) {
+    const ca = encodeCompareRange(compare.a)
+    const cb = encodeCompareRange(compare.b)
+    if (ca && cb) {
+      params.set('ca', ca)
+      params.set('cb', cb)
+    }
+  }
+
   // Research Desk: q / mode / grp (omit defaults)
   const q = (query ?? '').trim()
   if (q) params.set('q', q)
@@ -366,6 +431,11 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     focus = { fromMs: ff, toMs: ft }
   }
 
+  const ca = decodeCompareRange(params.get('ca'))
+  const cb = decodeCompareRange(params.get('cb'))
+  const compare =
+    ca && cb ? { a: ca, b: cb } : null
+
   const rawMode = params.get('mode')
   const mode: SearchMode =
     rawMode && SEARCH_MODES.has(rawMode) ? (rawMode as SearchMode) : 'hybrid'
@@ -388,6 +458,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     selection: decodeSelection(params.get('sel')),
     lanes: parseLanesParam(params.get('ln')),
     focus,
+    compare,
     query: params.get('q') ?? '',
     mode,
     grouping,

@@ -9,21 +9,28 @@ import {
   type PointerEvent,
 } from 'react'
 
-import type { BucketPoint, LaneData } from '../api/types'
+import type { BucketPoint, EventLaneMark, LaneData } from '../api/types'
 import { isTopPeopleLane } from '../api/types'
+import { CreateEventFromBrush } from '../events/CreateEventFromBrush'
+import { useWorkingSetStore } from '../workingset/store'
 import {
   AXIS_H,
   BAR_LANE_COLORS,
+  EVENT_AMBER,
   LANE_GAP,
   LANE_H,
   LANE_LABEL_W,
+  MARKS_LANE_H,
   MULTIROW_HEADER_H,
   MULTIROW_ROW_H,
   PEOPLE_CYAN,
   barsPoints,
   canvasHeightForLanes,
+  eventPositionMs,
+  eventsMarks,
   laneAtY as laneAtYFromLayout,
   layoutLanes,
+  originGlyph,
   type LaneSpec,
 } from './laneModel'
 import {
@@ -62,16 +69,52 @@ export interface TimelineCanvasProps {
   brush: Viewport | null
   /** Currently selected bucket (for highlight outline). */
   selectedBucket?: { bucketIso: string; lane: string } | null
+  /** Currently selected event id (events lane diamond highlight). */
+  selectedEventId?: string | null
   onViewportChange: (vp: Viewport) => void
   onBrushChange: (brush: Viewport | null) => void
   onWidthChange: (width: number) => void
   /** Fired when a bar/mark is clicked (lane + bucket ISO). */
   onSelectBucket?: (bucketIso: string, laneName: string) => void
+  /** Fired when an event diamond is clicked. */
+  onSelectEvent?: (eventId: string) => void
   /**
    * Double-click a mark/bucket enters focus on that bucket's span.
    * Alt+double-click keeps zoom ×0.25 (documented in toolbar hint).
    */
   onFocusBucket?: (period: Viewport) => void
+}
+
+const DIAMOND_HALF = 6
+const EVENT_HIT_R = 10
+
+/**
+ * Hit-test event diamonds. Position uses eventPositionMs (day-floor for
+ * date-only precision). Returns event_id or null.
+ * Exported for unit tests.
+ */
+export function eventAtX(
+  plotX: number,
+  viewport: Viewport,
+  plotW: number,
+  marks: EventLaneMark[],
+): string | null {
+  if (plotW <= 0 || marks.length === 0) return null
+  let hit: string | null = null
+  let bestDist = Infinity
+  for (const m of marks) {
+    // Dismissed never rendered / hit-tested (server already excludes; belt).
+    if (m.status === 'dismissed') continue
+    const t = eventPositionMs(m.time_start, m.time_precision)
+    if (t == null) continue
+    const x = xForTime(t, viewport, plotW)
+    const dist = Math.abs(plotX - x)
+    if (dist <= EVENT_HIT_R && dist < bestDist) {
+      bestDist = dist
+      hit = m.event_id
+    }
+  }
+  return hit
 }
 
 /**
@@ -187,6 +230,10 @@ function buildAriaLabel(
       const n = sumCounts(barsPoints(laneData, spec.key)).toLocaleString()
       return `${n} ${spec.label.toLowerCase()}`
     }
+    if (spec.kind === 'marks') {
+      const n = eventsMarks(laneData).length
+      return `${n} events`
+    }
     const tp = laneData[spec.key]
     const n = isTopPeopleLane(tp) ? tp.contacts.length : 0
     return `${n} contacts`
@@ -207,12 +254,20 @@ export function TimelineCanvas({
   isFetching,
   brush,
   selectedBucket = null,
+  selectedEventId = null,
   onViewportChange,
   onBrushChange,
   onWidthChange,
   onSelectBucket,
+  onSelectEvent,
   onFocusBucket,
 }: TimelineCanvasProps) {
+  const setSelection = useWorkingSetStore((s) => s.setSelection)
+  const storeSelection = useWorkingSetStore((s) => s.selection)
+  // Prefer explicit prop; fall back to store so selection works without page wiring.
+  const resolvedSelectedEventId =
+    selectedEventId ??
+    (storeSelection?.kind === 'event' ? storeSelection.eventId : null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const wheelHandlerRef = useRef<(e: globalThis.WheelEvent) => void>(() => {})
 
@@ -341,6 +396,65 @@ export function TimelineCanvas({
             ctx.strokeRect(x + 0.5, barY + 0.5, Math.max(0, bw - 1), Math.max(0, barH - 1))
           }
         }
+      } else if (spec.kind === 'marks') {
+        // Events: amber diamonds at time_start (day-floored for date-only precision).
+        // Span events: thin amber line from start→end with diamond at start.
+        // Origin glyph is text (A/⚙/S/I) — never color-only.
+        const marks = eventsMarks(laneData)
+        ctx.fillStyle = COLORS.muted
+        ctx.font = '10px Inter, system-ui, sans-serif'
+        ctx.textBaseline = 'top'
+        ctx.fillText(spec.label, 4, top + 4)
+
+        const cy = top + MARKS_LANE_H / 2 + 4
+        for (const m of marks) {
+          if (m.status === 'dismissed') continue
+          const tStart = eventPositionMs(m.time_start, m.time_precision)
+          if (tStart == null) continue
+          const x0 = LANE_LABEL_W + xForTime(tStart, viewport, plotW)
+
+          if (m.time_end) {
+            const tEnd = eventPositionMs(m.time_end, m.time_precision)
+            if (tEnd != null && tEnd > tStart) {
+              const x1 = LANE_LABEL_W + xForTime(tEnd, viewport, plotW)
+              ctx.strokeStyle = EVENT_AMBER
+              ctx.globalAlpha = 0.7
+              ctx.lineWidth = 2
+              ctx.beginPath()
+              ctx.moveTo(x0, cy)
+              ctx.lineTo(x1, cy)
+              ctx.stroke()
+              ctx.globalAlpha = 1
+              ctx.lineWidth = 1
+            }
+          }
+
+          // Diamond
+          ctx.fillStyle = EVENT_AMBER
+          ctx.beginPath()
+          ctx.moveTo(x0, cy - DIAMOND_HALF)
+          ctx.lineTo(x0 + DIAMOND_HALF, cy)
+          ctx.lineTo(x0, cy + DIAMOND_HALF)
+          ctx.lineTo(x0 - DIAMOND_HALF, cy)
+          ctx.closePath()
+          ctx.fill()
+
+          if (resolvedSelectedEventId && resolvedSelectedEventId === m.event_id) {
+            ctx.strokeStyle = COLORS.action
+            ctx.lineWidth = 1.5
+            ctx.stroke()
+            ctx.lineWidth = 1
+          }
+
+          // Origin glyph (1-char, text not color-only)
+          const glyph = originGlyph(m.origin)
+          ctx.fillStyle = COLORS.primary
+          ctx.font = '9px Inter, system-ui, sans-serif'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(glyph, x0, cy)
+          ctx.textAlign = 'start'
+        }
       } else {
         // multirow: top_people activity spans
         const data = laneData[spec.key]
@@ -420,6 +534,7 @@ export function TimelineCanvas({
     let total = 0
     for (const spec of lanes) {
       if (spec.kind === 'bars') total += sumCounts(barsPoints(laneData, spec.key))
+      else if (spec.kind === 'marks') total += eventsMarks(laneData).length
       else {
         const tp = laneData[spec.key]
         if (isTopPeopleLane(tp)) {
@@ -479,6 +594,7 @@ export function TimelineCanvas({
     lanes,
     layout,
     selectedBucket,
+    resolvedSelectedEventId,
     unit,
     viewport,
   ])
@@ -584,10 +700,10 @@ export function TimelineCanvas({
       return
     }
 
-    // Bar / multirow mark click hit-test
+    // Bar / multirow / event diamond click hit-test
     const pending = clickRef.current
     clickRef.current = null
-    if (!pending || !onSelectBucket) return
+    if (!pending) return
     const rect = wrapRef.current?.getBoundingClientRect()
     if (!rect) return
     const localX = e.clientX - rect.left
@@ -601,6 +717,18 @@ export function TimelineCanvas({
     if (plotX < 0) return
     const unitTyped = parseUnit(unit)
 
+    // Events lane: diamond hit → e:<event_id> selection
+    if (hitKey === 'events') {
+      const marks = eventsMarks(laneData)
+      const eventId = eventAtX(plotX, viewport, pw, marks)
+      if (eventId) {
+        if (onSelectEvent) onSelectEvent(eventId)
+        else setSelection({ kind: 'event', eventId })
+      }
+      return
+    }
+
+    if (!onSelectBucket) return
     let points: BucketPoint[] = []
     if (hitKey.startsWith('top_people:')) {
       const contactId = hitKey.slice('top_people:'.length)
@@ -673,26 +801,31 @@ export function TimelineCanvas({
   }
 
   return (
-    <div
-      ref={wrapRef}
-      className="relative w-full touch-none overflow-hidden rounded-lg border border-steel"
-      style={{ height: cssSize.h }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onDoubleClick={onDoubleClick}
-      onKeyDown={onKeyDown}
-      tabIndex={0}
-      data-testid="timeline-canvas-wrap"
-      data-lane-count={lanes.length}
-      data-canvas-h={cssSize.h}
-    >
-      <canvas
-        ref={canvasRef}
-        role="img"
-        aria-label={buildAriaLabel(viewport, lanes, laneData)}
-        data-testid="timeline-canvas"
-      />
+    <div className="space-y-1" data-testid="timeline-canvas-stack">
+      {brush && brush.toMs > brush.fromMs ? (
+        <CreateEventFromBrush brush={brush} onCreated={() => onBrushChange(null)} />
+      ) : null}
+      <div
+        ref={wrapRef}
+        className="relative w-full touch-none overflow-hidden rounded-lg border border-steel"
+        style={{ height: cssSize.h }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onDoubleClick={onDoubleClick}
+        onKeyDown={onKeyDown}
+        tabIndex={0}
+        data-testid="timeline-canvas-wrap"
+        data-lane-count={lanes.length}
+        data-canvas-h={cssSize.h}
+      >
+        <canvas
+          ref={canvasRef}
+          role="img"
+          aria-label={buildAriaLabel(viewport, lanes, laneData)}
+          data-testid="timeline-canvas"
+        />
+      </div>
     </div>
   )
 }
