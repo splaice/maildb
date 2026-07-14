@@ -10,11 +10,13 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from chronicle_server.auth import require_user
+from chronicle_server.cursor import decode_cursor, encode_cursor
 from chronicle_server.ids import decode_source_id, encode_source_id, msg_key_to_uuid
 from chronicle_server.sanitize import sanitize_email_html
+from chronicle_server.scope import QueryScope, scope_filters, scope_fingerprint
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -25,6 +27,8 @@ router = APIRouter(tags=["sources"])
 
 _MARKDOWN_PAGE = 50_000
 _THREAD_MSG_CAP = 500
+_LIST_DEFAULT_LIMIT = 50
+_LIST_MAX_LIMIT = 200
 
 
 # --- response models ---
@@ -122,6 +126,41 @@ class ThreadResponse(BaseModel):
     message_count: int
     messages: list[ThreadMessage]
     truncated: bool = False
+
+
+class SourceListRequest(BaseModel):
+    """Envelope-only list for timeline bucket drill-in (keyset pagination)."""
+
+    scope: QueryScope = Field(default_factory=QueryScope)
+    date_from: str
+    date_to: str
+    cursor: str | None = None
+    limit: int = _LIST_DEFAULT_LIMIT
+
+    @field_validator("limit")
+    @classmethod
+    def _clamp_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("limit must be >= 1")
+        return min(value, _LIST_MAX_LIMIT)
+
+
+class SourceListItem(BaseModel):
+    id: str
+    subject: str | None = None
+    sender_name: str | None = None
+    sender_address: str | None = None
+    date: str | None = None
+    mailbox: str | None = None
+    has_attachment: bool = False
+    attachment_count: int = 0
+    thread_id: str | None = None
+
+
+class SourceListResponse(BaseModel):
+    items: list[SourceListItem]
+    next_cursor: str | None = None
+    scope_fingerprint: str
 
 
 # --- helpers ---
@@ -488,7 +527,154 @@ def get_thread(pool: ConnectionPool, thread_id: str) -> ThreadResponse:
     )
 
 
+def _attachment_count(raw: Any) -> int:
+    """Cheap count from emails.attachments JSONB (array length or 0)."""
+    if raw is None:
+        return 0
+    if isinstance(raw, list):
+        return len(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    return 0
+
+
+def _parse_list_cursor(token: str, secret_key: str) -> tuple[str | None, UUID]:
+    """Decode keyset cursor ``{d: last_date_iso|null, id: last_uuid}``."""
+    try:
+        payload = decode_cursor(token, secret_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    if "id" not in payload:
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    raw_id = payload["id"]
+    try:
+        last_id = UUID(str(raw_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    d = payload.get("d")
+    if d is not None and not isinstance(d, str):
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    return d if isinstance(d, str) else None, last_id
+
+
+def list_sources(
+    pool: ConnectionPool,
+    body: SourceListRequest,
+    secret_key: str,
+) -> SourceListResponse:
+    """Envelope-only message list ordered chronologically with keyset pagination.
+
+    Order: ``date ASC NULLS LAST, id ASC``. Cursor payload ``{d, id}`` with
+    NULL dates last:
+    - non-null cursor date: remaining later/same-date rows, then all null dates
+    - null cursor date: further null-date rows only
+    """
+    scope_conds, scope_params = scope_filters(body.scope)
+    conditions: list[str] = [
+        "date >= %(list_from)s",
+        "date < %(list_to)s",
+        *scope_conds,
+    ]
+    params: dict[str, Any] = {
+        "list_from": body.date_from,
+        "list_to": body.date_to,
+        "lim": body.limit + 1,  # fetch one extra to detect next page
+        **scope_params,
+    }
+
+    if body.cursor:
+        cursor_d, cursor_id = _parse_list_cursor(body.cursor, secret_key)
+        params["cursor_id"] = cursor_id
+        if cursor_d is not None:
+            # ASC NULLS LAST: after (d, id) come later dates, same-date higher ids,
+            # then all NULL dates. ORDER BY keeps non-nulls first within the page.
+            params["cursor_d"] = cursor_d
+            conditions.append(
+                "("
+                " (date IS NOT NULL AND (date > %(cursor_d)s"
+                "  OR (date = %(cursor_d)s AND id > %(cursor_id)s)))"
+                " OR date IS NULL"
+                ")"
+            )
+        else:
+            conditions.append("date IS NULL AND id > %(cursor_id)s")
+
+    where_sql = " AND ".join(conditions)
+    sql = f"""
+        SELECT id, thread_id, subject, sender_name, sender_address,
+               date, source_account, has_attachment, attachments
+          FROM emails
+         WHERE {where_sql}
+         ORDER BY date ASC NULLS LAST, id ASC
+         LIMIT %(lim)s
+    """
+
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    cols = [
+        "id",
+        "thread_id",
+        "subject",
+        "sender_name",
+        "sender_address",
+        "date",
+        "source_account",
+        "has_attachment",
+        "attachments",
+    ]
+    page = rows[: body.limit]
+    has_more = len(rows) > body.limit
+
+    items: list[SourceListItem] = []
+    for row in page:
+        data = _row_to_dict(row, cols)
+        email_id: UUID = data["id"]
+        thread_raw = data.get("thread_id")
+        thr_sid = encode_source_id("thr", thread_raw) if thread_raw else None
+        items.append(
+            SourceListItem(
+                id=encode_source_id("msg", email_id),
+                subject=data.get("subject"),
+                sender_name=data.get("sender_name"),
+                sender_address=data.get("sender_address"),
+                date=_iso(data.get("date")),
+                mailbox=data.get("source_account"),
+                has_attachment=bool(data.get("has_attachment")),
+                attachment_count=_attachment_count(data.get("attachments")),
+                thread_id=thr_sid,
+            )
+        )
+
+    next_cursor: str | None = None
+    if has_more and page:
+        last = _row_to_dict(page[-1], cols)
+        payload = {
+            "d": _iso(last.get("date")),
+            "id": str(last["id"]),
+        }
+        next_cursor = encode_cursor(payload, secret_key)
+
+    return SourceListResponse(
+        items=items,
+        next_cursor=next_cursor,
+        scope_fingerprint=scope_fingerprint(body.scope),
+    )
+
+
 # --- routes ---
+
+
+@router.post("/sources/list")
+def post_sources_list(
+    body: SourceListRequest,
+    request: Request,
+    _user: str = Depends(require_user),
+) -> SourceListResponse:
+    """Cursor-paginated envelope list for a date window (timeline drill-in)."""
+    pool: ConnectionPool = request.app.state.pool
+    secret_key: str = request.app.state.settings.secret_key
+    return list_sources(pool, body, secret_key)
 
 
 @router.get("/sources/{sid}")
