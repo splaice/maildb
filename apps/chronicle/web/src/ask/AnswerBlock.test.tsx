@@ -139,4 +139,97 @@ describe('AnswerBlock', () => {
       expect(aborted).toBe(true)
     })
   })
+
+  it('pins answer to a workspace from the footer', async () => {
+    const body = sseBody([
+      {
+        event: 'retrieval',
+        data: { count: 1, types: { message: 1 }, degraded: null },
+      },
+      { event: 'token', data: { text: 'Answer text.' } },
+      {
+        event: 'done',
+        data: {
+          answer_id: 'ans-42',
+          model_route: 'ollama:llama3.2',
+          policy_version: 'ask-v1',
+          generated_at: '2026-07-13T12:00:00Z',
+          unmatched_markers: [],
+        },
+      },
+    ])
+
+    const posts: unknown[] = []
+    vi.mocked(fetch).mockImplementation(
+      async (url: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/ask') && method === 'POST') {
+          return streamResponse(body)
+        }
+        if (
+          u.includes('/api/workspaces') &&
+          method === 'GET' &&
+          !u.includes('/blocks')
+        ) {
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: 'ws-1',
+                  name: 'Case',
+                  updated_at: null,
+                  counts: {
+                    blocks: 0,
+                    pins: 0,
+                    notes: 0,
+                    answers: 0,
+                    headings: 0,
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        if (u.includes('/api/workspaces/ws-1/blocks') && method === 'POST') {
+          posts.push(JSON.parse(String(init?.body || '{}')))
+          return new Response(
+            JSON.stringify({
+              id: 'blk',
+              workspace_id: 'ws-1',
+              position: 0,
+              block_type: 'answer',
+              content: { answer_id: 'ans-42' },
+            }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      },
+    )
+
+    render(
+      <AnswerBlock
+        question="What roof?"
+        scope={{}}
+        runId={1}
+        onSelectSource={() => {}}
+      />,
+    )
+
+    expect(await screen.findByTestId('pin-answer-btn')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('pin-answer-btn'))
+    expect(await screen.findByTestId('pin-answer-menu')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('pin-answer-workspace-ws-1'))
+
+    await waitFor(() => {
+      expect(posts.length).toBe(1)
+    })
+    expect(posts[0]).toEqual({
+      block_type: 'answer',
+      content: { answer_id: 'ans-42' },
+    })
+    expect(await screen.findByTestId('pin-answer-status')).toHaveTextContent('Pinned')
+  })
 })

@@ -48,6 +48,24 @@ CREATE TABLE IF NOT EXISTS app_citations (
     excerpt_hash TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS app_workspaces (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    description TEXT,
+    scope       JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    version     INT NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS app_workspace_blocks (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES app_workspaces(id) ON DELETE CASCADE,
+    position     INT NOT NULL,
+    block_type   TEXT NOT NULL CHECK (block_type IN ('heading','note','pin','answer')),
+    content      JSONB NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

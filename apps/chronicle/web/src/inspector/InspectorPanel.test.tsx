@@ -219,4 +219,81 @@ describe('InspectorPanel flow', () => {
     fireEvent.click(screen.getByTestId('attachment-preview'))
     expect(await screen.findByTestId('preview-panel')).toBeInTheDocument()
   })
+
+  it('pins message source to a workspace via menu', async () => {
+    const posts: unknown[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/sources/msg_1') && method === 'GET') {
+          return { ok: true, status: 200, json: async () => msgSource } as Response
+        }
+        if (
+          u.includes('/api/workspaces') &&
+          method === 'GET' &&
+          !u.includes('/blocks')
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  id: 'ws-1',
+                  name: 'Case',
+                  updated_at: null,
+                  counts: {
+                    blocks: 0,
+                    pins: 0,
+                    notes: 0,
+                    answers: 0,
+                    headings: 0,
+                  },
+                },
+              ],
+            }),
+          } as Response
+        }
+        if (u.includes('/api/workspaces/ws-1/blocks') && method === 'POST') {
+          posts.push(JSON.parse(String(init?.body || '{}')))
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({
+              id: 'blk-1',
+              workspace_id: 'ws-1',
+              position: 0,
+              block_type: 'pin',
+              content: posts[0],
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+
+    useWorkingSetStore.getState().setSelection({ kind: 'message', sid: 'msg_1' })
+    renderPanel()
+    expect(await screen.findByTestId('message-card')).toBeInTheDocument()
+    expect(screen.getByTestId('pin-to-workspace-btn')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('pin-to-workspace-btn'))
+    expect(await screen.findByTestId('pin-workspace-menu')).toBeInTheDocument()
+    fireEvent.click(await screen.findByTestId('pin-workspace-ws-1'))
+
+    await waitFor(() => {
+      expect(posts.length).toBe(1)
+    })
+    const body = posts[0] as {
+      block_type: string
+      content: { source_id: string; source_type: string; title: string }
+    }
+    expect(body.block_type).toBe('pin')
+    expect(body.content.source_id).toBe('msg_1')
+    expect(body.content.source_type).toBe('message')
+    expect(body.content.title).toMatch(/Hello world/)
+    expect(await screen.findByTestId('pin-status')).toHaveTextContent('Pinned')
+  })
 })

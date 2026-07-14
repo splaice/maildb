@@ -5,6 +5,7 @@ const NAV_ITEMS = [
   { to: '/topics', label: 'Topics' },
   { to: '/people', label: 'People' },
   { to: '/files', label: 'Files' },
+  { to: '/workspaces', label: 'Workspaces' },
   { to: '/data-health', label: 'Data Health' },
   { to: '/settings', label: 'Settings' },
 ] as const

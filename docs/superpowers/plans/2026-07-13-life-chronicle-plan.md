@@ -86,7 +86,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 2, Task 2.6 (workspaces v1 + manifest export) — last task of Phase 2. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 3 (Chronicle intelligence) — elaborate task table, then 3.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -108,3 +108,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 2.4 ask SSE + app_answers/app_citations + model gateway v1 (injection boundaries, audit) | chronicle-phase-2-app | Approved; 156 server / 146 web tests |
 | 2026-07-13 | 2.2 NL interpret: whitelist extraction, contacts person resolution, origin chips | chronicle-phase-2-app | Approved; 171 server / 152 web tests |
 | 2026-07-13 | 2.5 files browser: sandboxed preview (magic+containment), duplicate groups | chronicle-phase-2-app | Approved; 180 server / 166 web tests |
+| 2026-07-13 | 2.6 workspaces v1: notebook blocks, optimistic concurrency, manifest exports | chronicle-phase-2-app | Approved; Phase 2 complete (188 server / 176 web tests) |

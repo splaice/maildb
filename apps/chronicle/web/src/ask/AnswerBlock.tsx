@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { QueryScope, SearchResult } from '../api/types'
 import { ResultCard } from '../research/ResultCard'
+import { createBlock, createWorkspace, listWorkspaces } from '../workspaces/api'
 import { renderAnswerWithCitations } from './citationText'
 import {
   streamAsk,
@@ -96,6 +97,14 @@ export function AnswerBlock({
   const [showRetrieval, setShowRetrieval] = useState(false)
   const [activeExcerpt, setActiveExcerpt] = useState<AskCitationEvent | null>(null)
   const [retrievalRows, setRetrievalRows] = useState<RetrievalRow[]>([])
+  const [pinOpen, setPinOpen] = useState(false)
+  const [pinBusy, setPinBusy] = useState(false)
+  const [pinStatus, setPinStatus] = useState<string | null>(null)
+  const [pinError, setPinError] = useState<string | null>(null)
+  const [pinWorkspaces, setPinWorkspaces] = useState<
+    { id: string; name: string }[]
+  >([])
+  const [pinNewName, setPinNewName] = useState('')
   const abortRef = useRef<AbortController | null>(null)
 
   const cancel = useCallback(() => {
@@ -216,6 +225,55 @@ export function AnswerBlock({
       await navigator.clipboard.writeText(payload)
     } catch {
       // ignore clipboard failures in tests / insecure contexts
+    }
+  }
+
+  const openPinMenu = async () => {
+    setPinOpen((v) => !v)
+    setPinStatus(null)
+    setPinError(null)
+    if (!pinOpen) {
+      try {
+        const res = await listWorkspaces()
+        setPinWorkspaces(res.items.map((w) => ({ id: w.id, name: w.name })))
+      } catch (err) {
+        setPinError(err instanceof Error ? err.message : 'Failed to load workspaces')
+      }
+    }
+  }
+
+  const pinAnswerTo = async (workspaceId: string) => {
+    if (!done?.answer_id) return
+    setPinBusy(true)
+    setPinError(null)
+    setPinStatus(null)
+    try {
+      await createBlock(workspaceId, {
+        block_type: 'answer',
+        content: { answer_id: done.answer_id },
+      })
+      setPinStatus('Pinned')
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Pin failed')
+    } finally {
+      setPinBusy(false)
+    }
+  }
+
+  const createWorkspaceAndPinAnswer = async () => {
+    const name = pinNewName.trim()
+    if (!name || !done?.answer_id) return
+    setPinBusy(true)
+    setPinError(null)
+    try {
+      const ws = await createWorkspace({ name, scope })
+      await pinAnswerTo(ws.id)
+      setPinNewName('')
+      const res = await listWorkspaces()
+      setPinWorkspaces(res.items.map((w) => ({ id: w.id, name: w.name })))
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Create failed')
+      setPinBusy(false)
     }
   }
 
@@ -349,6 +407,76 @@ export function AnswerBlock({
           >
             Copy with citations
           </button>
+          {done?.answer_id ? (
+            <div className="relative" data-testid="pin-answer">
+              <button
+                type="button"
+                className={btnClass}
+                onClick={() => void openPinMenu()}
+                data-testid="pin-answer-btn"
+              >
+                Pin answer
+              </button>
+              {pinOpen ? (
+                <div
+                  className="absolute bottom-full left-0 z-20 mb-1 min-w-[14rem] rounded-md border border-steel bg-graphite-900 p-2 shadow-lg"
+                  data-testid="pin-answer-menu"
+                  role="menu"
+                >
+                  {pinWorkspaces.length === 0 ? (
+                    <p className="mb-1 text-[11px] text-text-muted">No workspaces yet</p>
+                  ) : (
+                    <ul className="mb-2 max-h-40 space-y-0.5 overflow-auto">
+                      {pinWorkspaces.map((w) => (
+                        <li key={w.id}>
+                          <button
+                            type="button"
+                            className="w-full rounded px-1.5 py-1 text-left text-[12px] text-text-primary hover:bg-graphite-800"
+                            disabled={pinBusy}
+                            onClick={() => void pinAnswerTo(w.id)}
+                            data-testid={`pin-answer-workspace-${w.id}`}
+                            role="menuitem"
+                          >
+                            {w.name}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="flex gap-1 border-t border-steel pt-2">
+                    <input
+                      type="text"
+                      value={pinNewName}
+                      onChange={(e) => setPinNewName(e.target.value)}
+                      placeholder="New workspace"
+                      className="min-w-0 flex-1 rounded border border-steel bg-graphite-950 px-1.5 py-0.5 text-[12px] text-text-primary"
+                      data-testid="pin-answer-new-name"
+                      disabled={pinBusy}
+                    />
+                    <button
+                      type="button"
+                      className={btnClass}
+                      disabled={pinBusy || !pinNewName.trim()}
+                      onClick={() => void createWorkspaceAndPinAnswer()}
+                      data-testid="pin-answer-create"
+                    >
+                      Create
+                    </button>
+                  </div>
+                  {pinStatus ? (
+                    <p className="mt-1 text-[11px] text-action" data-testid="pin-answer-status">
+                      {pinStatus}
+                    </p>
+                  ) : null}
+                  {pinError ? (
+                    <p className="mt-1 text-[11px] text-conflict" role="alert">
+                      {pinError}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </footer>
       ) : null}
 

@@ -524,3 +524,131 @@ export interface PreviewDenied {
   preview: false
   reason: string
 }
+
+/** Workspaces (GET/POST /api/workspaces) */
+
+export type WorkspaceBlockType = 'heading' | 'note' | 'pin' | 'answer'
+
+export interface WorkspaceCounts {
+  blocks: number
+  pins: number
+  notes: number
+  answers: number
+  headings: number
+}
+
+export interface WorkspaceListItem {
+  id: string
+  name: string
+  updated_at: string | null
+  counts: WorkspaceCounts
+}
+
+export interface WorkspaceListResponse {
+  items: WorkspaceListItem[]
+}
+
+export interface HeadingBlockContent {
+  text: string
+}
+
+export interface NoteBlockContent {
+  text: string
+}
+
+export interface PinBlockContent {
+  source_id: string
+  source_type: string
+  title: string
+  date?: string | null
+  sender?: string | null
+  excerpt?: string | null
+}
+
+export interface AnswerBlockContent {
+  answer_id: string
+}
+
+export type WorkspaceBlockContent =
+  | HeadingBlockContent
+  | NoteBlockContent
+  | PinBlockContent
+  | AnswerBlockContent
+
+export interface WorkspaceAnswerCitation {
+  marker: string
+  source_id: string
+  source_type: string
+  excerpt?: string | null
+  excerpt_hash?: string | null
+  location?: Record<string, unknown> | null
+}
+
+export interface WorkspaceAnswerHydration {
+  answer_id: string
+  question?: string | null
+  answer_text?: string | null
+  status?: string | null
+  model_route?: string | null
+  policy_version?: string | null
+  scope_fingerprint?: string | null
+  created_at?: string | null
+  citations: WorkspaceAnswerCitation[]
+}
+
+export interface WorkspaceBlock {
+  id: string
+  workspace_id: string
+  position: number
+  block_type: WorkspaceBlockType
+  content: WorkspaceBlockContent & Record<string, unknown>
+  created_at?: string | null
+  updated_at?: string | null
+  answer?: WorkspaceAnswerHydration
+}
+
+export interface Workspace {
+  id: string
+  name: string
+  description?: string | null
+  scope: QueryScope
+  created_at?: string | null
+  updated_at?: string | null
+  version: number
+  blocks?: WorkspaceBlock[]
+}
+
+export interface WorkspaceCreateRequest {
+  name: string
+  description?: string | null
+  scope?: QueryScope
+}
+
+export interface WorkspacePatchRequest {
+  version: number
+  name?: string
+  description?: string | null
+  scope?: QueryScope
+}
+
+export interface BlockCreateRequest {
+  block_type: WorkspaceBlockType
+  content: WorkspaceBlockContent
+  position?: number | null
+}
+
+export interface BlockPatchRequest {
+  content?: WorkspaceBlockContent
+  position?: number | null
+}
+
+export type WorkspaceExportFormat = 'markdown' | 'json' | 'csv'
+
+export interface WorkspaceManifestRow {
+  source_id: string
+  source_type: string
+  date?: string | null
+  sender?: string | null
+  subject_or_filename?: string | null
+  excerpt_hash?: string | null
+}

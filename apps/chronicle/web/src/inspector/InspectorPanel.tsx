@@ -8,6 +8,7 @@ import { downloadUrl } from '../files/format'
 import { PreviewPanel } from '../files/PreviewPanel'
 import { useWorkingSetStore } from '../workingset/store'
 import { formatPeriodLabel, UNIT_MS, type Unit } from '../chronicle/timeScale'
+import { PinToWorkspace } from '../workspaces/PinToWorkspace'
 import { MessageCard } from './MessageCard'
 import { SourceList } from './SourceList'
 
@@ -127,6 +128,13 @@ function AttachmentCard({ sid, onClose }: { sid: string; onClose: () => void }) 
         >
           Open full source
         </Link>
+        <PinToWorkspace
+          sourceId={sid}
+          sourceType="attachment"
+          title={att.filename}
+          date={env?.date ?? null}
+          sender={env?.sender_name || env?.sender_address || null}
+        />
         <button
           type="button"
           onClick={onClose}
@@ -165,13 +173,16 @@ export function InspectorPanel({ bucketCount }: InspectorPanelProps) {
 
   if (selection.kind === 'message') {
     return (
-      <MessageCard
-        sid={selection.sid}
-        onClose={() => {
-          // Spec: Close clears back to the parent bucket selection.
-          useWorkingSetStore.getState().clearMessageToBucket()
-        }}
-      />
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <MessageCard
+          sid={selection.sid}
+          onClose={() => {
+            // Spec: Close clears back to the parent bucket selection.
+            useWorkingSetStore.getState().clearMessageToBucket()
+          }}
+        />
+        <PinToWorkspace sourceId={selection.sid} sourceType="message" />
+      </div>
     )
   }
 

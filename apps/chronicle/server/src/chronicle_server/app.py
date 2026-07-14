@@ -19,6 +19,7 @@ from chronicle_server.health import router as health_router
 from chronicle_server.interpret import router as interpret_router
 from chronicle_server.search import router as search_router
 from chronicle_server.sources import router as sources_router
+from chronicle_server.workspaces import router as workspaces_router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -72,6 +73,7 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(sources_router, prefix="/api")
     app.include_router(files_router, prefix="/api")
     app.include_router(ask_router, prefix="/api")
+    app.include_router(workspaces_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved
     return app

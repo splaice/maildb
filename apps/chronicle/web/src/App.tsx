@@ -10,6 +10,8 @@ import { ChroniclePage } from './routes/ChroniclePage'
 import { DataHealthPage } from './routes/DataHealthPage'
 import { StubPage } from './routes/StubPage'
 import { Workstation } from './shell/Workstation'
+import { WorkspacePage } from './workspaces/WorkspacePage'
+import { WorkspacesListPage } from './workspaces/WorkspacesListPage'
 
 export function App() {
   return (
@@ -31,6 +33,8 @@ export function App() {
           <Route path="topics" element={<StubPage title="Topics" />} />
           <Route path="people" element={<StubPage title="People" />} />
           <Route path="files" element={<FilesPage />} />
+          <Route path="workspaces" element={<WorkspacesListPage />} />
+          <Route path="workspaces/:id" element={<WorkspacePage />} />
           <Route path="data-health" element={<DataHealthPage />} />
           <Route path="settings" element={<StubPage title="Settings" />} />
         </Route>
