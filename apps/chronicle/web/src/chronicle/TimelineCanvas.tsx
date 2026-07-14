@@ -67,6 +67,40 @@ export interface TimelineCanvasProps {
   onWidthChange: (width: number) => void
   /** Fired when a bar/mark is clicked (lane + bucket ISO). */
   onSelectBucket?: (bucketIso: string, laneName: string) => void
+  /**
+   * Double-click a mark/bucket enters focus on that bucket's span.
+   * Alt+double-click keeps zoom ×0.25 (documented in toolbar hint).
+   */
+  onFocusBucket?: (period: Viewport) => void
+}
+
+/**
+ * Pure double-click policy for the canvas surface.
+ * - altKey → zoom ×0.25 (retain prior zoom-on-double-click)
+ * - bucket hit without alt → enter focus on that span
+ * - no hit → zoom ×0.25 fallback
+ * Exported for unit tests.
+ */
+export function resolveDoubleClickAction(args: {
+  altKey: boolean
+  bucketHit: Viewport | null
+  viewport: Viewport
+  plotX: number
+  plotW: number
+}): { kind: 'zoom'; viewport: Viewport } | { kind: 'focus'; period: Viewport } {
+  if (args.altKey) {
+    return {
+      kind: 'zoom',
+      viewport: zoomViewport(args.viewport, 0.25, args.plotX, args.plotW),
+    }
+  }
+  if (args.bucketHit) {
+    return { kind: 'focus', period: args.bucketHit }
+  }
+  return {
+    kind: 'zoom',
+    viewport: zoomViewport(args.viewport, 0.25, args.plotX, args.plotW),
+  }
 }
 
 /**
@@ -177,6 +211,7 @@ export function TimelineCanvas({
   onBrushChange,
   onWidthChange,
   onSelectBucket,
+  onFocusBucket,
 }: TimelineCanvasProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const wheelHandlerRef = useRef<(e: globalThis.WheelEvent) => void>(() => {})
@@ -584,9 +619,50 @@ export function TimelineCanvas({
   const onDoubleClick = (e: MouseEvent) => {
     const rect = wrapRef.current?.getBoundingClientRect()
     if (!rect) return
-    const plotX = Math.max(0, e.clientX - rect.left - LANE_LABEL_W)
-    // Zoom ×0.25 span anchored at pointer
-    onViewportChange(zoomViewport(viewport, 0.25, plotX, plotWidth()))
+    const localX = e.clientX - rect.left
+    const localY = e.clientY - rect.top
+    const plotX = Math.max(0, localX - LANE_LABEL_W)
+    const pw = plotWidth()
+
+    // Resolve bucket hit for non-alt double-click → focus.
+    let bucketHit: Viewport | null = null
+    if (!e.altKey && onFocusBucket) {
+      const hitKey = laneAtYFromLayout(localY, layout)
+      if (hitKey) {
+        const unitTyped = parseUnit(unit)
+        let points: BucketPoint[] = []
+        if (hitKey.startsWith('top_people:')) {
+          const contactId = hitKey.slice('top_people:'.length)
+          const tp = laneData.top_people
+          if (isTopPeopleLane(tp)) {
+            const contact = tp.contacts.find((c) => c.contact_id === contactId)
+            points = contact?.buckets ?? []
+          }
+        } else {
+          points = barsPoints(laneData, hitKey)
+        }
+        const bucketIso = bucketAtX(plotX, viewport, pw, unitTyped, points)
+        if (bucketIso) {
+          const fromMs = Date.parse(bucketIso)
+          if (Number.isFinite(fromMs)) {
+            bucketHit = { fromMs, toMs: fromMs + UNIT_MS[unitTyped] }
+          }
+        }
+      }
+    }
+
+    const action = resolveDoubleClickAction({
+      altKey: e.altKey,
+      bucketHit,
+      viewport,
+      plotX,
+      plotW: pw,
+    })
+    if (action.kind === 'focus' && onFocusBucket) {
+      onFocusBucket(action.period)
+    } else if (action.kind === 'zoom') {
+      onViewportChange(action.viewport)
+    }
   }
 
   const onKeyDown = (e: KeyboardEvent) => {

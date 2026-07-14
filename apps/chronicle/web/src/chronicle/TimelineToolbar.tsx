@@ -12,6 +12,8 @@ export interface TimelineToolbarProps {
   onZoomToSelection: () => void
   onClearSelection: () => void
   onToggleViewMode: () => void
+  /** Enter focus mode on the brushed range (enabled when brush exists). */
+  onFocusPeriod?: () => void
 }
 
 const btnClass =
@@ -28,6 +30,7 @@ export function TimelineToolbar({
   onZoomToSelection,
   onClearSelection,
   onToggleViewMode,
+  onFocusPeriod,
 }: TimelineToolbarProps) {
   const period = formatPeriodRange(viewport)
   const unitLabel = unit ? `${unit} buckets` : 'buckets'
@@ -66,10 +69,26 @@ export function TimelineToolbar({
         >
           Clear selection
         </button>
+        <button
+          type="button"
+          className={btnClass}
+          onClick={onFocusPeriod}
+          disabled={brush == null || !onFocusPeriod}
+          title="Focus period (Enter when a brush exists)"
+          data-testid="focus-period-btn"
+        >
+          Focus period
+        </button>
         <button type="button" className={btnClass} onClick={onToggleViewMode}>
           {viewMode === 'canvas' ? 'View as table' : 'View as canvas'}
         </button>
       </div>
+      <span
+        className="w-full text-[11px] text-text-muted"
+        data-testid="toolbar-focus-hint"
+      >
+        Double-click a mark to enter focus · Alt+double-click zooms ×4
+      </span>
     </div>
   )
 }

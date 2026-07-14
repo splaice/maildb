@@ -244,4 +244,44 @@ describe('ChroniclePage working-set wiring', () => {
       expect(hAfter).toBeLessThan(hBefore)
     })
   })
+
+  it('Enter key enters focus when a brush exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        if (String(url).includes('/api/sources/list')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [],
+              next_cursor: null,
+              scope_fingerprint: 'qs',
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/'])
+    expect(await screen.findByTestId('timeline-toolbar')).toBeInTheDocument()
+
+    const brush = {
+      fromMs: Date.UTC(2015, 0, 1),
+      toMs: Date.UTC(2016, 0, 1),
+    }
+    useWorkingSetStore.getState().setBrush(brush)
+
+    fireEvent.keyDown(window, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(useWorkingSetStore.getState().focus).toEqual(brush)
+    })
+    expect(await screen.findByTestId('focus-mode')).toBeInTheDocument()
+    expect(useWorkingSetStore.getState().brush).toBeNull()
+  })
 })

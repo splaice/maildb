@@ -255,3 +255,41 @@ describe('lanes codec (ln) and saved lens', () => {
     expect(decodeState(new URLSearchParams()).lanes).toBeNull()
   })
 })
+
+describe('focus codec (ff/ft)', () => {
+  it('roundtrips focus period with second-precision ISO', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      focus: {
+        fromMs: Date.UTC(2015, 0, 1, 0, 0, 0),
+        toMs: Date.UTC(2016, 5, 15, 12, 30, 0),
+      },
+    }
+    const params = encodeState(state)
+    expect(params.get('ff')).toBe('2015-01-01T00:00:00Z')
+    expect(params.get('ft')).toBe('2016-06-15T12:30:00Z')
+    expect(decodeState(params).focus).toEqual(state.focus)
+    expect(decodeState(encodeState(decodeState(params))).focus).toEqual(state.focus)
+  })
+
+  it('omits ff/ft when focus is null', () => {
+    const params = encodeState(DEFAULT_URL_STATE)
+    expect(params.has('ff')).toBe(false)
+    expect(params.has('ft')).toBe(false)
+    expect(decodeState(params).focus).toBeNull()
+  })
+
+  it('rejects inverted or partial focus', () => {
+    expect(
+      decodeState(
+        new URLSearchParams({
+          ff: '2016-01-01T00:00:00Z',
+          ft: '2015-01-01T00:00:00Z',
+        }),
+      ).focus,
+    ).toBeNull()
+    expect(
+      decodeState(new URLSearchParams({ ff: '2015-01-01T00:00:00Z' })).focus,
+    ).toBeNull()
+  })
+})

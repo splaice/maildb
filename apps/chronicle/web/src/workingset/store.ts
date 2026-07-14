@@ -28,6 +28,11 @@ export interface WorkingSetState {
   aggregation: Aggregation
   view: ViewMode
   brush: Viewport | null
+  /**
+   * Focus-mode period (temporary analytical workspace). URL params `ff`/`ft`.
+   * Analytical intent on enter/exit.
+   */
+  focus: Viewport | null
   /** Timeline / inspector selection; URL param `sel`; transient intent. */
   selection: Selection
   /**
@@ -46,6 +51,15 @@ export interface WorkingSetState {
   setViewport: (viewport: Viewport) => void
   setBrush: (brush: Viewport | null) => void
   applyBrushAsViewport: () => void
+  /** Enter focus mode on a period; clears brush; analytical. */
+  setFocus: (focus: Viewport) => void
+  /** Exit focus mode; analytical (URL drops ff/ft; Back is equivalent). */
+  exitFocus: () => void
+  /**
+   * Explicit confirmation: copy focus range into the scope date filter and
+   * exit focus (always temporary until this action). Analytical.
+   */
+  applyFocusAsScopeDate: () => void
   setScopeDate: (date: QueryScopeDate | null) => void
   addMailbox: (mailbox: string) => void
   removeMailbox: (mailbox: string) => void
@@ -63,6 +77,11 @@ export interface WorkingSetState {
   hydrate: (decoded: UrlWorkingState) => void
 }
 
+/** Format epoch ms as UTC ISO date (`YYYY-MM-DD`) for scope date filters. */
+function toIsoDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
 const emptyScope = (): QueryScope => ({})
 
 export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
@@ -71,6 +90,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   aggregation: DEFAULT_URL_STATE.aggregation,
   view: DEFAULT_URL_STATE.view,
   brush: null,
+  focus: null,
   selection: DEFAULT_URL_STATE.selection,
   priorBucket: null,
   resultCount: null,
@@ -89,6 +109,37 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
     set({
       viewport: brush,
       brush: null,
+      historyIntent: 'analytical',
+    })
+  },
+
+  setFocus: (focus) => {
+    if (!focus || !(focus.toMs > focus.fromMs)) return
+    set({
+      focus: { fromMs: focus.fromMs, toMs: focus.toMs },
+      brush: null,
+      historyIntent: 'analytical',
+    })
+  },
+
+  exitFocus: () => {
+    if (get().focus == null) return
+    set({ focus: null, historyIntent: 'analytical' })
+  },
+
+  applyFocusAsScopeDate: () => {
+    const { focus, scope } = get()
+    if (!focus) return
+    const nextScope = {
+      ...scope,
+      date: {
+        from: toIsoDate(focus.fromMs),
+        to: toIsoDate(focus.toMs),
+      },
+    }
+    set({
+      scope: nextScope,
+      focus: null,
       historyIntent: 'analytical',
     })
   },
@@ -214,6 +265,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
       priorBucket:
         decoded.selection?.kind === 'bucket' ? decoded.selection : get().priorBucket,
       lanes: resolveLanes(decoded.lanes),
+      focus: decoded.focus ?? null,
       brush: null,
       historyIntent: 'silent',
     }),
@@ -227,6 +279,7 @@ export function resetWorkingSetStore(): void {
     aggregation: 'auto',
     view: 'canvas',
     brush: null,
+    focus: null,
     selection: null,
     priorBucket: null,
     resultCount: null,

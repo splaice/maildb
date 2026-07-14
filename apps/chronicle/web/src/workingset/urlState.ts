@@ -49,6 +49,11 @@ export interface UrlWorkingState {
   selection: Selection
   /** Ordered visible lane keys; null means "not present in URL". */
   lanes: string[] | null
+  /**
+   * Focus-mode period (URL params `ff`/`ft`). Optional on encode input so
+   * older call sites remain valid; decode always returns Viewport | null.
+   */
+  focus?: Viewport | null
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -58,6 +63,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   view: 'canvas',
   selection: null,
   lanes: null,
+  focus: null,
 }
 
 /**
@@ -202,7 +208,7 @@ function lanesEqual(a: string[], b: string[]): boolean {
  */
 export function encodeState(state: UrlWorkingState): URLSearchParams {
   const params = new URLSearchParams()
-  const { scope, viewport, aggregation, view, selection, lanes } = state
+  const { scope, viewport, aggregation, view, selection, lanes, focus } = state
 
   const dateFrom = scope.date?.from ?? null
   const dateTo = scope.date?.to ?? null
@@ -229,6 +235,12 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
   // Encode ln when present and non-default (null = omit; empty array should not occur).
   if (lanes != null && lanes.length > 0 && !lanesEqual(lanes, DEFAULT_LANES)) {
     params.set('ln', lanes.join(','))
+  }
+
+  // Focus period (analytical): ff/ft ISO datetime, second precision.
+  if (focus && focus.toMs > focus.fromMs) {
+    params.set('ff', toIsoSeconds(focus.fromMs))
+    params.set('ft', toIsoSeconds(focus.toMs))
   }
 
   return params
@@ -262,6 +274,13 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     viewport = { fromMs: vf, toMs: vt }
   }
 
+  const ff = parseViewportIso(params.get('ff'))
+  const ft = parseViewportIso(params.get('ft'))
+  let focus: Viewport | null = null
+  if (ff != null && ft != null && ft > ff) {
+    focus = { fromMs: ff, toMs: ft }
+  }
+
   return {
     scope,
     viewport,
@@ -269,6 +288,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     view: parseView(params.get('view')),
     selection: decodeSelection(params.get('sel')),
     lanes: parseLanesParam(params.get('ln')),
+    focus,
   }
 }
 

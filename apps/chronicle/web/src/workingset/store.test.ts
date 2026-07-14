@@ -125,4 +125,64 @@ describe('working set store', () => {
     useWorkingSetStore.getState().toggleLane('messages')
     expect(useWorkingSetStore.getState().lanes).toEqual(['messages'])
   })
+
+  it('setFocus is analytical and clears brush', () => {
+    useWorkingSetStore.getState().setBrush({ fromMs: 1, toMs: 2 })
+    useWorkingSetStore.getState().setFocus({
+      fromMs: Date.UTC(2015, 0, 1),
+      toMs: Date.UTC(2016, 0, 1),
+    })
+    const s = useWorkingSetStore.getState()
+    expect(s.focus).toEqual({
+      fromMs: Date.UTC(2015, 0, 1),
+      toMs: Date.UTC(2016, 0, 1),
+    })
+    expect(s.brush).toBeNull()
+    expect(s.historyIntent).toBe('analytical')
+  })
+
+  it('exitFocus clears focus analytically', () => {
+    useWorkingSetStore.getState().setFocus({
+      fromMs: Date.UTC(2015, 0, 1),
+      toMs: Date.UTC(2016, 0, 1),
+    })
+    useWorkingSetStore.getState().exitFocus()
+    expect(useWorkingSetStore.getState().focus).toBeNull()
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+  })
+
+  it('exitFocus is a no-op when not in focus', () => {
+    useWorkingSetStore.getState().setView('table')
+    useWorkingSetStore.getState().exitFocus()
+    expect(useWorkingSetStore.getState().focus).toBeNull()
+    expect(useWorkingSetStore.getState().view).toBe('table')
+  })
+
+  it('applyFocusAsScopeDate writes scope date and exits focus', () => {
+    useWorkingSetStore.getState().addMailbox('me@x.com')
+    useWorkingSetStore.getState().setFocus({
+      fromMs: Date.UTC(2014, 5, 15, 12, 0, 0),
+      toMs: Date.UTC(2015, 2, 1, 0, 0, 0),
+    })
+    useWorkingSetStore.getState().applyFocusAsScopeDate()
+    const s = useWorkingSetStore.getState()
+    expect(s.focus).toBeNull()
+    expect(s.scope.date).toEqual({ from: '2014-06-15', to: '2015-03-01' })
+    expect(s.scope.mailboxes).toEqual(['me@x.com'])
+    expect(s.historyIntent).toBe('analytical')
+  })
+
+  it('hydrate restores focus silently', () => {
+    useWorkingSetStore.getState().hydrate({
+      scope: {},
+      viewport: null,
+      aggregation: 'auto',
+      view: 'canvas',
+      selection: null,
+      lanes: null,
+      focus: { fromMs: 10, toMs: 20 },
+    })
+    expect(useWorkingSetStore.getState().focus).toEqual({ fromMs: 10, toMs: 20 })
+    expect(useWorkingSetStore.getState().historyIntent).toBe('silent')
+  })
 })

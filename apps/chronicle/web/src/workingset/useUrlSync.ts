@@ -52,6 +52,7 @@ function onStoreChange(): void {
     view: state.view,
     selection: state.selection,
     lanes: state.lanes,
+    focus: state.focus,
   })
   const url = buildSearchUrl(params)
 
@@ -145,6 +146,7 @@ export function writeStoreToUrlNow(): void {
     view: s.view,
     selection: s.selection,
     lanes: s.lanes,
+    focus: s.focus,
   }
   const url = buildSearchUrl(encodeState(slice))
   window.history.replaceState(window.history.state, '', url)

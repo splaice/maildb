@@ -15,6 +15,7 @@ import {
   zoomViewport,
 } from '../chronicle/timeScale'
 import { useChronicleBuckets } from '../chronicle/useChronicleBuckets'
+import { FocusModeConnected } from '../focus/FocusMode'
 import { useWorkingSetStore } from '../workingset/store'
 import { useArchiveSummary } from './useArchiveSummary'
 
@@ -132,10 +133,12 @@ export function ChroniclePage() {
   // 1970-01-01..2100-01-01, then set viewport := extent (transient → replace-state).
   const viewport = useWorkingSetStore((s) => s.viewport)
   const brush = useWorkingSetStore((s) => s.brush)
+  const focus = useWorkingSetStore((s) => s.focus)
   const viewMode = useWorkingSetStore((s) => s.view)
   const scope = useWorkingSetStore((s) => s.scope)
   const setViewport = useWorkingSetStore((s) => s.setViewport)
   const setBrush = useWorkingSetStore((s) => s.setBrush)
+  const setFocus = useWorkingSetStore((s) => s.setFocus)
   const applyBrushAsViewport = useWorkingSetStore((s) => s.applyBrushAsViewport)
   const setView = useWorkingSetStore((s) => s.setView)
   const setResultCount = useWorkingSetStore((s) => s.setResultCount)
@@ -219,7 +222,8 @@ export function ChroniclePage() {
     [applyViewport, pixelWidth, viewport],
   )
 
-  // Keyboard shortcuts [ / ] zoom out/in around center — page-scoped, cleaned up on unmount.
+  // Keyboard shortcuts [ / ] zoom, Enter → focus period when brush exists —
+  // page-scoped, cleaned up on unmount.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null
@@ -239,134 +243,161 @@ export function ChroniclePage() {
         zoomAroundCenter(0.5) // zoom in
       } else if (e.key === 'Escape') {
         setBrush(null)
+      } else if (e.key === 'Enter') {
+        // Focus period when a brush exists (spec §4.6 entry).
+        const b = useWorkingSetStore.getState().brush
+        if (b && b.toMs > b.fromMs) {
+          e.preventDefault()
+          setFocus(b)
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [setBrush, zoomAroundCenter])
+  }, [setBrush, setFocus, zoomAroundCenter])
 
   const unit = buckets.data?.unit ?? buckets.data?.aggregation ?? 'month'
   const densityBuckets = buckets.data?.density.buckets ?? []
   const laneData: Record<string, LaneData> = buckets.data?.lanes ?? {}
 
   const showTimeline = viewport != null
+  const inFocus = focus != null
 
   return (
     <div className="space-y-4">
       <h1 className="text-base font-medium text-text-primary">Chronicle</h1>
 
-      {/* Timeline region */}
+      {/* Timeline region — replaced by FocusMode while focus is active. */}
       <section className="space-y-2" aria-label="Timeline">
-        {showTimeline ? (
-          <TimelineToolbar
-            viewport={viewport}
-            unit={unit}
-            brush={brush}
-            viewMode={viewMode}
-            onZoomIn={() => zoomAroundCenter(0.5)}
-            onZoomOut={() => zoomAroundCenter(2)}
-            onFitAll={() => {
-              if (extent) applyViewport(extent)
-            }}
-            onZoomToSelection={() => {
-              applyBrushAsViewport()
-            }}
-            onClearSelection={() => setBrush(null)}
-            onToggleViewMode={() =>
-              setView(viewMode === 'canvas' ? 'table' : 'canvas')
-            }
-          />
-        ) : null}
+        {inFocus ? (
+          <FocusModeConnected />
+        ) : (
+          <>
+            {showTimeline ? (
+              <TimelineToolbar
+                viewport={viewport}
+                unit={unit}
+                brush={brush}
+                viewMode={viewMode}
+                onZoomIn={() => zoomAroundCenter(0.5)}
+                onZoomOut={() => zoomAroundCenter(2)}
+                onFitAll={() => {
+                  if (extent) applyViewport(extent)
+                }}
+                onZoomToSelection={() => {
+                  applyBrushAsViewport()
+                }}
+                onClearSelection={() => setBrush(null)}
+                onToggleViewMode={() =>
+                  setView(viewMode === 'canvas' ? 'table' : 'canvas')
+                }
+                onFocusPeriod={() => {
+                  if (brush) setFocus(brush)
+                }}
+              />
+            ) : null}
 
-        {buckets.isError ? (
-          <div
-            role="alert"
-            data-testid="timeline-error"
-            className="rounded-lg border border-conflict bg-graphite-900 p-4 text-conflict"
-          >
-            <p className="mb-2">
-              Failed to load timeline
-              {buckets.error instanceof Error ? `: ${buckets.error.message}` : ''}
-            </p>
-            <button
-              type="button"
-              onClick={() => void buckets.refetch()}
-              disabled={buckets.isFetching}
-              className="rounded-md border border-steel bg-graphite-800 px-3 py-1.5 text-text-primary"
-            >
-              Retry
-            </button>
-          </div>
-        ) : null}
+            {buckets.isError ? (
+              <div
+                role="alert"
+                data-testid="timeline-error"
+                className="rounded-lg border border-conflict bg-graphite-900 p-4 text-conflict"
+              >
+                <p className="mb-2">
+                  Failed to load timeline
+                  {buckets.error instanceof Error
+                    ? `: ${buckets.error.message}`
+                    : ''}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void buckets.refetch()}
+                  disabled={buckets.isFetching}
+                  className="rounded-md border border-steel bg-graphite-800 px-3 py-1.5 text-text-primary"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : null}
 
-        {/* Config rail (left) + canvas/table — shell has no config slot yet. */}
-        {showTimeline && (buckets.data || !buckets.isError) ? (
-          <div className="flex gap-2" data-testid="timeline-with-config">
-            <LaneConfigPanel
-              lanes={lanes}
-              onToggle={toggleLane}
-              onMove={moveLane}
-            />
-            <div className="min-w-0 flex-1">
-              {viewMode === 'table' ? (
-                <TimelineTable
-                  viewport={viewport}
-                  unit={unit}
-                  lanes={laneSpecs}
-                  laneData={laneData}
+            {/* Config rail (left) + canvas/table — shell has no config slot yet. */}
+            {showTimeline && (buckets.data || !buckets.isError) ? (
+              <div className="flex gap-2" data-testid="timeline-with-config">
+                <LaneConfigPanel
+                  lanes={lanes}
+                  onToggle={toggleLane}
+                  onMove={moveLane}
                 />
-              ) : (
-                <TimelineCanvas
-                  viewport={viewport}
-                  extent={extent}
-                  unit={unit}
-                  lanes={laneSpecs}
-                  laneData={laneData}
-                  isFetching={buckets.isFetching}
-                  brush={brush}
-                  selectedBucket={
-                    selection?.kind === 'bucket'
-                      ? { bucketIso: selection.bucketIso, lane: selection.lane }
-                      : null
-                  }
-                  onViewportChange={applyViewport}
-                  onBrushChange={setBrush}
-                  onWidthChange={onWidthChange}
-                  onSelectBucket={(bucketIso, laneName) =>
-                    setSelection({ kind: 'bucket', bucketIso, lane: laneName })
-                  }
-                />
-              )}
-            </div>
-          </div>
-        ) : null}
+                <div className="min-w-0 flex-1">
+                  {viewMode === 'table' ? (
+                    <TimelineTable
+                      viewport={viewport}
+                      unit={unit}
+                      lanes={laneSpecs}
+                      laneData={laneData}
+                    />
+                  ) : (
+                    <TimelineCanvas
+                      viewport={viewport}
+                      extent={extent}
+                      unit={unit}
+                      lanes={laneSpecs}
+                      laneData={laneData}
+                      isFetching={buckets.isFetching}
+                      brush={brush}
+                      selectedBucket={
+                        selection?.kind === 'bucket'
+                          ? {
+                              bucketIso: selection.bucketIso,
+                              lane: selection.lane,
+                            }
+                          : null
+                      }
+                      onViewportChange={applyViewport}
+                      onBrushChange={setBrush}
+                      onWidthChange={onWidthChange}
+                      onSelectBucket={(bucketIso, laneName) =>
+                        setSelection({
+                          kind: 'bucket',
+                          bucketIso,
+                          lane: laneName,
+                        })
+                      }
+                      onFocusBucket={(period) => setFocus(period)}
+                    />
+                  )}
+                </div>
+              </div>
+            ) : null}
 
-        {/* Bootstrap: measure width even before viewport is set */}
-        {!showTimeline && !buckets.isError ? (
-          <div
-            className="h-40 w-full rounded-lg border border-steel bg-graphite-900"
-            ref={(el) => {
-              if (el) {
-                const w = el.clientWidth
-                if (w > 0 && w !== pixelWidth) setPixelWidth(w)
-              }
-            }}
-            data-testid="timeline-bootstrap"
-            aria-busy={buckets.isLoading || buckets.isFetching}
-            aria-label="Loading timeline"
-          >
-            <div className="h-0.5 w-full animate-pulse bg-action" />
-          </div>
-        ) : null}
+            {/* Bootstrap: measure width even before viewport is set */}
+            {!showTimeline && !buckets.isError ? (
+              <div
+                className="h-40 w-full rounded-lg border border-steel bg-graphite-900"
+                ref={(el) => {
+                  if (el) {
+                    const w = el.clientWidth
+                    if (w > 0 && w !== pixelWidth) setPixelWidth(w)
+                  }
+                }}
+                data-testid="timeline-bootstrap"
+                aria-busy={buckets.isLoading || buckets.isFetching}
+                aria-label="Loading timeline"
+              >
+                <div className="h-0.5 w-full animate-pulse bg-action" />
+              </div>
+            ) : null}
 
-        {showTimeline && extent ? (
-          <DensityNavigator
-            extent={extent}
-            viewport={viewport}
-            densityBuckets={densityBuckets}
-            onViewportChange={applyViewport}
-          />
-        ) : null}
+            {showTimeline && extent ? (
+              <DensityNavigator
+                extent={extent}
+                viewport={viewport}
+                densityBuckets={densityBuckets}
+                onViewportChange={applyViewport}
+              />
+            ) : null}
+          </>
+        )}
       </section>
 
       {/* Archive coverage stays available behind a collapsed details element */}
