@@ -1,6 +1,7 @@
 # tests/test_events.py
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -443,3 +444,221 @@ def test_audit_rows(db_client: TestClient, db_pool: ConnectionPool) -> None:
     assert "event_create" in actions
     assert "event_edit" in actions
     assert "event_dismiss" in actions
+
+
+def _insert_suggestion_version(
+    pool: ConnectionPool,
+    event_id: str,
+    *,
+    version: int,
+    title: str = "Suggested title",
+    summary: str = "Suggested summary",
+    author: str = "automatic",
+    claims: list[tuple[str, str, list[dict[str, Any]]]] | None = None,
+) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_event_versions (
+                event_id, version, author, title, summary, derivation
+            ) VALUES (
+                %(eid)s, %(ver)s, %(author)s, %(title)s, %(summary)s,
+                '{"process_version":"event-v1","model_route":"local"}'::jsonb
+            )
+            """,
+            {
+                "eid": event_id,
+                "ver": version,
+                "author": author,
+                "title": title,
+                "summary": summary,
+            },
+        )
+        if claims:
+            for pos, (text, status, cits) in enumerate(claims):
+                conn.execute(
+                    """
+                    INSERT INTO app_event_claims (
+                        event_id, version, position, text, status, citations
+                    ) VALUES (
+                        %(eid)s, %(ver)s, %(pos)s, %(text)s, %(status)s, %(cits)s::jsonb
+                    )
+                    """,
+                    {
+                        "eid": event_id,
+                        "ver": version,
+                        "pos": pos,
+                        "text": text,
+                        "status": status,
+                        "cits": json.dumps(cits),
+                    },
+                )
+        conn.commit()
+
+
+# --- versions / adopt / conflicts (task 3.3) ---
+
+
+def test_versions_endpoint_shape_and_suggestion_labeling(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    _cleanup_events(db_pool)
+    email = _seed_email(db_pool)
+    _login(db_client)
+    created = _create_event(
+        db_client,
+        title="V1",
+        claims=[{"text": "Claim A", "citations": [email["source_id"]], "status": "direct"}],
+    )
+    eid = created["id"]
+    # Analyst edit → v2 is current
+    r = db_client.patch(
+        f"/api/events/{eid}",
+        json={"current_version": 1, "title": "V2 analyst"},
+    )
+    assert r.status_code == 200
+    assert r.json()["current_version"] == 2
+    assert r.json()["has_suggestions"] is False
+
+    # Higher automatic suggestion v3 (not auto-applied)
+    _insert_suggestion_version(
+        db_pool,
+        eid,
+        version=3,
+        title="V3 auto suggestion",
+        claims=[
+            (
+                "Suggested claim",
+                "supported",
+                [
+                    {
+                        "source_id": email["source_id"],
+                        "source_type": "message",
+                        "excerpt": None,
+                        "excerpt_hash": None,
+                        "location": None,
+                    }
+                ],
+            )
+        ],
+    )
+
+    got = db_client.get(f"/api/events/{eid}")
+    assert got.status_code == 200
+    body = got.json()
+    assert body["current_version"] == 2
+    assert body["has_suggestions"] is True
+    assert body["title"] == "V2 analyst"
+
+    versions = db_client.get(f"/api/events/{eid}/versions")
+    assert versions.status_code == 200, versions.text
+    payload = versions.json()
+    assert payload["event_id"] == eid
+    assert payload["current_version"] == 2
+    assert len(payload["versions"]) == 3
+    by_ver = {v["version"]: v for v in payload["versions"]}
+    for v in payload["versions"]:
+        assert "author" in v
+        assert "title" in v
+        assert "summary" in v
+        assert "derivation" in v
+        assert "created_at" in v
+        assert "claims" in v
+        assert "is_suggestion" in v
+    assert by_ver[1]["is_suggestion"] is False
+    assert by_ver[2]["is_suggestion"] is False
+    assert by_ver[3]["is_suggestion"] is True
+    assert by_ver[3]["author"] == "automatic"
+    assert by_ver[3]["title"] == "V3 auto suggestion"
+    assert len(by_ver[3]["claims"]) == 1
+    assert by_ver[3]["claims"][0]["text"] == "Suggested claim"
+
+
+def test_adopt_happy_404_409_and_audit(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    _cleanup_events(db_pool)
+    _login(db_client)
+    created = _create_event(db_client, title="Base")
+    eid = created["id"]
+    _insert_suggestion_version(db_pool, eid, version=2, title="Adopt me")
+
+    # 404 unknown version
+    r404 = db_client.post(
+        f"/api/events/{eid}/adopt/99",
+        json={"current_version": 1},
+    )
+    assert r404.status_code == 404
+
+    # 409 stale current_version
+    r409 = db_client.post(
+        f"/api/events/{eid}/adopt/2",
+        json={"current_version": 99},
+    )
+    assert r409.status_code == 409
+    assert r409.json()["detail"]["error"] == "version_conflict"
+
+    # Happy path
+    r = db_client.post(
+        f"/api/events/{eid}/adopt/2",
+        json={"current_version": 1},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["current_version"] == 2
+    assert body["status"] == "edited"
+    assert body["title"] == "Adopt me"
+    assert body["has_suggestions"] is False
+
+    with db_pool.connection() as conn:
+        actions = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT action FROM app_audit
+                 WHERE action = 'event_adopt'
+                   AND detail->>'event_id' = %(eid)s
+                """,
+                {"eid": eid},
+            ).fetchall()
+        ]
+    assert actions == ["event_adopt"]
+
+
+def test_get_event_conflicts_field(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    _cleanup_events(db_pool)
+    email = _seed_email(db_pool)
+    _login(db_client)
+    created = _create_event(
+        db_client,
+        title="Conflicted",
+        claims=[
+            {
+                "text": "Direct claim",
+                "citations": [email["source_id"]],
+                "status": "direct",
+            },
+            {
+                "text": "Conflicting claim",
+                "citations": [email["source_id"]],
+                "status": "conflicting",
+            },
+            {
+                "text": "Unresolved alone",
+                "citations": [],
+                "status": "unresolved",
+            },
+        ],
+    )
+    got = db_client.get(f"/api/events/{created['id']}")
+    assert got.status_code == 200
+    body = got.json()
+    assert "conflicts" in body
+    assert "has_suggestions" in body
+    assert body["has_suggestions"] is False
+    positions = {c["claim_position"] for c in body["conflicts"]}
+    # Conflicting claim + source-overlap direct/conflicting pair
+    assert 1 in positions  # conflicting claim
+    assert 0 in positions  # overlapping source with direct vs conflicting
+    assert 2 not in positions
+    for c in body["conflicts"]:
+        assert "statuses" in c
+        assert isinstance(c["statuses"], list)

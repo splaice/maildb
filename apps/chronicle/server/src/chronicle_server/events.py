@@ -149,6 +149,12 @@ class EventListRequest(BaseModel):
         return min(value, _LIST_MAX_LIMIT)
 
 
+class AdoptRequest(BaseModel):
+    """Optimistic adopt of a higher-numbered suggestion version."""
+
+    current_version: int = Field(ge=1)
+
+
 # --- helpers ---
 
 
@@ -446,6 +452,60 @@ def _fetch_claims(
     return claims
 
 
+def _max_version(pool: ConnectionPool, event_id: UUID) -> int:
+    with pool.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT coalesce(max(version), 0)
+              FROM app_event_versions
+             WHERE event_id = %(eid)s
+            """,
+            {"eid": event_id},
+        ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _has_suggestions(pool: ConnectionPool, event_id: UUID, current_version: int) -> bool:
+    """True when any version number is higher than the analyst-visible current."""
+    return _max_version(pool, event_id) > current_version
+
+
+def _compute_conflicts(claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Claims in conflict: status=conflicting, or source-overlap direct vs conflicting.
+
+    Keep simple: expose per-claim position + statuses so the UI can render both chains.
+    """
+    by_source: dict[str, list[tuple[int, str]]] = {}
+    for claim in claims:
+        pos = int(claim["position"])
+        status = str(claim["status"])
+        for cit in claim.get("citations") or []:
+            if not isinstance(cit, dict):
+                continue
+            sid = cit.get("source_id")
+            if isinstance(sid, str) and sid:
+                by_source.setdefault(sid, []).append((pos, status))
+
+    overlap_positions: set[int] = set()
+    for entries in by_source.values():
+        statuses = {s for _, s in entries}
+        if "direct" in statuses and "conflicting" in statuses:
+            for pos, _ in entries:
+                overlap_positions.add(pos)
+
+    conflicts: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for claim in claims:
+        pos = int(claim["position"])
+        status = str(claim["status"])
+        if status == "conflicting" or pos in overlap_positions:
+            if pos in seen:
+                continue
+            seen.add(pos)
+            conflicts.append({"claim_position": pos, "statuses": [status]})
+    return conflicts
+
+
 def _full_event(pool: ConnectionPool, event_id: UUID) -> dict[str, Any]:
     event = _fetch_event(pool, event_id)
     if event is None:
@@ -463,7 +523,39 @@ def _full_event(pool: ConnectionPool, event_id: UUID) -> dict[str, Any]:
     else:
         out["summary"] = None
         out["derivation"] = {}
+    out["has_suggestions"] = _has_suggestions(pool, event_id, ver)
+    out["conflicts"] = _compute_conflicts(claims)
     return out
+
+
+def _fetch_all_versions(
+    pool: ConnectionPool,
+    event_id: UUID,
+) -> list[dict[str, Any]]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT version, author, title, summary, derivation, created_at
+              FROM app_event_versions
+             WHERE event_id = %(eid)s
+             ORDER BY version ASC
+            """,
+            {"eid": event_id},
+        ).fetchall()
+    versions: list[dict[str, Any]] = []
+    for row in rows:
+        derivation = row[4] if isinstance(row[4], dict) else {}
+        versions.append(
+            {
+                "version": int(row[0]),
+                "author": row[1],
+                "title": row[2],
+                "summary": row[3],
+                "derivation": derivation,
+                "created_at": _iso(row[5]),
+            }
+        )
+    return versions
 
 
 def _insert_claims(
@@ -636,6 +728,101 @@ def get_event(
 ) -> dict[str, Any]:
     """Event + current version + ordered claims with hydrated citations."""
     pool: ConnectionPool = request.app.state.pool
+    return _full_event(pool, event_id)
+
+
+@router.get("/events/{event_id}/versions")
+def list_event_versions(
+    event_id: UUID,
+    request: Request,
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Full version list with claims; higher-than-current versions are suggestions."""
+    pool: ConnectionPool = request.app.state.pool
+    event = _fetch_event(pool, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    current = int(event["current_version"])
+    versions_out: list[dict[str, Any]] = []
+    for ver in _fetch_all_versions(pool, event_id):
+        vnum = int(ver["version"])
+        entry = dict(ver)
+        entry["claims"] = _fetch_claims(pool, event_id, vnum)
+        # Analyst-visible pointer is current_version; higher numbers are suggestions.
+        entry["is_suggestion"] = vnum > current
+        versions_out.append(entry)
+    return {
+        "event_id": str(event_id),
+        "current_version": current,
+        "versions": versions_out,
+    }
+
+
+@router.post("/events/{event_id}/adopt/{version}")
+def adopt_event_version(
+    event_id: UUID,
+    version: int,
+    body: AdoptRequest,
+    request: Request,
+    user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Adopt a suggestion version: point current_version at it, status edited."""
+    pool: ConnectionPool = request.app.state.pool
+    event = _fetch_event(pool, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if int(event["current_version"]) != body.current_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "current_version": event["current_version"],
+            },
+        )
+
+    target = _fetch_version(pool, event_id, version)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    with pool.connection() as conn:
+        updated = conn.execute(
+            """
+            UPDATE app_events
+               SET current_version = %(ver)s,
+                   title = %(title)s,
+                   status = 'edited',
+                   updated_at = now()
+             WHERE id = %(id)s AND current_version = %(cur)s
+            RETURNING id
+            """,
+            {
+                "id": event_id,
+                "ver": version,
+                "title": target["title"],
+                "cur": body.current_version,
+            },
+        ).fetchone()
+        if updated is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "current_version": event["current_version"],
+                },
+            )
+        conn.commit()
+
+    audit(
+        pool,
+        username=user,
+        action="event_adopt",
+        detail={
+            "event_id": str(event_id),
+            "version": version,
+            "from_version": body.current_version,
+        },
+    )
     return _full_event(pool, event_id)
 
 

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { resetWorkingSetStore, useWorkingSetStore } from '../workingset/store'
@@ -43,13 +44,24 @@ const eventPayload = {
   ],
 }
 
-function renderCard(eventId = 'evt-1') {
+function renderCard(
+  eventId = 'evt-1',
+  initialEntries: string[] = ['/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z&sel=e:evt-1'],
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   return render(
     <QueryClientProvider client={client}>
-      <EventCard eventId={eventId} />
+      <MemoryRouter initialEntries={initialEntries}>
+        <Routes>
+          <Route path="/" element={<EventCard eventId={eventId} />} />
+          <Route
+            path="/events/:id/reconstruction"
+            element={<div data-testid="recon-stub">recon</div>}
+          />
+        </Routes>
+      </MemoryRouter>
     </QueryClientProvider>,
   )
 }
@@ -86,11 +98,24 @@ describe('EventCard', () => {
     expect(screen.getByTestId('event-summary')).toHaveTextContent('Chose metal roofing.')
     expect(screen.getByTestId('event-claim')).toHaveTextContent('Metal roof selected')
     expect(screen.getByTestId('event-claim')).toHaveTextContent(/1 citation/)
-    expect(screen.getByTestId('event-reconstruction')).toBeDisabled()
-    expect(screen.getByTestId('event-reconstruction')).toHaveAttribute(
-      'title',
-      'Reconstruction arrives with the next task',
+    expect(screen.getByTestId('event-reconstruction')).toBeEnabled()
+  })
+
+  it('Open reconstruction navigates with chronicle search params', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => eventPayload,
+      }),
     )
+    renderCard()
+    await waitFor(() => expect(screen.getByTestId('event-card')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('event-reconstruction'))
+    await waitFor(() => {
+      expect(screen.getByTestId('recon-stub')).toBeInTheDocument()
+    })
   })
 
   it('confirm and dismiss patch with optimistic version; 409 shows banner', async () => {

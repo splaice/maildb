@@ -10,6 +10,7 @@ import {
 } from '../api/types'
 import type { Viewport } from '../chronicle/timeScale'
 import { toIsoSeconds } from '../workingset/urlState'
+import { DismissedEventsList } from './DismissedEventsList'
 
 export interface GeneratePanelProps {
   scope: QueryScope
@@ -86,48 +87,51 @@ export function GeneratePanel({ scope, viewport }: GeneratePanelProps) {
   })
 
   return (
-    <section
-      className="mt-2 space-y-2 border-t border-steel pt-2"
-      data-testid="generate-events-panel"
-      aria-label="Generate inferred events"
-    >
-      <p className="text-xs text-text-muted" data-testid="generate-events-framing">
-        Inferred events are hypotheses — review before trusting
-      </p>
-      <button
-        type="button"
-        className="w-full rounded-md border border-steel bg-graphite-800 px-2 py-1.5 text-xs text-text-primary hover:border-action disabled:opacity-50"
-        data-testid="generate-events-button"
-        disabled={mutation.isPending}
-        onClick={() => {
-          setResultLine(null)
-          setUnavailable(false)
-          setError(null)
-          mutation.mutate()
-        }}
+    <>
+      <section
+        className="mt-2 space-y-2 border-t border-steel pt-2"
+        data-testid="generate-events-panel"
+        aria-label="Generate inferred events"
       >
-        {mutation.isPending ? 'Generating…' : 'Generate events for visible range'}
-      </button>
-      {mutation.isPending ? (
-        <p className="text-xs text-text-muted" data-testid="generate-events-progress">
-          Detecting bursts and extracting events…
+        <p className="text-xs text-text-muted" data-testid="generate-events-framing">
+          Inferred events are hypotheses — review before trusting
         </p>
-      ) : null}
-      {unavailable ? (
-        <p className="text-xs text-text-muted" data-testid="generate-events-unavailable">
-          Model unavailable — Chronicle still works without generation
-        </p>
-      ) : null}
-      {resultLine ? (
-        <p className="text-xs text-text-primary" data-testid="generate-events-result">
-          {resultLine}
-        </p>
-      ) : null}
-      {error ? (
-        <p className="text-xs text-conflict" role="alert" data-testid="generate-events-error">
-          {error}
-        </p>
-      ) : null}
-    </section>
+        <button
+          type="button"
+          className="w-full rounded-md border border-steel bg-graphite-800 px-2 py-1.5 text-xs text-text-primary hover:border-action disabled:opacity-50"
+          data-testid="generate-events-button"
+          disabled={mutation.isPending}
+          onClick={() => {
+            setResultLine(null)
+            setUnavailable(false)
+            setError(null)
+            mutation.mutate()
+          }}
+        >
+          {mutation.isPending ? 'Generating…' : 'Generate events for visible range'}
+        </button>
+        {mutation.isPending ? (
+          <p className="text-xs text-text-muted" data-testid="generate-events-progress">
+            Detecting bursts and extracting events…
+          </p>
+        ) : null}
+        {unavailable ? (
+          <p className="text-xs text-text-muted" data-testid="generate-events-unavailable">
+            Model unavailable — Chronicle still works without generation
+          </p>
+        ) : null}
+        {resultLine ? (
+          <p className="text-xs text-text-primary" data-testid="generate-events-result">
+            {resultLine}
+          </p>
+        ) : null}
+        {error ? (
+          <p className="text-xs text-conflict" role="alert" data-testid="generate-events-error">
+            {error}
+          </p>
+        ) : null}
+      </section>
+      <DismissedEventsList scope={scope} viewport={viewport} />
+    </>
   )
 }

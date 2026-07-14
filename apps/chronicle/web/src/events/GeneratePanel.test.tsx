@@ -63,6 +63,7 @@ describe('GeneratePanel', () => {
     expect(
       screen.getByText('Inferred events are hypotheses — review before trusting'),
     ).toBeInTheDocument()
+    expect(screen.getByTestId('dismissed-events-list')).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('generate-events-button'))
 

@@ -296,6 +296,12 @@ export interface EventVersion {
   created_at?: string | null
 }
 
+/** Conflict row on GET /api/events/:id (claim statuses for UI conflict panel). */
+export interface EventConflict {
+  claim_position: number
+  statuses: string[]
+}
+
 export interface ChronicleEvent {
   id: string
   title: string
@@ -314,6 +320,54 @@ export interface ChronicleEvent {
   derivation?: Record<string, unknown>
   version?: EventVersion | null
   claims?: EventClaim[]
+  /** True when any version number is higher than current_version. */
+  has_suggestions?: boolean
+  /** Claims with conflicting status or source-overlap conflicts. */
+  conflicts?: EventConflict[]
+}
+
+/** One version row from GET /api/events/:id/versions. */
+export interface EventVersionDetail extends EventVersion {
+  claims: EventClaim[]
+  is_suggestion: boolean
+}
+
+/** GET /api/events/:id/versions */
+export interface EventVersionsResponse {
+  event_id: string
+  current_version: number
+  versions: EventVersionDetail[]
+}
+
+/** POST /api/events/:id/adopt/:version */
+export interface EventAdoptRequest {
+  current_version: number
+}
+
+/** POST /api/events/list */
+export interface EventListRequest {
+  scope?: QueryScope
+  viewport: ChronicleTimeRange
+  include_dismissed?: boolean
+  cursor?: string | null
+  limit?: number
+}
+
+export interface EventListResponse {
+  items: ChronicleEvent[]
+  next_cursor: string | null
+}
+
+/** GET /api/sources/:sid/context */
+export interface SourceContext {
+  id: string
+  start: number
+  end: number
+  excerpt: string
+  context_before: string
+  context_after: string
+  sha256: string
+  window: number
 }
 
 export interface EventCreateRequest {

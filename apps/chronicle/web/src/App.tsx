@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router'
 
 import { LoginPage } from './auth/LoginPage'
 import { RequireAuth } from './auth/RequireAuth'
+import { ReconstructionView } from './events/ReconstructionView'
 import { FilesPage } from './files/FilesPage'
 import { SourcePage } from './reader/SourcePage'
 import { ResearchDeskPage } from './research/ResearchDeskPage'
@@ -28,6 +29,10 @@ export function App() {
         >
           <Route index element={<ChroniclePage />} />
           <Route path="chronicle" element={<ChroniclePage />} />
+          <Route
+            path="events/:id/reconstruction"
+            element={<ReconstructionView />}
+          />
           <Route path="source/:sid" element={<SourcePage />} />
           <Route path="research" element={<ResearchDeskPage />} />
           <Route path="topics" element={<StubPage title="Topics" />} />

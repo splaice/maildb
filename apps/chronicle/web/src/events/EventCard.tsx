@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation, useNavigate } from 'react-router'
 
 import { ApiError } from '../api/client'
 import type { EventType } from '../api/types'
@@ -32,6 +33,8 @@ export interface EventCardProps {
  */
 export function EventCard({ eventId, onClose }: EventCardProps) {
   const setSelection = useWorkingSetStore((s) => s.setSelection)
+  const navigate = useNavigate()
+  const location = useLocation()
   const qc = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [conflictBanner, setConflictBanner] = useState<string | null>(null)
@@ -359,10 +362,16 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
         </button>
         <button
           type="button"
-          className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-muted disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
           data-testid="event-reconstruction"
-          disabled
-          title="Reconstruction arrives with the next task"
+          title="Open claim-to-evidence reconstruction"
+          onClick={() => {
+            // Preserve chronicle URL state so reconstruction Back restores it.
+            void navigate({
+              pathname: `/events/${encodeURIComponent(eventId)}/reconstruction`,
+              search: location.search,
+            })
+          }}
         >
           Open reconstruction
         </button>
