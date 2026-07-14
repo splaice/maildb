@@ -15,6 +15,7 @@ import {
   zoomViewport,
 } from '../chronicle/timeScale'
 import { useChronicleBuckets } from '../chronicle/useChronicleBuckets'
+import { GeneratePanel } from '../events/GeneratePanel'
 import { FocusModeConnected } from '../focus/FocusMode'
 import { useWorkingSetStore } from '../workingset/store'
 import { useArchiveSummary } from './useArchiveSummary'
@@ -323,11 +324,14 @@ export function ChroniclePage() {
             {/* Config rail (left) + canvas/table — shell has no config slot yet. */}
             {showTimeline && (buckets.data || !buckets.isError) ? (
               <div className="flex gap-2" data-testid="timeline-with-config">
-                <LaneConfigPanel
-                  lanes={lanes}
-                  onToggle={toggleLane}
-                  onMove={moveLane}
-                />
+                <div className="flex w-[220px] shrink-0 flex-col gap-2">
+                  <LaneConfigPanel
+                    lanes={lanes}
+                    onToggle={toggleLane}
+                    onMove={moveLane}
+                  />
+                  <GeneratePanel scope={scope} viewport={viewport} />
+                </div>
                 <div className="min-w-0 flex-1">
                   {viewMode === 'table' ? (
                     <TimelineTable

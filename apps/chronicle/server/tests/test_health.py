@@ -66,6 +66,21 @@ def _assert_health_shape(body: dict[str, Any]) -> None:
         _assert_nonneg_int(rec["messages_inserted"])
         _assert_nonneg_int(rec["messages_skipped"])
 
+    assert "audit_tail" in body
+    assert isinstance(body["audit_tail"], list)
+    assert len(body["audit_tail"]) <= 25
+    for row in body["audit_tail"]:
+        assert "at" in row
+        assert "username" in row
+        assert "action" in row
+        assert "detail" in row
+        assert row["action"] in (
+            "ask",
+            "events_generate",
+            "workspace_export",
+            "download",
+        )
+
     assert "generated_at" in body
     assert isinstance(body["generated_at"], str)
     assert len(body["generated_at"]) > 0

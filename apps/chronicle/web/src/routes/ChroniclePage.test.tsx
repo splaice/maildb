@@ -172,6 +172,35 @@ describe('ChroniclePage working-set wiring', () => {
     })
   })
 
+  it('mounts GeneratePanel under the lane config rail', async () => {
+    // Deep-link viewport so hydrate keeps showTimeline true (config rail mounts).
+    window.history.replaceState(
+      null,
+      '',
+      '/?vf=2014-01-01T00:00:00Z&vt=2019-01-01T00:00:00Z',
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/?vf=2014-01-01T00:00:00Z&vt=2019-01-01T00:00:00Z'])
+
+    expect(await screen.findByTestId('timeline-with-config')).toBeInTheDocument()
+    expect(screen.getByTestId('generate-events-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('generate-events-button')).toHaveTextContent(
+      /Generate events for visible range/,
+    )
+    expect(
+      screen.getByText('Inferred events are hypotheses — review before trusting'),
+    ).toBeInTheDocument()
+  })
+
   it('View as table toggles store view', async () => {
     vi.stubGlobal(
       'fetch',

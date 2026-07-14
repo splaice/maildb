@@ -95,13 +95,55 @@ export interface ImportHistoryRow {
   messages_skipped: number
 }
 
+/** Last 25 model/export audit rows (ask, events_generate, workspace_export, download). */
+export interface AuditTailRow {
+  at: string | null
+  username: string
+  action: string
+  detail: Record<string, unknown>
+}
+
 export interface ArchiveHealth {
   coverage: HealthCoverage
   threading: HealthThreading
   extraction: HealthExtraction
   embeddings: HealthEmbeddings
   imports: ImportHistoryRow[]
+  /** Model & export activity (spec §11.1 Audit). */
+  audit_tail?: AuditTailRow[]
   generated_at: string
+}
+
+/** POST /api/events/generate */
+
+export interface EventGenerateRequest {
+  scope?: QueryScope
+  viewport: ChronicleTimeRange
+}
+
+export interface EventGenerateResult {
+  bursts: number
+  created: number
+  superseded: number
+  suggested: number
+  skipped_unavailable: boolean
+}
+
+export interface EventGenerateUnavailable {
+  available: false
+}
+
+export type EventGenerateResponse = EventGenerateResult | EventGenerateUnavailable
+
+export function isEventGenerateUnavailable(
+  body: EventGenerateResponse,
+): body is EventGenerateUnavailable {
+  return (
+    body != null &&
+    typeof body === 'object' &&
+    'available' in body &&
+    (body as EventGenerateUnavailable).available === false
+  )
 }
 
 /** POST /api/chronicle/buckets */
