@@ -15,6 +15,7 @@ from chronicle_server.chronicle import router as chronicle_router
 from chronicle_server.config import ChronicleSettings
 from chronicle_server.db import create_pool, ensure_user, init_app_tables
 from chronicle_server.health import router as health_router
+from chronicle_server.interpret import router as interpret_router
 from chronicle_server.search import router as search_router
 from chronicle_server.sources import router as sources_router
 
@@ -65,6 +66,7 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(chronicle_router, prefix="/api/chronicle")
     app.include_router(health_router, prefix="/api/health")
     app.include_router(search_router, prefix="/api")
+    app.include_router(interpret_router, prefix="/api")
     app.include_router(sources_router, prefix="/api")
     app.include_router(ask_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.

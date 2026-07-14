@@ -2,12 +2,28 @@ import { useState } from 'react'
 
 import type { ConstraintChip } from './scopeChips'
 
+/** Chip origin for interpretation badges (syntax=steel, model=topic-purple). */
+export type ChipOriginBadge = 'syntax' | 'model' | string
+
+/**
+ * Display chip for the constraint row. Extends the scope-derived chip with
+ * optional origin badge and unresolved-person state from interpret.
+ */
+export interface DisplayConstraintChip extends ConstraintChip {
+  origin?: ChipOriginBadge
+  /** When true, muted-editable; edit with an address converts to sender. */
+  unresolved?: boolean
+  display?: string | null
+}
+
 export interface ConstraintChipsProps {
-  chips: ConstraintChip[]
+  chips: DisplayConstraintChip[]
   unsupported: string[]
-  onEdit: (chip: ConstraintChip, newValue: string) => void
-  onRemove: (chip: ConstraintChip) => void
+  onEdit: (chip: DisplayConstraintChip, newValue: string) => void
+  onRemove: (chip: DisplayConstraintChip) => void
   onRemoveUnsupported: (token: string) => void
+  /** Resolve unresolved_person by filling an address (becomes sender). */
+  onResolvePerson?: (chip: DisplayConstraintChip, address: string) => void
 }
 
 const chipClass =
@@ -19,12 +35,28 @@ const mutedChipClass =
 const removeClass =
   'rounded px-1 text-text-muted hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-action'
 
+function OriginDot({ origin }: { origin: ChipOriginBadge }) {
+  const isModel = origin === 'model'
+  const color = isModel ? 'bg-topic' : 'bg-steel'
+  const title = isModel ? 'Origin: model' : origin === 'syntax' ? 'Origin: syntax' : `Origin: ${origin}`
+  return (
+    <span
+      className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${color}`}
+      title={title}
+      data-testid="chip-origin-dot"
+      data-origin={origin}
+      aria-label={title}
+    />
+  )
+}
+
 export function ConstraintChips({
   chips,
   unsupported,
   onEdit,
   onRemove,
   onRemoveUnsupported,
+  onResolvePerson,
 }: ConstraintChipsProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -42,23 +74,36 @@ export function ConstraintChips({
     >
       {chips.map((chip) => {
         const isEditing = editingId === chip.id
+        const isUnresolved = Boolean(chip.unresolved)
+        const rowClass = isUnresolved ? mutedChipClass : chipClass
+        const labelValue = chip.display && !isUnresolved ? chip.display : chip.value
+
         return (
           <span
             key={chip.id}
             role="listitem"
-            className={chipClass}
+            className={rowClass}
             data-testid={`constraint-chip-${chip.id}`}
+            data-unresolved={isUnresolved ? 'true' : undefined}
+            data-origin={chip.origin}
           >
             {isEditing ? (
               <form
                 className="flex items-center gap-1"
                 onSubmit={(e) => {
                   e.preventDefault()
-                  onEdit(chip, editValue)
+                  const trimmed = editValue.trim()
+                  if (isUnresolved && onResolvePerson) {
+                    onResolvePerson(chip, trimmed)
+                  } else {
+                    onEdit(chip, trimmed)
+                  }
                   setEditingId(null)
                 }}
               >
-                <span className="text-text-muted">{chip.category}:</span>
+                <span className="text-text-muted">
+                  {isUnresolved ? 'person' : chip.category}:
+                </span>
                 <input
                   autoFocus
                   value={editValue}
@@ -66,9 +111,14 @@ export function ConstraintChips({
                   onKeyDown={(e) => {
                     if (e.key === 'Escape') setEditingId(null)
                   }}
+                  placeholder={isUnresolved ? 'email@example.com' : undefined}
                   className="w-40 rounded border border-steel bg-graphite-900 px-1 text-text-primary"
                   data-testid={`constraint-edit-${chip.id}`}
-                  aria-label={`Edit ${chip.category}`}
+                  aria-label={
+                    isUnresolved
+                      ? `Resolve person ${chip.value} to address`
+                      : `Edit ${chip.category}`
+                  }
                 />
                 <button type="submit" className={removeClass}>
                   OK
@@ -76,21 +126,41 @@ export function ConstraintChips({
               </form>
             ) : (
               <>
+                {chip.origin ? <OriginDot origin={chip.origin} /> : null}
                 <button
                   type="button"
                   className="text-left"
                   onClick={() => {
                     setEditingId(chip.id)
-                    setEditValue(chip.value)
+                    setEditValue(isUnresolved ? '' : chip.value)
                   }}
-                  aria-label={`Edit ${chip.category}: ${chip.value}`}
+                  aria-label={
+                    isUnresolved
+                      ? `Resolve person: ${chip.value}`
+                      : `Edit ${chip.category}: ${labelValue}`
+                  }
+                  data-testid={
+                    isUnresolved
+                      ? `unresolved-person-${chip.value}`
+                      : undefined
+                  }
                 >
-                  <span className="text-text-muted">{chip.category}:</span> {chip.value}
+                  <span className="text-text-muted">
+                    {isUnresolved ? 'person' : chip.category}:
+                  </span>{' '}
+                  {isUnresolved ? chip.value : labelValue}
+                  {chip.display && !isUnresolved && chip.display !== chip.value ? (
+                    <span className="text-text-muted"> ({chip.value})</span>
+                  ) : null}
                 </button>
                 <button
                   type="button"
                   className={removeClass}
-                  aria-label={`Remove ${chip.category} ${chip.value}`}
+                  aria-label={
+                    isUnresolved
+                      ? `Remove unresolved ${chip.value}`
+                      : `Remove ${chip.category} ${chip.value}`
+                  }
                   onClick={() => onRemove(chip)}
                 >
                   ×

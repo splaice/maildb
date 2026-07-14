@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { SearchResponse, SearchResult } from '../api/types'
+import type { InterpretResponse, SearchResponse, SearchResult } from '../api/types'
 import { InspectorPanel } from '../inspector/InspectorPanel'
 import { ScopeBar } from '../shell/ScopeBar'
 import { resetWorkingSetStore, useWorkingSetStore } from '../workingset/store'
@@ -97,11 +97,17 @@ function renderResearch(initialEntries: string[] = ['/research']) {
 describe('ResearchDeskPage', () => {
   beforeEach(() => {
     resetWorkingSetStore()
+    try {
+      localStorage.removeItem('chronicle.skipInterpretation')
+    } catch {
+      /* ignore */
+    }
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
     resetWorkingSetStore()
+    vi.useRealTimers()
   })
 
   it('renders parsed constraints as editable chips; edit re-runs with updated scope', async () => {
@@ -646,6 +652,281 @@ describe('ResearchDeskPage', () => {
     expect(await screen.findByTestId('result-card-msg_1')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByTestId('ask-answer-text')).toHaveTextContent(/Metal/)
+    })
+  })
+
+  it('NL query triggers interpret then search (mock ordering)', async () => {
+    const order: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('/api/archive/summary')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            accounts: [],
+            date_range: { from: null, to: null },
+            counts: { messages: 0, threads: 0, attachments: 0, contacts: 0 },
+            extraction: { extracted: 0, failed: 0, skipped: 0, pending: 0 },
+            embedding: { embedded: 0, missing: 0 },
+            versions: { schema: 'x', api: '0' },
+          }),
+        } as Response
+      }
+      if (u.includes('/api/query/interpret')) {
+        order.push('interpret')
+        const interp: InterpretResponse = {
+          scope: {
+            senders: ['alice@example.com'],
+            date: { from: '2014-01-01', to: '2018-12-31' },
+            free_text: 'roof material',
+          },
+          free_text: 'roof material',
+          chips: [
+            { kind: 'sender', value: 'alice@example.com', origin: 'model' },
+            {
+              kind: 'date',
+              value: '2014-01-01..2018-12-31',
+              origin: 'model',
+            },
+          ],
+          model_used: true,
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => interp,
+        } as Response
+      }
+      if (u.includes('/api/search')) {
+        order.push('search')
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          query: string
+          scope: { senders?: string[] }
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            mockSearchResponse({
+              results: [msgResult],
+              scope: {
+                senders: body.scope?.senders ?? ['alice@example.com'],
+                free_text: body.query,
+              },
+            }),
+        } as Response
+      }
+      throw new Error(`unexpected: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderResearch()
+    fireEvent.change(screen.getByTestId('research-query-input'), {
+      target: { value: 'PDFs Alice sent about the renovation from 2014' },
+    })
+    fireEvent.submit(screen.getByTestId('query-row'))
+
+    await waitFor(() => {
+      const i = order.indexOf('interpret')
+      expect(i).toBeGreaterThanOrEqual(0)
+      expect(order[i + 1]).toBe('search')
+    })
+    await waitFor(() => {
+      const dots = screen.getAllByTestId('chip-origin-dot')
+      expect(dots.length).toBeGreaterThanOrEqual(1)
+      expect(dots.some((d) => d.getAttribute('data-origin') === 'model')).toBe(true)
+    })
+  })
+
+  it('operator query skips interpret', async () => {
+    const order: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      const u = String(url)
+      if (u.includes('/api/archive/summary')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            accounts: [],
+            date_range: { from: null, to: null },
+            counts: { messages: 0, threads: 0, attachments: 0, contacts: 0 },
+            extraction: { extracted: 0, failed: 0, skipped: 0, pending: 0 },
+            embedding: { embedded: 0, missing: 0 },
+            versions: { schema: 'x', api: '0' },
+          }),
+        } as Response
+      }
+      if (u.includes('/api/query/interpret')) {
+        order.push('interpret')
+        return { ok: true, status: 200, json: async () => ({}) } as Response
+      }
+      if (u.includes('/api/search')) {
+        order.push('search')
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            mockSearchResponse({
+              results: [msgResult],
+              scope: { senders: ['alice@example.com'], free_text: 'roof' },
+            }),
+        } as Response
+      }
+      throw new Error(`unexpected: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderResearch()
+    fireEvent.change(screen.getByTestId('research-query-input'), {
+      target: { value: 'from:alice@example.com roof' },
+    })
+    fireEvent.submit(screen.getByTestId('query-row'))
+
+    await waitFor(() => {
+      expect(order).toContain('search')
+    })
+    expect(order).not.toContain('interpret')
+  })
+
+  it('3s interpret timeout falls through to search', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const order: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('/api/archive/summary')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            accounts: [],
+            date_range: { from: null, to: null },
+            counts: { messages: 0, threads: 0, attachments: 0, contacts: 0 },
+            extraction: { extracted: 0, failed: 0, skipped: 0, pending: 0 },
+            embedding: { embedded: 0, missing: 0 },
+            versions: { schema: 'x', api: '0' },
+          }),
+        } as Response
+      }
+      if (u.includes('/api/query/interpret')) {
+        order.push('interpret')
+        // Hang until aborted
+        await new Promise<void>((_resolve, reject) => {
+          const signal = init?.signal
+          if (signal?.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'))
+            return
+          }
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'))
+          })
+        })
+      }
+      if (u.includes('/api/search')) {
+        order.push('search')
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            mockSearchResponse({
+              results: [msgResult],
+              scope: { free_text: 'slow interpret query text' },
+            }),
+        } as Response
+      }
+      throw new Error(`unexpected: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderResearch()
+    fireEvent.change(screen.getByTestId('research-query-input'), {
+      target: { value: 'slow interpret query text here' },
+    })
+    fireEvent.submit(screen.getByTestId('query-row'))
+
+    await vi.advanceTimersByTimeAsync(3100)
+
+    await waitFor(() => {
+      expect(order).toContain('search')
+      expect(order).toContain('interpret')
+    })
+    // Interpret is attempted before the fallthrough search (may share the list
+    // with an in-flight call from a prior test in the suite).
+    const i = order.indexOf('interpret')
+    expect(order.slice(i).some((x) => x === 'search')).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('unresolved chip edit-to-apply converts to sender and searches', async () => {
+    const searchBodies: Array<{ scope: { senders?: string[] } }> = []
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('/api/archive/summary')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            accounts: [],
+            date_range: { from: null, to: null },
+            counts: { messages: 0, threads: 0, attachments: 0, contacts: 0 },
+            extraction: { extracted: 0, failed: 0, skipped: 0, pending: 0 },
+            embedding: { embedded: 0, missing: 0 },
+            versions: { schema: 'x', api: '0' },
+          }),
+        } as Response
+      }
+      if (u.includes('/api/query/interpret')) {
+        const interp: InterpretResponse = {
+          scope: { free_text: 'budget notes' },
+          free_text: 'budget notes',
+          chips: [
+            {
+              kind: 'unresolved_person',
+              value: 'Alex',
+              origin: 'model',
+              display: 'Alex',
+            },
+          ],
+          model_used: true,
+        }
+        return { ok: true, status: 200, json: async () => interp } as Response
+      }
+      if (u.includes('/api/search')) {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          scope: { senders?: string[] }
+        }
+        searchBodies.push(body)
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            mockSearchResponse({
+              results: [msgResult],
+              scope: { ...body.scope, free_text: 'budget notes' },
+            }),
+        } as Response
+      }
+      throw new Error(`unexpected: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderResearch()
+    fireEvent.change(screen.getByTestId('research-query-input'), {
+      target: { value: 'messages from Alex about budget notes' },
+    })
+    fireEvent.submit(screen.getByTestId('query-row'))
+
+    const unresolved = await screen.findByTestId('unresolved-person-Alex')
+    fireEvent.click(unresolved)
+    const edit = await screen.findByTestId('constraint-edit-unresolved:Alex')
+    fireEvent.change(edit, { target: { value: 'alex@example.com' } })
+    fireEvent.submit(edit.closest('form')!)
+
+    await waitFor(() => {
+      const withSender = searchBodies.filter((b) =>
+        b.scope?.senders?.includes('alex@example.com'),
+      )
+      expect(withSender.length).toBeGreaterThanOrEqual(1)
     })
   })
 })

@@ -400,6 +400,29 @@ export interface SearchResponse {
   degraded: Record<string, string> | null
 }
 
+/** POST /api/query/interpret */
+
+export type ChipOrigin = 'syntax' | 'model'
+
+export interface InterpretChip {
+  kind: string
+  value: string
+  origin: ChipOrigin | string
+  display?: string | null
+}
+
+export interface InterpretRequest {
+  text: string
+  scope?: QueryScope
+}
+
+export interface InterpretResponse {
+  scope: QueryScope
+  free_text: string
+  chips: InterpretChip[]
+  model_used: boolean
+}
+
 /** POST /api/ask */
 
 export type DeskMode = 'search' | 'ask'

@@ -4,6 +4,8 @@ import { useNavigate } from 'react-router'
 import { apiPost, ApiError } from '../api/client'
 import type {
   DeskMode,
+  InterpretChip,
+  InterpretResponse,
   QueryScope,
   SearchMode,
   SearchRequest,
@@ -14,7 +16,7 @@ import { AnswerBlock } from '../ask/AnswerBlock'
 import { isScopePristine } from '../workingset/urlState'
 import type { ResearchGrouping } from '../workingset/urlState'
 import { useWorkingSetStore } from '../workingset/store'
-import { ConstraintChips } from './ConstraintChips'
+import { ConstraintChips, type DisplayConstraintChip } from './ConstraintChips'
 import { groupResults } from './grouping'
 import { ResultCard } from './ResultCard'
 import {
@@ -23,6 +25,101 @@ import {
   removeChipFromScope,
   type ConstraintChip,
 } from './scopeChips'
+
+const INTERPRET_TIMEOUT_MS = 3000
+const SKIP_INTERPRET_KEY = 'chronicle.skipInterpretation'
+
+/** NL-like when the query has no `:` operators (structured syntax uses op:value). */
+function isNaturalLanguageQuery(text: string): boolean {
+  return !text.includes(':')
+}
+
+function readSkipInterpretation(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false
+    return localStorage.getItem(SKIP_INTERPRET_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeSkipInterpretation(value: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    if (value) localStorage.setItem(SKIP_INTERPRET_KEY, '1')
+    else localStorage.removeItem(SKIP_INTERPRET_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+function kindToCategory(kind: string): string {
+  switch (kind) {
+    case 'sender':
+      return 'from'
+    case 'recipient':
+      return 'to'
+    case 'participant':
+      return 'participant'
+    case 'file_type':
+      return 'filetype'
+    case 'has_attachment':
+      return 'has'
+    case 'unresolved_person':
+      return 'person'
+    default:
+      return kind
+  }
+}
+
+function kindToField(kind: string): ConstraintChip['field'] {
+  switch (kind) {
+    case 'sender':
+      return 'senders'
+    case 'recipient':
+      return 'recipients'
+    case 'participant':
+      return 'participants'
+    case 'date':
+      return 'date'
+    case 'mailbox':
+      return 'mailboxes'
+    case 'subject':
+      return 'subject_contains'
+    case 'has_attachment':
+      return 'has_attachment'
+    case 'file_type':
+      return 'file_types'
+    case 'filename':
+      return 'filenames'
+    case 'source_type':
+      return 'source_types'
+    default:
+      return 'senders'
+  }
+}
+
+function interpretChipsToDisplay(chips: InterpretChip[]): DisplayConstraintChip[] {
+  return chips
+    .filter((c) => c.kind !== 'unsupported')
+    .map((c, i) => ({
+      id:
+        c.kind === 'unresolved_person'
+          ? `unresolved:${c.value}`
+          : `${c.kind}:${c.value}:${i}`,
+      category: kindToCategory(c.kind),
+      value: c.value,
+      field: kindToField(c.kind),
+      index: 0,
+      origin: c.origin,
+      unresolved: c.kind === 'unresolved_person',
+      display: c.display ?? null,
+    }))
+}
+
+function scopeChipsToDisplay(chips: ConstraintChip[]): DisplayConstraintChip[] {
+  return chips.map((c) => ({ ...c }))
+}
 
 const MODES: { value: SearchMode; label: string; description: string }[] = [
   {
@@ -97,6 +194,10 @@ export function ResearchDeskPage() {
   const [askQuestion, setAskQuestion] = useState('')
   const [askRunId, setAskRunId] = useState(0)
   const [askScope, setAskScope] = useState<QueryScope>({})
+  const [interpretChips, setInterpretChips] = useState<DisplayConstraintChip[] | null>(
+    null,
+  )
+  const [skipInterpretation, setSkipInterpretation] = useState(readSkipInterpretation)
   const abortRef = useRef<AbortController | null>(null)
   const freeTextRef = useRef(storeQuery)
 
@@ -198,17 +299,61 @@ export function ResearchDeskPage() {
     const sc = useWorkingSetStore.getState().scope
     if (deskMode === 'ask') {
       // Ask streams grounded answer; also run search so ranked sources stay visible (RD-004).
+      // Interpretation is skipped in Ask mode.
+      setInterpretChips(null)
       setAskQuestion(q)
       setAskScope(stripFreeText(sc))
       setAskRunId((n) => n + 1)
       void runSearch({ query: q, mode: 'hybrid', scope: sc })
       return
     }
-    void runSearch({
-      query: q,
-      mode,
-      scope: sc,
-    })
+
+    const shouldInterpret =
+      !skipInterpretation && isNaturalLanguageQuery(q) && q.trim().length > 0
+
+    if (!shouldInterpret) {
+      setInterpretChips(null)
+      void runSearch({ query: q, mode, scope: sc })
+      return
+    }
+
+    void (async () => {
+      const ac = new AbortController()
+      const timer = window.setTimeout(() => ac.abort(), INTERPRET_TIMEOUT_MS)
+      try {
+        const interp = await apiPost<InterpretResponse>(
+          '/api/query/interpret',
+          { text: q, scope: sc },
+          ac.signal,
+        )
+        window.clearTimeout(timer)
+        if (ac.signal.aborted) {
+          void runSearch({ query: q, mode, scope: sc })
+          return
+        }
+        const proposalScope = stripFreeText(interp.scope)
+        const residual = interp.free_text ?? residualQuery(interp.scope, q)
+        freeTextRef.current = residual
+        setScope(proposalScope)
+        setQuery(residual)
+        setInputValue(residual)
+        setInterpretChips(interpretChipsToDisplay(interp.chips ?? []))
+        const unsupportedFromChips = (interp.chips ?? [])
+          .filter((c) => c.kind === 'unsupported')
+          .map((c) => c.value)
+        setUnsupported(unsupportedFromChips)
+        void runSearch({
+          query: residual,
+          mode,
+          scope: proposalScope,
+        })
+      } catch {
+        window.clearTimeout(timer)
+        // Interpret failure/timeout → run search directly (never block search).
+        setInterpretChips(null)
+        void runSearch({ query: q, mode, scope: sc })
+      }
+    })()
   }
 
   const onSelectAskSource = useCallback(
@@ -224,20 +369,59 @@ export function ResearchDeskPage() {
 
   const reRunWithScope = (nextScope: QueryScope) => {
     setScope(nextScope)
+    setInterpretChips(null)
     const q = freeTextRef.current
     void runSearch({ query: q, mode, scope: nextScope })
   }
 
-  const onEditChip = (chip: ConstraintChip, newValue: string) => {
+  const onEditChip = (chip: DisplayConstraintChip, newValue: string) => {
     const base = responseScope ?? scope
     const next = applyChipEdit(stripFreeText(base), chip, newValue)
     reRunWithScope(next)
   }
 
-  const onRemoveChip = (chip: ConstraintChip) => {
+  const onRemoveChip = (chip: DisplayConstraintChip) => {
+    if (chip.unresolved) {
+      setInterpretChips((prev) => (prev ? prev.filter((c) => c.id !== chip.id) : prev))
+      return
+    }
     const base = responseScope ?? scope
     const next = removeChipFromScope(stripFreeText(base), chip)
     reRunWithScope(next)
+  }
+
+  const onResolvePerson = (chip: DisplayConstraintChip, address: string) => {
+    const trimmed = address.trim()
+    if (!trimmed) return
+    const base = stripFreeText(responseScope ?? scope)
+    const senders = [...(base.senders ?? []), trimmed]
+    const next: QueryScope = { ...base, senders }
+    // Convert unresolved chip to a sender chip in the row, then search.
+    setInterpretChips((prev) => {
+      if (!prev) return prev
+      return prev.map((c) =>
+        c.id === chip.id
+          ? {
+              ...c,
+              id: `sender:${trimmed}`,
+              category: 'from',
+              value: trimmed,
+              field: 'senders' as const,
+              index: senders.length - 1,
+              unresolved: false,
+              display: null,
+              origin: c.origin ?? 'model',
+            }
+          : c,
+      )
+    })
+    setScope(next)
+    void runSearch({ query: freeTextRef.current, mode, scope: next })
+  }
+
+  const onSkipInterpretationChange = (checked: boolean) => {
+    setSkipInterpretation(checked)
+    writeSkipInterpretation(checked)
   }
 
   const onRemoveUnsupported = (token: string) => {
@@ -362,7 +546,8 @@ export function ResearchDeskPage() {
     navigate('/')
   }
 
-  const chips = chipsFromSearchScope(responseScope ?? scope)
+  const chips: DisplayConstraintChip[] =
+    interpretChips ?? scopeChipsToDisplay(chipsFromSearchScope(responseScope ?? scope))
   const freeText = freeTextRef.current
   const emptyHint = !hasSearched && isScopePristine(scope) && !inputValue.trim()
   const showEmptyScopeHint =
@@ -557,12 +742,28 @@ export function ResearchDeskPage() {
           </button>
         </form>
 
+        {deskMode === 'search' ? (
+          <label
+            className="flex items-center gap-2 text-[11px] text-text-muted"
+            data-testid="skip-interpretation-toggle"
+          >
+            <input
+              type="checkbox"
+              checked={skipInterpretation}
+              onChange={(e) => onSkipInterpretationChange(e.target.checked)}
+              data-testid="skip-interpretation-checkbox"
+            />
+            Skip interpretation
+          </label>
+        ) : null}
+
         <ConstraintChips
           chips={chips}
           unsupported={unsupported}
           onEdit={onEditChip}
           onRemove={onRemoveChip}
           onRemoveUnsupported={onRemoveUnsupported}
+          onResolvePerson={onResolvePerson}
         />
 
         {deskMode === 'ask' && askRunId > 0 ? (
