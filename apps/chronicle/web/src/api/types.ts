@@ -103,3 +103,58 @@ export interface ArchiveHealth {
   imports: ImportHistoryRow[]
   generated_at: string
 }
+
+/** POST /api/chronicle/buckets */
+
+export interface QueryScopeDate {
+  from?: string | null
+  to?: string | null
+}
+
+export interface QueryScope {
+  version?: number
+  date?: QueryScopeDate | null
+  mailboxes?: string[]
+  senders?: string[]
+}
+
+export interface ChronicleTimeRange {
+  from: string
+  to: string
+}
+
+export interface BucketPoint {
+  bucket: string
+  count: number
+}
+
+export interface DensitySeries {
+  unit: string
+  buckets: BucketPoint[]
+}
+
+export interface ChronicleExtent {
+  from: string | null
+  to: string | null
+}
+
+/** Request body for POST /api/chronicle/buckets */
+export interface ChronicleRequest {
+  scope?: QueryScope
+  viewport: ChronicleTimeRange
+  pixel_width?: number
+  aggregation?: string
+  lanes?: string[]
+}
+
+/** Response body for POST /api/chronicle/buckets */
+export interface ChronicleBuckets {
+  scope_fingerprint: string
+  aggregation: string
+  unit: string
+  viewport: ChronicleTimeRange
+  lanes: Record<string, BucketPoint[]>
+  density: DensitySeries
+  extent: ChronicleExtent
+  generated_at: string
+}

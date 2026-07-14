@@ -86,7 +86,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 1, Task 1.2 (timeline canvas MVP). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 1, Task 1.3 (working set + URL state). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -97,3 +97,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 0.4 Data Health: /api/health/archive + /data-health page | chronicle-phase-0 | Approved; Phase 0 complete (75 server + 17 web tests) |
 | 2026-07-13 | Phase 0 PR #106 merged (2e48ae9) | #106 | CI green |
 | 2026-07-13 | 1.1 buckets endpoint: QueryScope v1, auto-aggregation, lanes, density, fingerprint | chronicle-phase-1 | Approved; 93 server tests |
+| 2026-07-13 | 1.2 timeline canvas: timeScale core, pan/zoom/brush, navigator, table alt | chronicle-phase-1 | Approved after reviewer fix (passive React onWheel → native non-passive listener); 32 web tests |
