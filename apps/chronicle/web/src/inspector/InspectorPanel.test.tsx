@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { resetWorkingSetStore, useWorkingSetStore } from '../workingset/store'
@@ -91,6 +91,101 @@ describe('InspectorPanel flow', () => {
     renderPanel()
     expect(await screen.findByTestId('event-card')).toBeInTheDocument()
     expect(screen.getByTestId('event-origin-badge')).toHaveTextContent(/Automatic/)
+    expect(screen.getByTestId('pin-to-workspace-btn')).toBeInTheDocument()
+  })
+
+  it('Enter on selected event opens reconstruction; P opens pin menu', async () => {
+    const eventBody = {
+      id: 'evt-99',
+      title: 'Burst',
+      time_start: '2015-06-01T00:00:00Z',
+      time_end: null,
+      time_precision: 'day',
+      origin: 'automatic',
+      event_type: 'decision',
+      status: 'unreviewed',
+      evidence_strength: 'high',
+      current_version: 1,
+      summary: null,
+      claims: [],
+      version: {
+        version: 1,
+        author: 'automatic',
+        title: 'Burst',
+        summary: null,
+        derivation: {
+          generated_at: '2026-07-13T12:00:00Z',
+          process_version: 'event-v1',
+          model_route: 'local-llama',
+        },
+      },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/events/evt-99')) {
+          return { ok: true, status: 200, json: async () => eventBody } as Response
+        }
+        if (
+          u.includes('/api/workspaces') &&
+          method === 'GET' &&
+          !u.includes('/blocks')
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  id: 'ws-1',
+                  name: 'Case',
+                  updated_at: null,
+                  counts: {
+                    blocks: 0,
+                    pins: 0,
+                    notes: 0,
+                    answers: 0,
+                    headings: 0,
+                  },
+                },
+              ],
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+
+    useWorkingSetStore.getState().setSelection({ kind: 'event', eventId: 'evt-99' })
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route path="/" element={<InspectorPanel />} />
+            <Route
+              path="/events/:id/reconstruction"
+              element={<div data-testid="recon-stub">recon</div>}
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByTestId('event-card')).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'p' })
+    expect(await screen.findByTestId('pin-workspace-menu')).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Enter' })
+    await waitFor(() => {
+      expect(screen.getByTestId('recon-stub')).toBeInTheDocument()
+    })
   })
 
   it('bucket → list → message with mocked API', async () => {

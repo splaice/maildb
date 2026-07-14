@@ -44,6 +44,28 @@ const eventPayload = {
   ],
 }
 
+const automaticEventPayload = {
+  ...eventPayload,
+  origin: 'automatic',
+  evidence_strength: 'medium',
+  derivation: {
+    generated_at: '2026-07-13T12:00:00Z',
+    process_version: 'event-v1',
+    model_route: 'local-llama',
+    scope_fingerprint: 'qs_abc123def456',
+  },
+  version: {
+    ...eventPayload.version,
+    author: 'automatic',
+    derivation: {
+      generated_at: '2026-07-13T12:00:00Z',
+      process_version: 'event-v1',
+      model_route: 'local-llama',
+      scope_fingerprint: 'qs_abc123def456',
+    },
+  },
+}
+
 function renderCard(
   eventId = 'evt-1',
   initialEntries: string[] = ['/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z&sel=e:evt-1'],
@@ -221,5 +243,88 @@ describe('EventCard', () => {
       kind: 'message',
       sid: 'msg_42',
     })
+  })
+
+  it('automatic origin shows derivation line', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => automaticEventPayload,
+      }),
+    )
+    renderCard()
+    await waitFor(() => expect(screen.getByTestId('event-card')).toBeInTheDocument())
+    expect(screen.getByTestId('event-origin-badge')).toHaveTextContent(/Automatic/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(/Generated 2026-07-13/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(/event-v1/)
+    expect(screen.getByTestId('event-derivation')).toHaveTextContent(/model route local-llama/)
+  })
+
+  it('Enter key opens reconstruction route', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => eventPayload,
+      }),
+    )
+    renderCard()
+    await waitFor(() => expect(screen.getByTestId('event-card')).toBeInTheDocument())
+    fireEvent.keyDown(window, { key: 'Enter' })
+    await waitFor(() => {
+      expect(screen.getByTestId('recon-stub')).toBeInTheDocument()
+    })
+  })
+
+  it('P key opens pin-to-workspace menu', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/events/evt-1')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => eventPayload,
+          } as Response
+        }
+        if (
+          u.includes('/api/workspaces') &&
+          method === 'GET' &&
+          !u.includes('/blocks')
+        ) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  id: 'ws-1',
+                  name: 'Case',
+                  updated_at: null,
+                  counts: {
+                    blocks: 0,
+                    pins: 0,
+                    notes: 0,
+                    answers: 0,
+                    headings: 0,
+                  },
+                },
+              ],
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+    renderCard()
+    await waitFor(() => expect(screen.getByTestId('event-card')).toBeInTheDocument())
+    expect(screen.getByTestId('pin-to-workspace-btn')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'p' })
+    expect(await screen.findByTestId('pin-workspace-menu')).toBeInTheDocument()
   })
 })

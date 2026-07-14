@@ -1,12 +1,14 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router'
 
 import { ApiError } from '../api/client'
 import type { EventType } from '../api/types'
 import { compareRangesAroundEvent } from '../compare/ranges'
+import { PinToWorkspace } from '../workspaces/PinToWorkspace'
 import { useWorkingSetStore } from '../workingset/store'
 import { getEvent, patchEvent } from './api'
+import { formatDerivationLine } from './derivation'
 import { formatEventTime, originLabel } from './format'
 
 const EVENT_TYPES: EventType[] = [
@@ -51,6 +53,46 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
     queryFn: ({ signal }) => getEvent(eventId, signal),
     retry: false,
   })
+
+  // Chronicle params live on window.location (useUrlSync); RR location.search
+  // is often empty. Carry window search so reconstruction Back restores focus.
+  const openReconstruction = useCallback(() => {
+    void navigate({
+      pathname: `/events/${encodeURIComponent(eventId)}/reconstruction`,
+      search: window.location.search || location.search,
+    })
+  }, [eventId, location.search, navigate])
+
+  // §14.2: with an event selected, Enter → reconstruction; P → pin menu.
+  // Capture phase so Enter wins over ChroniclePage's brush→focus handler.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        openReconstruction()
+      } else if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        const btn = document.querySelector<HTMLButtonElement>(
+          '[data-testid="pin-to-workspace-btn"]',
+        )
+        btn?.click()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [openReconstruction])
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ['events', eventId] })
@@ -132,6 +174,9 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
   const evt = query.data
   const summary = evt.summary ?? evt.version?.summary ?? null
   const claims = evt.claims ?? []
+  const derivation = evt.derivation ?? evt.version?.derivation ?? {}
+  const derivationLine =
+    evt.origin === 'automatic' ? formatDerivationLine(derivation) : null
 
   const startEdit = () => {
     setEditTitle(evt.title)
@@ -175,6 +220,14 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
         <p className="text-[11px] text-text-muted" data-testid="event-type">
           Type: {evt.event_type}
         </p>
+        {derivationLine ? (
+          <p
+            className="mt-1 text-[11px] text-text-muted"
+            data-testid="event-derivation"
+          >
+            {derivationLine}
+          </p>
+        ) : null}
       </div>
 
       {conflictBanner ? (
@@ -367,13 +420,7 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
           className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
           data-testid="event-reconstruction"
           title="Open claim-to-evidence reconstruction"
-          onClick={() => {
-            // Preserve chronicle URL state so reconstruction Back restores it.
-            void navigate({
-              pathname: `/events/${encodeURIComponent(eventId)}/reconstruction`,
-              search: location.search,
-            })
-          }}
+          onClick={() => openReconstruction()}
         >
           Open reconstruction
         </button>
@@ -401,6 +448,14 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
           </button>
         ) : null}
       </div>
+
+      <PinToWorkspace
+        sourceId={eventId}
+        sourceType={'event' as 'message'}
+        title={evt.title}
+        date={evt.time_start}
+        sender={null}
+      />
     </div>
   )
 }
