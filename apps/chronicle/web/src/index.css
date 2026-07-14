@@ -18,6 +18,12 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   --spacing: 4px;
+
+  /* Density spacing scale (body class toggles --space-*) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
 }
 
 @layer base {
@@ -47,6 +53,22 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* Compact (default): tighter vertical rhythm */
+  body.density-compact {
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+  }
+
+  /* Comfortable: slightly roomier spacing */
+  body.density-comfortable {
+    --space-1: 6px;
+    --space-2: 10px;
+    --space-3: 14px;
+    --space-4: 20px;
+  }
+
   :focus-visible {
     outline: 2px solid var(--color-action);
     outline-offset: 2px;
@@ -54,5 +76,48 @@
 
   .tabular-nums {
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Skip link: visually hidden until focused (first tab stop) */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 100;
+    padding: 8px 12px;
+    background: var(--color-graphite-800);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-action);
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 13px;
+  }
+
+  .skip-link:focus,
+  .skip-link:focus-visible {
+    left: 8px;
+    top: 8px;
+  }
+
+  /* Reduced motion: system preference */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Always override (settings → Always) */
+  body.reduce-motion *,
+  body.reduce-motion *::before,
+  body.reduce-motion *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

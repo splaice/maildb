@@ -12,6 +12,7 @@ from maildb import MailDB
 
 from chronicle_server.archive import get_archive_summary
 from chronicle_server.auth import require_user
+from chronicle_server.cache import cache_row_count
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -206,6 +207,10 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
         },
         "imports": imports,
         "audit_tail": audit_tail,
+        "cache": {
+            "rows": cache_row_count(pool),
+            "hit_info": None,
+        },
         "generated_at": datetime.now(UTC).isoformat(),
     }
 

@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from chronicle_server.archive import router as archive_router
 from chronicle_server.ask import router as ask_router
+from chronicle_server.auth import LoginRateLimiter
 from chronicle_server.auth import router as auth_router
 from chronicle_server.chronicle import router as chronicle_router
 from chronicle_server.config import ChronicleSettings
@@ -32,7 +33,12 @@ logger = structlog.get_logger()
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Attach restrictive security headers to every response."""
+    """Attach restrictive security headers to every response.
+
+    API responses keep ``default-src 'none'``. ``Cache-Control: no-store`` is
+    set on ``/api/auth/*`` and ``/api/*`` except attachment previews (those
+    keep streaming / endpoint-specific cache semantics).
+    """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
@@ -40,6 +46,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         # Preserve endpoint-specific CSP (e.g. preview sandbox) when already set.
         response.headers.setdefault("Content-Security-Policy", "default-src 'none'")
+        path = request.url.path
+        is_api = path.startswith("/api/")
+        is_preview = "/preview" in path
+        if is_api and not is_preview:
+            response.headers.setdefault("Cache-Control", "no-store")
         return response
 
 
@@ -87,4 +98,8 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(people_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved
+    app.state.login_rate_limiter = LoginRateLimiter(
+        max_failures=resolved.login_max_failures,
+        window_s=resolved.login_window_s,
+    )
     return app

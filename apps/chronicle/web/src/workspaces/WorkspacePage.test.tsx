@@ -166,7 +166,7 @@ describe('WorkspacePage notebook', () => {
     })
   })
 
-  it('exports trigger blob download', async () => {
+  it('exports trigger blob download via POST', async () => {
     const createObjectURL = vi.fn(() => 'blob:mock')
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', {
@@ -175,27 +175,27 @@ describe('WorkspacePage notebook', () => {
       revokeObjectURL,
     })
 
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (url: string) => {
-        const u = String(url)
-        if (u === '/api/workspaces/ws-1') {
-          return jsonResponse(workspace)
-        }
-        if (u.includes('/export?format=markdown')) {
-          return {
-            ok: true,
-            status: 200,
-            headers: new Headers({
-              'Content-Disposition': 'attachment; filename="Notebook.md"',
-              'X-Manifest-Fingerprint': 'abc',
-            }),
-            blob: async () => new Blob(['# Notebook'], { type: 'text/markdown' }),
-          } as Response
-        }
-        throw new Error(`unexpected: ${u}`)
-      }),
-    )
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url)
+      const method = (init?.method || 'GET').toUpperCase()
+      if (u === '/api/workspaces/ws-1' && method === 'GET') {
+        return jsonResponse(workspace)
+      }
+      if (u.includes('/export') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({
+            'Content-Disposition': 'attachment; filename="Notebook.md"',
+            'X-Manifest-Fingerprint': 'abc',
+            'Content-Type': 'text/markdown',
+          }),
+          blob: async () => new Blob(['# Notebook'], { type: 'text/markdown' }),
+        } as Response
+      }
+      throw new Error(`unexpected: ${method} ${u}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
     renderPage()
     await screen.findByTestId('workspace-page')
@@ -207,6 +207,142 @@ describe('WorkspacePage notebook', () => {
     await waitFor(() => {
       expect(createObjectURL).toHaveBeenCalled()
     })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/export',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('redaction review then confirm download', async () => {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    })
+
+    let exportCalls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u === '/api/workspaces/ws-1' && method === 'GET') {
+          return jsonResponse(workspace)
+        }
+        if (u.includes('/export') && method === 'POST') {
+          exportCalls += 1
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            redact?: { confirmed?: boolean }
+          }
+          if (body.redact && !body.redact.confirmed) {
+            return jsonResponse({
+              review: true,
+              counts: { email: 2 },
+              samples: [
+                {
+                  kind: 'email',
+                  value: 'a@b.co',
+                  start: 0,
+                  end: 5,
+                  context: 'a@b.co',
+                },
+              ],
+              format: 'markdown',
+            })
+          }
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'Content-Disposition': 'attachment; filename="Notebook.md"',
+              'Content-Type': 'text/markdown',
+            }),
+            blob: async () => new Blob(['# redacted'], { type: 'text/markdown' }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+
+    renderPage()
+    await screen.findByTestId('workspace-page')
+    fireEvent.click(screen.getByText('Export'))
+    fireEvent.click(screen.getByTestId('redact-enabled'))
+    fireEvent.click(screen.getByTestId('export-markdown'))
+
+    expect(await screen.findByTestId('export-review-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('export-review-counts')).toHaveTextContent('email')
+    fireEvent.click(screen.getByTestId('export-confirm-download'))
+
+    await waitFor(() => {
+      expect(createObjectURL).toHaveBeenCalled()
+    })
+    expect(exportCalls).toBe(2)
+  })
+
+  it('reauth-required shows panel then retries export', async () => {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    })
+
+    let exportAttempts = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes('/api/auth/session')) {
+          return jsonResponse({ username: 'owner' })
+        }
+        if (u === '/api/workspaces/ws-1' && method === 'GET') {
+          return jsonResponse(workspace)
+        }
+        if (u.includes('/api/auth/login') && method === 'POST') {
+          return jsonResponse({ username: 'owner' })
+        }
+        if (u.includes('/export') && method === 'POST') {
+          exportAttempts += 1
+          if (exportAttempts === 1) {
+            return {
+              ok: false,
+              status: 401,
+              json: async () => ({ detail: { reason: 'reauth-required' } }),
+              headers: new Headers({ 'Content-Type': 'application/json' }),
+            } as Response
+          }
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({
+              'Content-Disposition': 'attachment; filename="Notebook.md"',
+              'Content-Type': 'text/markdown',
+            }),
+            blob: async () => new Blob(['# ok'], { type: 'text/markdown' }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+
+    renderPage()
+    await screen.findByTestId('workspace-page')
+    fireEvent.click(screen.getByText('Export'))
+    fireEvent.click(screen.getByTestId('export-json'))
+
+    expect(await screen.findByTestId('reauth-panel')).toBeInTheDocument()
+    fireEvent.change(screen.getByTestId('reauth-password'), {
+      target: { value: 'secret' },
+    })
+    fireEvent.click(screen.getByTestId('reauth-submit'))
+
+    await waitFor(() => {
+      expect(createObjectURL).toHaveBeenCalled()
+    })
+    expect(exportAttempts).toBe(2)
   })
 
   it('shows 409 version-conflict banner on name edit', async () => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 
 import { apiPost, ApiError } from '../api/client'
 import type {
@@ -13,6 +13,7 @@ import type {
   SearchResult,
 } from '../api/types'
 import { AnswerBlock } from '../ask/AnswerBlock'
+import { useShortcuts, type ShortcutBinding } from '../keyboard'
 import { isScopePristine } from '../workingset/urlState'
 import type { ResearchGrouping } from '../workingset/urlState'
 import { useWorkingSetStore } from '../workingset/store'
@@ -162,6 +163,7 @@ function residualQuery(scope: QueryScope, fallback: string): string {
 
 export function ResearchDeskPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
 
   const storeQuery = useWorkingSetStore((s) => s.query)
   const mode = useWorkingSetStore((s) => s.mode)
@@ -179,7 +181,10 @@ export function ResearchDeskPage() {
   const setHasAttachment = useWorkingSetStore((s) => s.setHasAttachment)
 
   const [inputValue, setInputValue] = useState(storeQuery)
-  const [deskMode, setDeskMode] = useState<DeskMode>('search')
+  const [deskMode, setDeskMode] = useState<DeskMode>(() =>
+    searchParams.get('desk') === 'ask' ? 'ask' : 'search',
+  )
+  const [configRailOpen, setConfigRailOpen] = useState(true)
   const [results, setResults] = useState<SearchResult[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState<string[]>([])
@@ -206,6 +211,21 @@ export function ResearchDeskPage() {
     setInputValue(storeQuery)
     freeTextRef.current = storeQuery
   }, [storeQuery])
+
+  // Command bar Ask mode: /research?desk=ask&q=…
+  useEffect(() => {
+    if (searchParams.get('desk') === 'ask') {
+      setDeskMode('ask')
+      const q = searchParams.get('q') ?? storeQuery
+      if (q) {
+        setAskQuestion(q)
+        setAskScope(useWorkingSetStore.getState().scope)
+        setAskRunId((n) => n + 1)
+      }
+    }
+    // Only on mount / desk param arrival
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   const runSearch = useCallback(
     async (opts: {
@@ -489,45 +509,91 @@ export function ResearchDeskPage() {
     [flatResults, grouping],
   )
 
-  // J/K/Enter keyboard navigation over loaded list (DOM order).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable)
-      ) {
-        return
-      }
-      if (flatResults.length === 0) return
+  // Keep shortcut handlers fresh without re-registering every result change.
+  const flatResultsRef = useRef(flatResults)
+  flatResultsRef.current = flatResults
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
+  const selectResultRef = useRef(selectResult)
+  selectResultRef.current = selectResult
+  const navigateRef = useRef(navigate)
+  navigateRef.current = navigate
 
-      const selectedId =
-        selection?.kind === 'message' || selection?.kind === 'attachment'
-          ? selection.sid
-          : null
-      const idx = selectedId
-        ? flatResults.findIndex((r) => r.id === selectedId)
-        : -1
+  // J/K/Enter via central shortcut registry (behavior identical).
+  const researchShortcuts = useMemo((): ShortcutBinding[] => {
+    return [
+      {
+        id: 'research.next',
+        chord: { key: 'j' },
+        description: 'Next result',
+        group: 'Research',
+        run: () => {
+          const list = flatResultsRef.current
+          if (list.length === 0) return false
+          const sel = selectionRef.current
+          const selectedId =
+            sel?.kind === 'message' || sel?.kind === 'attachment' ? sel.sid : null
+          const idx = selectedId ? list.findIndex((r) => r.id === selectedId) : -1
+          const next = Math.min(list.length - 1, Math.max(0, idx + 1))
+          selectResultRef.current(list[next]!)
+          return true
+        },
+      },
+      {
+        id: 'research.prev',
+        chord: { key: 'k' },
+        description: 'Previous result',
+        group: 'Research',
+        run: () => {
+          const list = flatResultsRef.current
+          if (list.length === 0) return false
+          const sel = selectionRef.current
+          const selectedId =
+            sel?.kind === 'message' || sel?.kind === 'attachment' ? sel.sid : null
+          const idx = selectedId ? list.findIndex((r) => r.id === selectedId) : -1
+          const next = Math.max(0, idx <= 0 ? 0 : idx - 1)
+          selectResultRef.current(list[next]!)
+          return true
+        },
+      },
+      {
+        id: 'research.open',
+        chord: { key: 'Enter' },
+        description: 'Open selected result',
+        group: 'Research',
+        run: () => {
+          const sel = selectionRef.current
+          const selectedId =
+            sel?.kind === 'message' || sel?.kind === 'attachment' ? sel.sid : null
+          if (!selectedId) return false
+          navigateRef.current(`/source/${encodeURIComponent(selectedId)}`)
+          return true
+        },
+      },
+      {
+        id: 'research.space-preview',
+        chord: { key: ' ' },
+        description: 'Preview selected in inspector',
+        group: 'Research',
+        run: () => {
+          const el = document.querySelector(
+            '[data-testid="evidence-inspector"]',
+          ) as HTMLElement | null
+          el?.focus?.()
+        },
+      },
+      {
+        id: 'research.toggle-filters',
+        chord: { key: 'f' },
+        description: 'Toggle filter / config rail',
+        group: 'Research',
+        run: () => setConfigRailOpen((v) => !v),
+      },
+    ]
+  }, [])
 
-      if (e.key === 'j' || e.key === 'J') {
-        e.preventDefault()
-        const next = Math.min(flatResults.length - 1, Math.max(0, idx + 1))
-        selectResult(flatResults[next]!)
-      } else if (e.key === 'k' || e.key === 'K') {
-        e.preventDefault()
-        const next = Math.max(0, idx <= 0 ? 0 : idx - 1)
-        selectResult(flatResults[next]!)
-      } else if (e.key === 'Enter' && selectedId) {
-        e.preventDefault()
-        navigate(`/source/${encodeURIComponent(selectedId)}`)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [flatResults, navigate, selectResult, selection])
+  useShortcuts(researchShortcuts)
+
 
   const onViewInChronicle = () => {
     const sc = useWorkingSetStore.getState().scope
@@ -556,6 +622,7 @@ export function ResearchDeskPage() {
   return (
     <div className="flex h-full min-h-0 gap-3" data-testid="research-desk">
       {/* Left configuration rail */}
+      {configRailOpen ? (
       <aside
         className="shrink-0 space-y-4 overflow-y-auto border-r border-steel pr-3"
         style={{ width: 240 }}
@@ -709,6 +776,7 @@ export function ResearchDeskPage() {
           </div>
         ) : null}
       </aside>
+      ) : null}
 
       {/* Center: query + chips + results */}
       <div className="flex min-w-0 flex-1 flex-col gap-2">

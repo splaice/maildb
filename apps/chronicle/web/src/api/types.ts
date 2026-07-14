@@ -1049,6 +1049,45 @@ export interface BlockPatchRequest {
 
 export type WorkspaceExportFormat = 'markdown' | 'json' | 'csv'
 
+export type RedactKind =
+  | 'email'
+  | 'phone'
+  | 'street_address'
+  | 'account_number'
+  | 'custom'
+  | string
+
+/** POST /api/workspaces/:id/export — redaction options (§15.4). */
+export interface WorkspaceRedactOptions {
+  enabled: boolean
+  kinds: RedactKind[]
+  custom_terms: string[]
+  confirmed: boolean
+}
+
+export interface WorkspaceExportRequest {
+  format: WorkspaceExportFormat
+  redact?: WorkspaceRedactOptions
+}
+
+export interface ExportRedactionSample {
+  kind: string
+  value: string
+  start: number
+  end: number
+  context: string
+  source?: string
+}
+
+/** Review payload when redact.enabled && !confirmed (no file). */
+export interface WorkspaceExportReview {
+  review: true
+  counts: Record<string, number>
+  samples: ExportRedactionSample[]
+  by_source?: Record<string, number>
+  format: WorkspaceExportFormat
+}
+
 export interface WorkspaceManifestRow {
   source_id: string
   source_type: string

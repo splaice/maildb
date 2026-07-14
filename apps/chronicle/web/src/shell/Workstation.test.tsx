@@ -99,8 +99,22 @@ describe('Workstation shell', () => {
     expect(logout.tagName).toBe('BUTTON')
     const links = within(shell).getAllByRole('link')
     expect(links.length).toBeGreaterThanOrEqual(7)
-    // Search input is present (disabled) then logout; nav links follow in DOM order.
+    // Universal command bar is enabled (Phase 5.2); nav links follow in DOM order.
     const search = within(shell).getByLabelText(/universal search/i)
-    expect(search).toBeDisabled()
+    expect(search).not.toBeDisabled()
+  })
+
+  it('skip link is the first focusable control and targets #main', async () => {
+    stubAuthenticatedApi()
+    renderApp(['/'])
+    const shell = await screen.findByTestId('workstation-shell')
+    const skip = within(shell).getByRole('link', { name: /skip to main content/i })
+    expect(skip).toHaveAttribute('href', '#main')
+    expect(within(shell).getByRole('main')).toHaveAttribute('id', 'main')
+    // First focusable in shell DOM order
+    const focusable = shell.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )
+    expect(focusable[0]).toBe(skip)
   })
 })

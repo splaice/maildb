@@ -1,12 +1,35 @@
 # src/chronicle_server/archive.py
+"""Archive summary endpoint and shared ETag / data-version helpers (§16.1).
+
+Response fingerprints for hot aggregate endpoints:
+
+    ETag = sha256(scope_fingerprint + viewport/params + data_version)
+
+Data-version marker (cheap, one statement, cached on ``request.state``) lives in
+:mod:`chronicle_server.cache` and is re-exported here for existing importers
+(topics list, tests). Full marker includes ``max(updated_at)`` of
+``app_topics`` / ``app_events`` so curation edits bust derived-content caches.
+
+POST endpoints honor ``If-None-Match`` the same way as GET (non-standard for
+POST but fine for this private API): matching ETag → 304 empty body.
+"""
+
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
 from chronicle_server.auth import require_user
+from chronicle_server.cache import (
+    cache_key,
+    cached,
+    data_version,
+    emails_data_version,
+    topics_data_version,
+)
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -16,6 +39,54 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["archive"])
 
 API_VERSION = "0.1.0"
+
+# Re-export data-version helpers (single implementation in cache.py).
+__all__ = [
+    "API_VERSION",
+    "archive_summary",
+    "archive_summary_etag",
+    "data_version",
+    "emails_data_version",
+    "get_archive_summary",
+    "if_none_match",
+    "not_modified",
+    "response_etag",
+    "router",
+    "topics_data_version",
+]
+
+
+# --- ETag helpers (shared by chronicle + topics endpoints) ---
+
+
+def response_etag(*parts: str) -> str:
+    """Strong ETag: quoted sha256 of joined fingerprint parts."""
+    material = "\n".join(parts)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f'"{digest}"'
+
+
+def if_none_match(request: Request, etag: str) -> bool:
+    """True when the request's If-None-Match matches *etag* (or is ``*``)."""
+    header = request.headers.get("if-none-match")
+    if header is None or not header.strip():
+        return False
+    stripped = header.strip()
+    if stripped == "*":
+        return True
+    target = etag.strip()
+    for part in stripped.split(","):
+        token = part.strip()
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        if token == target:
+            return True
+    return False
+
+
+def not_modified(etag: str) -> Response:
+    """304 empty body with the given ETag."""
+    return Response(status_code=304, headers={"ETag": etag})
 
 
 def get_archive_summary(pool: ConnectionPool) -> dict[str, Any]:
@@ -110,11 +181,33 @@ def get_archive_summary(pool: ConnectionPool) -> dict[str, Any]:
     }
 
 
-@router.get("/summary")
+def archive_summary_etag(pool: ConnectionPool, request: Request) -> str:
+    """ETag for GET /api/archive/summary (no scope; params = endpoint id)."""
+    data_ver = data_version(pool, request)
+    return response_etag("archive/summary", "", data_ver)
+
+
+@router.get("/summary", response_model=None)
 def archive_summary(
     request: Request,
+    response: Response,
     _user: str = Depends(require_user),
-) -> dict[str, Any]:
-    """Authenticated archive coverage, counts, and version metadata."""
+) -> dict[str, Any] | Response:
+    """Authenticated archive coverage, counts, and version metadata.
+
+    Supports ``If-None-Match`` / ``ETag`` conditional requests (§16.1).
+    Whole-response cache keyed by data version (warm hits skip aggregate SQL).
+    """
     pool: ConnectionPool = request.app.state.pool
-    return get_archive_summary(pool)
+    etag = archive_summary_etag(pool, request)
+    if if_none_match(request, etag):
+        return not_modified(etag)
+    ver = data_version(pool, request)
+    body = cached(
+        pool,
+        key=cache_key("summary", {}),
+        data_version=ver,
+        compute=lambda: get_archive_summary(pool),
+    )
+    response.headers["ETag"] = etag
+    return body

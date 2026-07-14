@@ -9,16 +9,21 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../api/client'
 import type {
   PinBlockContent,
+  RedactKind,
   WorkspaceBlock,
   WorkspaceExportFormat,
+  WorkspaceExportRequest,
+  WorkspaceExportReview,
+  WorkspaceRedactOptions,
 } from '../api/types'
 import { renderAnswerWithCitations } from '../ask/citationText'
 import type { AskCitationEvent } from '../ask/sseClient'
+import { ReauthPanel } from '../auth/ReauthPanel'
 import { useWorkingSetStore } from '../workingset/store'
 import {
   createBlock,
   deleteBlock,
-  exportWorkspaceBlob,
+  exportWorkspace,
   getWorkspace,
   patchBlock,
   patchWorkspace,
@@ -27,6 +32,13 @@ import {
 
 const btnClass =
   'rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary enabled:hover:bg-graphite-900 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-action'
+
+const REDACT_KIND_OPTIONS: { kind: RedactKind; label: string }[] = [
+  { kind: 'email', label: 'Email' },
+  { kind: 'phone', label: 'Phone' },
+  { kind: 'street_address', label: 'Street address' },
+  { kind: 'account_number', label: 'Account number' },
+]
 
 function isPinContent(c: unknown): c is PinBlockContent {
   return (
@@ -223,6 +235,20 @@ export function WorkspacePage() {
   const [nameDraft, setNameDraft] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
 
+  const [redactEnabled, setRedactEnabled] = useState(false)
+  const [redactKinds, setRedactKinds] = useState<RedactKind[]>([
+    'email',
+    'phone',
+    'street_address',
+    'account_number',
+  ])
+  const [customTerms, setCustomTerms] = useState('')
+  const [pendingExport, setPendingExport] = useState<WorkspaceExportRequest | null>(
+    null,
+  )
+  const [review, setReview] = useState<WorkspaceExportReview | null>(null)
+  const [needsReauth, setNeedsReauth] = useState(false)
+
   const wsQuery = useQuery({
     queryKey: ['workspace', id],
     queryFn: ({ signal }) => getWorkspace(id!, signal),
@@ -285,15 +311,75 @@ export function WorkspacePage() {
     }
   }
 
-  async function doExport(format: WorkspaceExportFormat) {
+  function buildRedactOptions(confirmed: boolean): WorkspaceRedactOptions | undefined {
+    if (!redactEnabled) return undefined
+    const terms = customTerms
+      .split(/[,;\n]/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+    return {
+      enabled: true,
+      kinds: redactKinds,
+      custom_terms: terms,
+      confirmed,
+    }
+  }
+
+  async function runExport(request: WorkspaceExportRequest) {
     if (!id) return
     setExportError(null)
+    setPendingExport(request)
     try {
-      const { blob, filename } = await exportWorkspaceBlob(id, format)
-      triggerBlobDownload(blob, filename)
+      const result = await exportWorkspace(id, request)
+      if (result.type === 'reauth-required') {
+        setNeedsReauth(true)
+        return
+      }
+      if (result.type === 'review') {
+        setReview(result.review)
+        setNeedsReauth(false)
+        return
+      }
+      triggerBlobDownload(result.blob, result.filename)
+      setReview(null)
+      setPendingExport(null)
+      setNeedsReauth(false)
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed')
     }
+  }
+
+  async function doExport(format: WorkspaceExportFormat) {
+    const redact = buildRedactOptions(false)
+    // When redaction is enabled, first request is review (confirmed: false)
+    await runExport({
+      format,
+      redact: redact
+        ? { ...redact, confirmed: false }
+        : undefined,
+    })
+  }
+
+  async function confirmRedactedDownload() {
+    if (!pendingExport) return
+    const redact = buildRedactOptions(true)
+    await runExport({
+      format: pendingExport.format,
+      redact: redact ? { ...redact, confirmed: true } : undefined,
+    })
+  }
+
+  async function onReauthSuccess() {
+    setNeedsReauth(false)
+    if (pendingExport) {
+      await runExport(pendingExport)
+    }
+  }
+
+  function toggleKind(kind: RedactKind) {
+    setRedactKinds((prev) =>
+      prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind],
+    )
   }
 
   function openScopeInChronicle() {
@@ -389,7 +475,45 @@ export function WorkspacePage() {
               <summary className={`${btnClass} cursor-pointer list-none`}>
                 Export
               </summary>
-              <div className="absolute right-0 z-10 mt-1 flex flex-col rounded border border-steel bg-graphite-900 p-1 shadow">
+              <div className="absolute right-0 z-10 mt-1 w-64 flex flex-col gap-2 rounded border border-steel bg-graphite-900 p-2 shadow">
+                <label className="flex items-center gap-2 text-[12px] text-text-primary">
+                  <input
+                    type="checkbox"
+                    checked={redactEnabled}
+                    onChange={(e) => setRedactEnabled(e.target.checked)}
+                    data-testid="redact-enabled"
+                  />
+                  Redact PII
+                </label>
+                {redactEnabled ? (
+                  <div className="space-y-1" data-testid="redact-kinds">
+                    {REDACT_KIND_OPTIONS.map(({ kind, label }) => (
+                      <label
+                        key={kind}
+                        className="flex items-center gap-2 text-[11px] text-text-muted"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={redactKinds.includes(kind)}
+                          onChange={() => toggleKind(kind)}
+                          data-testid={`redact-kind-${kind}`}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                    <label className="block text-[11px] text-text-muted">
+                      Custom terms
+                      <input
+                        type="text"
+                        className="mt-0.5 w-full rounded border border-steel bg-graphite-950 px-1.5 py-1 text-[11px] text-text-primary"
+                        value={customTerms}
+                        onChange={(e) => setCustomTerms(e.target.value)}
+                        placeholder="comma-separated"
+                        data-testid="redact-custom-terms"
+                      />
+                    </label>
+                  </div>
+                ) : null}
                 {(['markdown', 'json', 'csv'] as const).map((fmt) => (
                   <button
                     key={fmt}
@@ -413,6 +537,71 @@ export function WorkspacePage() {
         <p className="text-[11px] text-conflict" role="alert">
           {exportError}
         </p>
+      ) : null}
+
+      {needsReauth ? (
+        <ReauthPanel
+          onSuccess={() => void onReauthSuccess()}
+          onCancel={() => {
+            setNeedsReauth(false)
+            setPendingExport(null)
+          }}
+        />
+      ) : null}
+
+      {review ? (
+        <div
+          className="rounded-md border border-steel bg-graphite-900 p-3"
+          data-testid="export-review-panel"
+        >
+          <h2 className="mb-2 text-sm font-medium text-text-primary">
+            Redaction review
+          </h2>
+          <ul className="mb-2 text-[12px] text-text-muted" data-testid="export-review-counts">
+            {Object.entries(review.counts).length === 0 ? (
+              <li>No matches found</li>
+            ) : (
+              Object.entries(review.counts).map(([kind, n]) => (
+                <li key={kind}>
+                  {kind}: {n}
+                </li>
+              ))
+            )}
+          </ul>
+          {review.samples.length > 0 ? (
+            <ul
+              className="mb-3 max-h-40 space-y-1 overflow-y-auto text-[11px] text-text-muted"
+              data-testid="export-review-samples"
+            >
+              {review.samples.map((s, i) => (
+                <li key={`${s.kind}-${s.start}-${i}`} className="font-mono">
+                  [{s.kind}] {s.context}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={btnClass}
+              data-testid="export-confirm-download"
+              onClick={() => void confirmRedactedDownload()}
+            >
+              Confirm &amp; download
+            </button>
+            <button
+              type="button"
+              className={btnClass}
+              data-testid="export-review-cancel"
+              onClick={() => {
+                setReview(null)
+                setPendingExport(null)
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
 
       <div className="space-y-3" data-testid="notebook-blocks">

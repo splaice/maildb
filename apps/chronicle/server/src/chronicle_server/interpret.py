@@ -24,6 +24,7 @@ from chronicle_server.gateway import ModelGateway
 from chronicle_server.querysyntax import parse_query
 from chronicle_server.scope import QueryScope
 from chronicle_server.search import _is_provided
+from chronicle_server.settings_api import effective_ai_flags
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -577,7 +578,9 @@ def post_interpret(
     settings: ChronicleSettings = request.app.state.settings
     pool: ConnectionPool = request.app.state.pool
     gateway = _gateway_from_request(request, settings)
-    available = _model_available(request, gateway)
+    flags = effective_ai_flags(pool, settings)
+    # Per-action disable → syntax/parse-only (model never called).
+    available = flags["interpret_enabled"] and _model_available(request, gateway)
 
     text = body.text if isinstance(body.text, str) else ""
     text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
