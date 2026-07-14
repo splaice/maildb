@@ -130,6 +130,36 @@ describe('encodeState / decodeState', () => {
       '2014-01-01T00:00:00Z',
     )
   })
+
+  it('roundtrips files view params fv and fq', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      filesView: 'gallery',
+      filesQuery: 'invoice',
+    }
+    const encoded = encodeState(state)
+    expect(encoded.get('fv')).toBe('gallery')
+    expect(encoded.get('fq')).toBe('invoice')
+    const decoded = decodeState(encoded)
+    expect(decoded.filesView).toBe('gallery')
+    expect(decoded.filesQuery).toBe('invoice')
+  })
+
+  it('omits default files table view and empty fq', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      filesView: 'table',
+      filesQuery: '',
+    })
+    expect(params.has('fv')).toBe(false)
+    expect(params.has('fq')).toBe(false)
+  })
+
+  it('decodes unknown fv as table', () => {
+    const decoded = decodeState(new URLSearchParams({ fv: 'map', fq: 'x' }))
+    expect(decoded.filesView).toBe('table')
+    expect(decoded.filesQuery).toBe('x')
+  })
 })
 
 describe('isScopePristine', () => {

@@ -1,8 +1,11 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 
 import { apiGet } from '../api/client'
 import type { AttachmentSource, SourceResponse } from '../api/types'
+import { downloadUrl } from '../files/format'
+import { PreviewPanel } from '../files/PreviewPanel'
 import { useWorkingSetStore } from '../workingset/store'
 import { formatPeriodLabel, UNIT_MS, type Unit } from '../chronicle/timeScale'
 import { MessageCard } from './MessageCard'
@@ -29,6 +32,7 @@ function isAttachment(src: SourceResponse): src is AttachmentSource {
 }
 
 function AttachmentCard({ sid, onClose }: { sid: string; onClose: () => void }) {
+  const [showPreview, setShowPreview] = useState(false)
   const query = useQuery({
     queryKey: ['sources', sid],
     queryFn: ({ signal }) => apiGet<SourceResponse>(`/api/sources/${sid}`, signal),
@@ -81,6 +85,14 @@ function AttachmentCard({ sid, onClose }: { sid: string; onClose: () => void }) 
           Extraction: {att.extraction_status || '—'}
           {att.extraction_reason ? ` (${att.extraction_reason})` : ''}
         </p>
+        {att.markdown ? (
+          <pre
+            className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-steel bg-graphite-900 p-1.5 font-mono text-[11px] text-text-primary"
+            data-testid="attachment-extracted"
+          >
+            {att.markdown}
+          </pre>
+        ) : null}
         {env ? (
           <p className="mt-1 text-[11px] text-text-muted">
             Source: {env.subject || '(no subject)'} ·{' '}
@@ -93,6 +105,21 @@ function AttachmentCard({ sid, onClose }: { sid: string; onClose: () => void }) 
         ) : null}
       </div>
       <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => setShowPreview(true)}
+          className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
+          data-testid="attachment-preview"
+        >
+          Preview
+        </button>
+        <a
+          href={downloadUrl(sid)}
+          className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
+          data-testid="attachment-download"
+        >
+          Download original
+        </a>
         <Link
           to={`/source/${encodeURIComponent(sid)}`}
           className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
@@ -109,6 +136,15 @@ function AttachmentCard({ sid, onClose }: { sid: string; onClose: () => void }) 
           Close
         </button>
       </div>
+      {showPreview ? (
+        <div className="fixed inset-0 z-50" data-testid="inspector-preview-host">
+          <PreviewPanel
+            attSid={sid}
+            filename={att.filename}
+            onClose={() => setShowPreview(false)}
+          />
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -179,7 +179,7 @@ describe('InspectorPanel flow', () => {
       },
       extraction_status: 'extracted',
       extraction_reason: null,
-      markdown: null,
+      markdown: 'line one of extracted text',
       truncated: false,
       text_offset: 0,
     }
@@ -190,6 +190,15 @@ describe('InspectorPanel flow', () => {
         if (String(url).includes('/api/sources/att_42')) {
           return { ok: true, status: 200, json: async () => attSource } as Response
         }
+        if (String(url).includes('/preview')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'content-type': 'application/pdf' }),
+            text: async () => '',
+            json: async () => ({}),
+          } as Response
+        }
         throw new Error(`unexpected: ${url}`)
       }),
     )
@@ -199,6 +208,15 @@ describe('InspectorPanel flow', () => {
     expect(await screen.findByTestId('attachment-card')).toBeInTheDocument()
     expect(screen.getByText('invoice.pdf')).toBeInTheDocument()
     expect(screen.getByText(/application\/pdf/)).toBeInTheDocument()
-    expect(screen.getByText(/extracted/i)).toBeInTheDocument()
+    expect(screen.getByText(/Extraction:\s*extracted/i)).toBeInTheDocument()
+    expect(screen.getByTestId('attachment-extracted')).toHaveTextContent(
+      'line one of extracted text',
+    )
+    expect(screen.getByTestId('attachment-download')).toHaveAttribute(
+      'href',
+      '/api/attachments/att_42/download',
+    )
+    fireEvent.click(screen.getByTestId('attachment-preview'))
+    expect(await screen.findByTestId('preview-panel')).toBeInTheDocument()
   })
 })

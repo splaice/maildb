@@ -34,6 +34,9 @@ const LANE_KEY_SET: ReadonlySet<string> = new Set(ALL_LANE_KEYS)
 export type Aggregation = 'auto' | Unit
 export type ViewMode = 'canvas' | 'table'
 
+/** Files lens view mode (URL param `fv`). */
+export type FilesViewMode = 'table' | 'gallery'
+
 /** Research Desk grouping (URL param `grp`). */
 export type ResearchGrouping = 'none' | 'thread' | 'year' | 'mailbox'
 
@@ -73,6 +76,13 @@ export interface UrlWorkingState {
   mode?: SearchMode
   /** Research result grouping (URL param `grp`); default none. */
   grouping?: ResearchGrouping
+  /**
+   * Files lens table|gallery (URL param `fv`). Optional so store-driven
+   * encodes that omit it preserve the current location value.
+   */
+  filesView?: FilesViewMode
+  /** Files lens filename query (URL param `fq`). */
+  filesQuery?: string
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -86,6 +96,8 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   query: '',
   mode: 'hybrid',
   grouping: 'none',
+  filesView: 'table',
+  filesQuery: '',
 }
 
 /**
@@ -292,6 +304,30 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
   if (mode && mode !== 'hybrid') params.set('mode', mode)
   if (grouping && grouping !== 'none') params.set('grp', grouping)
 
+  // Files lens: fv / fq. When omitted from state, preserve from current location
+  // so store-driven URL rewrites (selection etc.) do not wipe files params.
+  let filesView = state.filesView
+  let filesQuery = state.filesQuery
+  if (
+    typeof window !== 'undefined' &&
+    (filesView === undefined || filesQuery === undefined)
+  ) {
+    try {
+      const current = new URLSearchParams(window.location.search)
+      if (filesView === undefined) {
+        filesView = current.get('fv') === 'gallery' ? 'gallery' : 'table'
+      }
+      if (filesQuery === undefined) {
+        filesQuery = current.get('fq') ?? ''
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (filesView === 'gallery') params.set('fv', 'gallery')
+  const fq = (filesQuery ?? '').trim()
+  if (fq) params.set('fq', fq)
+
   return params
 }
 
@@ -340,6 +376,10 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
       ? (rawGrp as ResearchGrouping)
       : 'none'
 
+  const filesView: FilesViewMode =
+    params.get('fv') === 'gallery' ? 'gallery' : 'table'
+  const filesQuery = params.get('fq') ?? ''
+
   return {
     scope,
     viewport,
@@ -351,6 +391,8 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     query: params.get('q') ?? '',
     mode,
     grouping,
+    filesView,
+    filesQuery,
   }
 }
 

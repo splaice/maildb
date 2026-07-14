@@ -459,3 +459,68 @@ export interface AskDonePayload {
   generated_at: string
   unmatched_markers: string[]
 }
+
+/** POST /api/attachments/list */
+
+export type ContentTypeFamily =
+  | 'pdf'
+  | 'image'
+  | 'spreadsheet'
+  | 'document'
+  | 'text'
+  | 'other'
+
+export interface AttachmentListFilters {
+  filename?: string | null
+  content_type_family?: ContentTypeFamily | null
+  status?: string | null
+  date_from?: string | null
+  date_to?: string | null
+}
+
+export interface AttachmentListRequest {
+  scope?: QueryScope
+  filters?: AttachmentListFilters
+  cursor?: string | null
+  limit?: number
+  group_duplicates?: boolean
+}
+
+export interface ExtractionInfo {
+  status: string
+  reason?: string | null
+}
+
+export interface AttachmentOccurrence {
+  id: string
+  subject: string | null
+  sender: string | null
+  date: string | null
+}
+
+export interface AttachmentListItem {
+  id: string
+  filename: string
+  content_type: string | null
+  size: number | null
+  date: string | null
+  sender_name: string | null
+  sender_address: string | null
+  source_message_id: string
+  source_subject: string | null
+  extraction: ExtractionInfo
+  sha256: string
+  duplicate_count: number
+  occurrences?: AttachmentOccurrence[] | null
+}
+
+export interface AttachmentListResponse {
+  items: AttachmentListItem[]
+  next_cursor: string | null
+  scope_fingerprint: string
+}
+
+export interface PreviewDenied {
+  preview: false
+  reason: string
+}

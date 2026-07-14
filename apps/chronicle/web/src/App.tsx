@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router'
 
 import { LoginPage } from './auth/LoginPage'
 import { RequireAuth } from './auth/RequireAuth'
+import { FilesPage } from './files/FilesPage'
 import { SourcePage } from './reader/SourcePage'
 import { ResearchDeskPage } from './research/ResearchDeskPage'
 import { ResearchNavShortcut } from './research/ResearchNavShortcut'
@@ -29,7 +30,7 @@ export function App() {
           <Route path="research" element={<ResearchDeskPage />} />
           <Route path="topics" element={<StubPage title="Topics" />} />
           <Route path="people" element={<StubPage title="People" />} />
-          <Route path="files" element={<StubPage title="Files" />} />
+          <Route path="files" element={<FilesPage />} />
           <Route path="data-health" element={<DataHealthPage />} />
           <Route path="settings" element={<StubPage title="Settings" />} />
         </Route>
