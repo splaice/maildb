@@ -86,7 +86,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 2, Task 2.1 (search endpoint) — elaborate Phase 2 task specs first. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 2, Task 2.3 (Research Desk UI). Execution order adjusted: 2.1 → 2.3 → 2.4 → 2.2 → 2.5 → 2.6 (interpret needs the gateway from 2.4). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -102,3 +102,5 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 1.4 inspector + source list + reader: keyset /api/sources/list, selection URL param, return contract | chronicle-phase-1 | Approved; 98 server / 79 web tests |
 | 2026-07-13 | 1.5 people lane (top_people CTE, user-excluded) + lane config w/ saved lens | chronicle-phase-1 | Approved; 100 server / 93 web tests |
 | 2026-07-13 | 1.6 focus mode + §4.10 acceptance suite (criteria 1–8, #4 todo) | chronicle-phase-1 | Approved; Phase 1 complete (118 web tests) |
+| 2026-07-13 | Phase 1 PR #107 merged (f17f156) | #107 | CI green |
+| 2026-07-13 | 2.1 search endpoint: 3 modes, §5.3 parser, RRF+boost, degradation contract, facets | chronicle-phase-2-app | Approved; 143 server tests |
