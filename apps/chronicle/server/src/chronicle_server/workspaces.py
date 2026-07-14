@@ -12,14 +12,15 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from chronicle_server.auth import require_user
+from chronicle_server.auth import require_fresh_auth, require_user
 from chronicle_server.db import audit
 from chronicle_server.ids import decode_source_id, msg_key_to_uuid
+from chronicle_server.redact import redact_workspace_copy, scan_workspace_pii
 from chronicle_server.scope import QueryScope
 
 if TYPE_CHECKING:
@@ -98,6 +99,25 @@ class BlockPatch(BaseModel):
         if self.content is None and self.position is None:
             raise ValueError("at least one of content, position required")
         return self
+
+
+class RedactOptions(BaseModel):
+    """Export redaction controls (§15.4).
+
+    When ``enabled`` and not ``confirmed``, the export endpoint returns a
+    review payload (no file). When ``confirmed``, a redacted *copy* is
+    generated — originals and workspace rows are never modified (SEC-003).
+    """
+
+    enabled: bool = False
+    kinds: list[str] = Field(default_factory=list)
+    custom_terms: list[str] = Field(default_factory=list)
+    confirmed: bool = False
+
+
+class ExportBody(BaseModel):
+    format: ExportFormat = "markdown"
+    redact: RedactOptions | None = None
 
 
 # --- content validation ---
@@ -992,37 +1012,83 @@ def delete_block(
     return Response(status_code=204)
 
 
-@router.get("/workspaces/{workspace_id}/export")
+@router.post("/workspaces/{workspace_id}/export")
 def export_workspace(
     workspace_id: UUID,
     request: Request,
-    format: ExportFormat = Query(default="markdown"),  # noqa: A002,B008
-    user: str = Depends(require_user),
+    body: ExportBody | None = None,
+    user: str = Depends(require_fresh_auth()),
 ) -> Response:
+    """Generate a workspace export artifact (markdown / json / csv).
+
+    Bulk export requires fresh authentication (§15.1). When redaction is
+    enabled without confirmation, returns a review inventory (no file).
+    Confirmed redaction produces a redacted *copy* only — original archive
+    sources and workspace blocks are never overwritten (SEC-003 / §15.4).
+    """
     pool: ConnectionPool = request.app.state.pool
     settings: ChronicleSettings = request.app.state.settings
+    opts = body or ExportBody()
+    fmt: ExportFormat = opts.format
+    redact = opts.redact or RedactOptions()
+
     ws = _fetch_workspace_row(pool, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     blocks = _fetch_blocks(pool, workspace_id)
-    manifest = _build_manifest(pool, blocks)
+
+    kinds = redact.kinds or None
+    custom_terms = redact.custom_terms or None
+
+    # Review step: detection only, no file write (§15.4).
+    if redact.enabled and not redact.confirmed:
+        counts, samples, by_source = scan_workspace_pii(
+            blocks,
+            ws,
+            kinds=kinds,
+            custom_terms=custom_terms,
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "review": True,
+                "counts": counts,
+                "samples": samples,
+                "by_source": by_source,
+                "format": fmt,
+            },
+        )
+
+    redaction_counts: dict[str, int] = {}
+    redactions_by_source: dict[str, int] = {}
+    export_ws = ws
+    export_blocks = blocks
+    if redact.enabled and redact.confirmed:
+        export_ws, export_blocks, redaction_counts, redactions_by_source = redact_workspace_copy(
+            blocks,
+            ws,
+            kinds=kinds,
+            custom_terms=custom_terms,
+        )
+
+    manifest = _build_manifest(pool, export_blocks)
     fingerprint = _manifest_fingerprint(manifest)
     generated_at = datetime.now(UTC).isoformat()
 
-    if format == "markdown":
-        body = _render_markdown(ws, blocks, manifest)
+    if fmt == "markdown":
+        rendered = _render_markdown(export_ws, export_blocks, manifest)
         media = "text/markdown; charset=utf-8"
-        filename = _safe_filename(ws["name"], "md")
-        payload: bytes = body.encode("utf-8")
-    elif format == "csv":
-        body = _render_csv(manifest)
+        filename = _safe_filename(export_ws["name"], "md")
+        payload: bytes = rendered.encode("utf-8")
+    elif fmt == "csv":
+        rendered = _render_csv(manifest)
         media = "text/csv; charset=utf-8"
-        filename = _safe_filename(ws["name"], "csv")
-        payload = body.encode("utf-8")
+        filename = _safe_filename(export_ws["name"], "csv")
+        payload = rendered.encode("utf-8")
     else:
-        export_doc = {
-            **ws,
-            "blocks": blocks,
+        export_doc: dict[str, Any] = {
+            **export_ws,
+            "blocks": export_blocks,
             "manifest": [
                 {
                     "source_id": m.get("source_id"),
@@ -1038,12 +1104,16 @@ def export_workspace(
                 "generated_at": generated_at,
                 "policy_versions": {"ask": settings.policy_version},
                 "fingerprint": fingerprint,
+                "redactions": redaction_counts,
+                "redactions_by_source": redactions_by_source,
             },
         }
-        body = json.dumps(export_doc, default=str, indent=2)
+        if redaction_counts:
+            export_doc["redactions"] = redaction_counts
+        rendered = json.dumps(export_doc, default=str, indent=2)
         media = "application/json; charset=utf-8"
-        filename = _safe_filename(ws["name"], "json")
-        payload = body.encode("utf-8")
+        filename = _safe_filename(export_ws["name"], "json")
+        payload = rendered.encode("utf-8")
 
     audit(
         pool,
@@ -1051,13 +1121,15 @@ def export_workspace(
         action="workspace_export",
         detail={
             "workspace_id": str(workspace_id),
-            "format": format,
+            "format": fmt,
             "source_count": len(manifest),
             "fingerprint": fingerprint,
+            "redactions": redaction_counts,
+            "redactions_by_source": redactions_by_source,
+            "redact_enabled": redact.enabled,
         },
     )
 
-    # RFC 5987 filename*
     disposition = f'attachment; filename="{filename}"'
     return Response(
         content=payload,

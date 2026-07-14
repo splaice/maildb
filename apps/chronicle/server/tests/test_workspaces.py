@@ -153,7 +153,7 @@ def test_workspaces_require_auth(client: TestClient) -> None:
         ).status_code
         == 401
     )
-    assert client.get(f"/api/workspaces/{fake}/export").status_code == 401
+    assert client.post(f"/api/workspaces/{fake}/export", json={"format": "json"}).status_code == 401
 
 
 # --- CRUD ---
@@ -461,7 +461,10 @@ def test_export_markdown_json_csv_manifest_and_fingerprint(
     )
 
     # markdown
-    md = db_client.get(f"/api/workspaces/{wid}/export?format=markdown")
+    md = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={"format": "markdown"},
+    )
     assert md.status_code == 200
     assert "attachment" in md.headers.get("content-disposition", "").lower()
     text = md.text
@@ -479,7 +482,10 @@ def test_export_markdown_json_csv_manifest_and_fingerprint(
     assert other["source_id"] in text
 
     # json
-    js = db_client.get(f"/api/workspaces/{wid}/export?format=json")
+    js = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={"format": "json"},
+    )
     assert js.status_code == 200
     doc = js.json()
     assert doc["name"] == "Export Case"
@@ -496,11 +502,17 @@ def test_export_markdown_json_csv_manifest_and_fingerprint(
     assert len(doc["manifest"]) == len(manifest_ids)
 
     # fingerprint stable across identical exports
-    js2 = db_client.get(f"/api/workspaces/{wid}/export?format=json")
+    js2 = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={"format": "json"},
+    )
     assert js2.json()["export"]["fingerprint"] == fp1
 
     # csv
-    csv_r = db_client.get(f"/api/workspaces/{wid}/export?format=csv")
+    csv_r = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={"format": "csv"},
+    )
     assert csv_r.status_code == 200
     assert "text/csv" in csv_r.headers.get("content-type", "")
     reader = csv.DictReader(io.StringIO(csv_r.text))
@@ -557,7 +569,10 @@ def test_export_fingerprint_matches_manifest_hash(
             },
         },
     )
-    doc = db_client.get(f"/api/workspaces/{wid}/export?format=json").json()
+    doc = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={"format": "json"},
+    ).json()
     manifest = doc["manifest"]
     normalized = sorted(
         [
@@ -576,3 +591,136 @@ def test_export_fingerprint_matches_manifest_hash(
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
     expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert doc["export"]["fingerprint"] == expected
+
+
+def test_export_requires_fresh_auth(db_client: TestClient, db_settings: Any) -> None:
+    import time
+
+    from chronicle_server.auth import sign_session
+    from chronicle_server.config import ChronicleSettings
+
+    settings = db_settings
+    assert isinstance(settings, ChronicleSettings)
+    stale = sign_session(USERNAME, settings, auth_at=time.time() - 2000)
+    db_client.cookies.set(settings.cookie_name, stale)
+    ws = _create_ws(db_client, name="StaleExport")
+    # require_user still ok for create — but export needs fresh auth.
+    # Create used the stale cookie; sessions without fresh auth_at fail export.
+    r = db_client.post(
+        f"/api/workspaces/{ws['id']}/export",
+        json={"format": "json"},
+    )
+    assert r.status_code == 401
+    detail = r.json().get("detail")
+    assert isinstance(detail, dict)
+    assert detail["reason"] == "reauth-required"
+
+    # reauth via login → export succeeds
+    _login(db_client)
+    ok = db_client.post(
+        f"/api/workspaces/{ws['id']}/export",
+        json={"format": "json"},
+    )
+    assert ok.status_code == 200
+
+
+def test_export_redaction_review_then_confirm(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    _login(db_client)
+    email = _seed_email(db_pool, subject="Secret deal")
+    ws = _create_ws(db_client, name="Redact Me", description="Contact alice@example.com")
+    wid = ws["id"]
+    note_text = "Wire 99887766554433 to 123 Main St"
+    db_client.post(
+        f"/api/workspaces/{wid}/blocks",
+        json={"block_type": "note", "content": {"text": note_text}},
+    )
+    db_client.post(
+        f"/api/workspaces/{wid}/blocks",
+        json={
+            "block_type": "pin",
+            "content": {
+                "source_id": email["source_id"],
+                "source_type": "message",
+                "title": email["subject"],
+                "date": email["date"],
+                "sender": "alice@example.com",
+                "excerpt": "Call +1 415 555 0199",
+            },
+        },
+    )
+
+    # review (enabled, not confirmed) → no file
+    review = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={
+            "format": "json",
+            "redact": {
+                "enabled": True,
+                "kinds": ["email", "phone", "street_address", "account_number"],
+                "custom_terms": [],
+                "confirmed": False,
+            },
+        },
+    )
+    assert review.status_code == 200
+    body = review.json()
+    assert body["review"] is True
+    assert body["counts"].get("email", 0) >= 1
+    assert body["samples"]
+    assert (
+        "Content-Disposition" not in review.headers
+        or "attachment" not in (review.headers.get("Content-Disposition") or "").lower()
+    )
+
+    # confirm → redacted file
+    confirmed = db_client.post(
+        f"/api/workspaces/{wid}/export",
+        json={
+            "format": "json",
+            "redact": {
+                "enabled": True,
+                "kinds": ["email", "phone", "street_address", "account_number"],
+                "custom_terms": [],
+                "confirmed": True,
+            },
+        },
+    )
+    assert confirmed.status_code == 200
+    assert "attachment" in confirmed.headers.get("content-disposition", "").lower()
+    doc = confirmed.json()
+    assert doc["export"]["redactions"]
+    assert sum(doc["export"]["redactions"].values()) >= 1
+    blob = json.dumps(doc)
+    assert "alice@example.com" not in blob
+    assert "[REDACTED:email]" in blob
+    assert "99887766554433" not in blob
+    assert "[REDACTED:account_number]" in blob or "[REDACTED:phone]" in blob
+
+    # originals untouched: re-fetch workspace
+    full = db_client.get(f"/api/workspaces/{wid}").json()
+    assert full["description"] == "Contact alice@example.com"
+    note = next(b for b in full["blocks"] if b["block_type"] == "note")
+    assert note["content"]["text"] == note_text
+    pin = next(b for b in full["blocks"] if b["block_type"] == "pin")
+    assert pin["content"]["sender"] == "alice@example.com"
+
+    # export twice → sources still identical (invariant)
+    full2 = db_client.get(f"/api/workspaces/{wid}").json()
+    assert full2["description"] == full["description"]
+    assert full2["blocks"][0]["content"] == full["blocks"][0]["content"]
+
+    with db_pool.connection() as conn:
+        audits = conn.execute(
+            """
+            SELECT detail FROM app_audit
+             WHERE action = 'workspace_export'
+             ORDER BY id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+    assert audits is not None
+    detail = audits[0]
+    assert detail.get("redact_enabled") is True
+    assert detail.get("redactions")

@@ -87,9 +87,17 @@ Tasks are cheap-coder-sized (≈ one focused PR or less). One PR per phase, one 
 
 **Phase 4 exit criterion (spec §20.1):** every secondary lens preserves scope and exposes authoritative source lists.
 
-### Phase 5 — Hardening (elaborate at start)
+### Phase 5 — Hardening (PR: `cheap-coder/chronicle-phase-5`)
 
-WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), performance/scale tests against the 1.28M-email archive, redaction pipeline, passkeys, audit completeness, release gates (Section 19.6).
+| Task | Scope |
+| --- | --- |
+| 5.1 | Security hardening: login rate limiting, reauth-for-export (§15.1), app-wide CSP + security headers on the web bundle, sanitizer corpus expansion, redaction pipeline (export-time detection/review/redacted copies — §15.4) |
+| 5.2 | Shell completion: universal command bar (Search/Ask modes — §3.2), Ctrl/Cmd+K command palette (G-004), full §14.2 keyboard map + `?` shortcut reference |
+| 5.3 | Settings + accessibility: `/settings` groups (§11.2 — appearance/density, AI routing visibility + per-action policy, privacy, keyboard reference), reduced-motion, skip links, focus-order and aria coverage tests, token contrast verification |
+| 5.4 | Performance & scale: archive-scale timing harness against the live 1.28M DB (§16.2 targets recorded), scope-fingerprint ETags/If-None-Match, request-cancellation verification, payload budget assertions |
+| 5.5 | Release: workflows C & E acceptance, §19.6 release-gate verification report (docs/), app run/deploy README, epic close-out |
+
+**Phase 5 exit criterion (spec §20.1/§19.6):** all release gates pass.
 
 ## 4. Execution protocol (per task)
 
@@ -102,7 +110,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 5 (hardening) — elaborate task table, then 5.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 5, Task 5.2 (command bar + palette + keyboard map). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -137,3 +145,5 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 4.3 People & Orgs UI over contacts subsystem (merge/split, signals, owner classes) | chronicle-phase-4 | Approved; 260 server / 279 web tests |
 | 2026-07-13 | 4.4 ego graph: bounded evidence-backed edges, radial SVG, table alt | chronicle-phase-4 | Approved; 269 server / 290 web tests |
 | 2026-07-13 | 4.5 version families + workflows B/D | chronicle-phase-4 | Approved; Phase 4 complete (300 server / 293 web tests) |
+| 2026-07-13 | Phase 4 PR #110 merged (c0ad1ea) | #110 | CI green |
+| 2026-07-13 | 5.1 security: rate limit, reauth-for-export, CSP, adversarial corpus, redaction | chronicle-phase-5 | Approved; 332 server / 298 web tests |

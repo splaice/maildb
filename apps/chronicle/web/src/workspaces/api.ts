@@ -9,7 +9,8 @@ import type {
   Workspace,
   WorkspaceBlock,
   WorkspaceCreateRequest,
-  WorkspaceExportFormat,
+  WorkspaceExportRequest,
+  WorkspaceExportReview,
   WorkspaceListResponse,
   WorkspacePatchRequest,
 } from '../api/types'
@@ -90,29 +91,119 @@ export function deleteBlock(
   )
 }
 
-/** Download export as a blob via authenticated fetch. */
-export async function exportWorkspaceBlob(
+export type ExportWorkspaceResult =
+  | {
+      type: 'file'
+      blob: Blob
+      filename: string
+      fingerprint: string | null
+    }
+  | {
+      type: 'review'
+      review: WorkspaceExportReview
+    }
+  | {
+      type: 'reauth-required'
+    }
+
+function isReauthRequiredBody(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false
+  const b = body as Record<string, unknown>
+  if (b.reason === 'reauth-required') return true
+  const detail = b.detail
+  if (detail && typeof detail === 'object' && (detail as { reason?: string }).reason === 'reauth-required') {
+    return true
+  }
+  return false
+}
+
+function isReviewBody(body: unknown): body is WorkspaceExportReview {
+  return (
+    !!body &&
+    typeof body === 'object' &&
+    (body as WorkspaceExportReview).review === true
+  )
+}
+
+/** POST export: file download, redaction review, or reauth-required. */
+export async function exportWorkspace(
   workspaceId: string,
-  format: WorkspaceExportFormat,
+  request: WorkspaceExportRequest,
   signal?: AbortSignal,
-): Promise<{ blob: Blob; filename: string; fingerprint: string | null }> {
-  const url = `/api/workspaces/${encodeURIComponent(workspaceId)}/export?format=${format}`
+): Promise<ExportWorkspaceResult> {
+  const url = `/api/workspaces/${encodeURIComponent(workspaceId)}/export`
   const response = await fetch(url, {
-    method: 'GET',
+    method: 'POST',
     credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
     signal,
   })
+
+  if (response.status === 401) {
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      body = undefined
+    }
+    if (isReauthRequiredBody(body)) {
+      return { type: 'reauth-required' }
+    }
+    throw new Error('Export unauthorized')
+  }
+
   if (!response.ok) {
     throw new Error(`Export failed: HTTP ${response.status}`)
   }
+
+  const contentType = response.headers.get('Content-Type') || ''
   const disposition = response.headers.get('Content-Disposition') || ''
+  const isAttachment = /attachment/i.test(disposition)
+
+  if (!isAttachment && contentType.includes('application/json')) {
+    const body: unknown = await response.json()
+    if (isReviewBody(body)) {
+      return { type: 'review', review: body }
+    }
+    // JSON export file without attachment header — treat as file
+    const blob = new Blob([JSON.stringify(body)], { type: 'application/json' })
+    return {
+      type: 'file',
+      blob,
+      filename: `workspace.json`,
+      fingerprint: response.headers.get('X-Manifest-Fingerprint'),
+    }
+  }
+
   const match = /filename="([^"]+)"/.exec(disposition)
+  const format = request.format
   const filename =
     match?.[1] ||
     `workspace.${format === 'markdown' ? 'md' : format}`
   const fingerprint = response.headers.get('X-Manifest-Fingerprint')
   const blob = await response.blob()
-  return { blob, filename, fingerprint }
+  return { type: 'file', blob, filename, fingerprint }
+}
+
+/** @deprecated Use exportWorkspace; kept for call-site migration. */
+export async function exportWorkspaceBlob(
+  workspaceId: string,
+  format: WorkspaceExportRequest['format'],
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; filename: string; fingerprint: string | null }> {
+  const result = await exportWorkspace(workspaceId, { format }, signal)
+  if (result.type !== 'file') {
+    throw new Error(`Unexpected export result: ${result.type}`)
+  }
+  return {
+    blob: result.blob,
+    filename: result.filename,
+    fingerprint: result.fingerprint,
+  }
 }
 
 export function triggerBlobDownload(blob: Blob, filename: string): void {

@@ -22,6 +22,9 @@ class ChronicleSettings(BaseSettings):
     session_max_age_s: int = 43200  # 12h
     cookie_secure: bool = True
     cookie_name: str = "chronicle_session"
+    # Login rate limiting (fixed window; single-user app)
+    login_max_failures: int = 5
+    login_window_s: int = 900  # 15 min
     # Ask / model gateway (Phase 2 Task 2.4)
     answer_model: str = "llama3.2"
     ollama_host: str | None = None  # None → ollama client default
