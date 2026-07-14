@@ -127,6 +127,30 @@ describe('Archive summary panel', () => {
   })
 })
 
+function mockCompareOk() {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      unit: 'month',
+      aligned: true,
+      scope_fingerprint: 'qs_cmp',
+      a: {
+        viewport: { from: '2014-01-01T00:00:00.000Z', to: '2019-01-01T00:00:00.000Z' },
+        lanes: { messages: [], attachments: [] },
+      },
+      b: {
+        viewport: { from: '2009-01-01T00:00:00.000Z', to: '2014-01-01T00:00:00.000Z' },
+        lanes: { messages: [], attachments: [] },
+      },
+      totals: {
+        a: { messages: 10, attachments: 1 },
+        b: { messages: 8, attachments: 2 },
+      },
+    }),
+  } as Response
+}
+
 describe('ChroniclePage working-set wiring', () => {
   beforeEach(() => {
     window.history.replaceState(null, '', '/')
@@ -312,5 +336,133 @@ describe('ChroniclePage working-set wiring', () => {
     })
     expect(await screen.findByTestId('focus-mode')).toBeInTheDocument()
     expect(useWorkingSetStore.getState().brush).toBeNull()
+  })
+
+  it('Compare button enters compare with previous-period default', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z',
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        if (String(url).includes('/api/chronicle/compare')) return mockCompareOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z'])
+    expect(await screen.findByTestId('compare-btn')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('compare-btn'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('compare-view')).toBeInTheDocument()
+    })
+    const cmp = useWorkingSetStore.getState().compare
+    expect(cmp).not.toBeNull()
+    // A = viewport; B = previous period of equal length
+    expect(cmp!.a.fromMs).toBe(Date.parse('2015-01-01T00:00:00Z'))
+    expect(cmp!.a.toMs).toBe(Date.parse('2016-01-01T00:00:00Z'))
+    const duration = cmp!.a.toMs - cmp!.a.fromMs
+    expect(cmp!.b.toMs).toBe(cmp!.a.fromMs)
+    expect(cmp!.b.fromMs).toBe(cmp!.a.fromMs - duration)
+  })
+
+  it('Compare with brush uses brush as range B', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z',
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        if (String(url).includes('/api/chronicle/compare')) return mockCompareOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z'])
+    await screen.findByTestId('compare-btn')
+    const brush = {
+      fromMs: Date.UTC(2014, 0, 1),
+      toMs: Date.UTC(2014, 6, 1),
+    }
+    useWorkingSetStore.getState().setBrush(brush)
+    fireEvent.click(screen.getByTestId('compare-btn'))
+
+    await waitFor(() => {
+      expect(useWorkingSetStore.getState().compare?.b).toEqual(brush)
+    })
+  })
+
+  it('Shift+C toggles compare; Escape exits', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z',
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        if (String(url).includes('/api/chronicle/compare')) return mockCompareOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z'])
+    await screen.findByTestId('timeline-toolbar')
+
+    fireEvent.keyDown(window, { key: 'C', shiftKey: true })
+    await waitFor(() => {
+      expect(screen.getByTestId('compare-view')).toBeInTheDocument()
+    })
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => {
+      expect(useWorkingSetStore.getState().compare).toBeNull()
+    })
+    expect(screen.queryByTestId('compare-view')).not.toBeInTheDocument()
+  })
+
+  it('URL ca/cb hydrate restores compare view', async () => {
+    const ca = '2015-01-01T00:00:00Z..2016-01-01T00:00:00Z'
+    const cb = '2014-01-01T00:00:00Z..2015-01-01T00:00:00Z'
+    window.history.replaceState(
+      null,
+      '',
+      `/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z&ca=${encodeURIComponent(ca)}&cb=${encodeURIComponent(cb)}`,
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        if (String(url).includes('/api/chronicle/compare')) return mockCompareOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp([
+      `/?vf=2015-01-01T00:00:00Z&vt=2016-01-01T00:00:00Z&ca=${encodeURIComponent(ca)}&cb=${encodeURIComponent(cb)}`,
+    ])
+
+    await waitFor(() => {
+      expect(screen.getByTestId('compare-view')).toBeInTheDocument()
+    })
+    const cmp = useWorkingSetStore.getState().compare
+    expect(cmp?.a.fromMs).toBe(Date.parse('2015-01-01T00:00:00Z'))
+    expect(cmp?.b.fromMs).toBe(Date.parse('2014-01-01T00:00:00Z'))
   })
 })

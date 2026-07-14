@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { ArchiveSummary, LaneData } from '../api/types'
 import { isBucketSeries } from '../api/types'
+import { CompareView } from '../compare/CompareView'
+import { compareRangesFromEntry } from '../compare/ranges'
 import { DensityNavigator } from '../chronicle/DensityNavigator'
 import { LaneConfigPanel } from '../chronicle/LaneConfigPanel'
 import { specsForKeys } from '../chronicle/laneModel'
@@ -135,11 +137,15 @@ export function ChroniclePage() {
   const viewport = useWorkingSetStore((s) => s.viewport)
   const brush = useWorkingSetStore((s) => s.brush)
   const focus = useWorkingSetStore((s) => s.focus)
+  const compare = useWorkingSetStore((s) => s.compare)
   const viewMode = useWorkingSetStore((s) => s.view)
   const scope = useWorkingSetStore((s) => s.scope)
   const setViewport = useWorkingSetStore((s) => s.setViewport)
   const setBrush = useWorkingSetStore((s) => s.setBrush)
   const setFocus = useWorkingSetStore((s) => s.setFocus)
+  const setCompare = useWorkingSetStore((s) => s.setCompare)
+  const setCompareSide = useWorkingSetStore((s) => s.setCompareSide)
+  const exitCompare = useWorkingSetStore((s) => s.exitCompare)
   const applyBrushAsViewport = useWorkingSetStore((s) => s.applyBrushAsViewport)
   const setView = useWorkingSetStore((s) => s.setView)
   const setResultCount = useWorkingSetStore((s) => s.setResultCount)
@@ -223,7 +229,14 @@ export function ChroniclePage() {
     [applyViewport, pixelWidth, viewport],
   )
 
-  // Keyboard shortcuts [ / ] zoom, Enter → focus period when brush exists —
+  const enterCompare = useCallback(() => {
+    const vp = useWorkingSetStore.getState().viewport
+    if (!vp) return
+    const br = useWorkingSetStore.getState().brush
+    setCompare(compareRangesFromEntry(vp, br))
+  }, [setCompare])
+
+  // Keyboard shortcuts [ / ] zoom, Enter → focus, Shift+C compare, Escape —
   // page-scoped, cleaned up on unmount.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -243,6 +256,12 @@ export function ChroniclePage() {
         e.preventDefault()
         zoomAroundCenter(0.5) // zoom in
       } else if (e.key === 'Escape') {
+        const cmp = useWorkingSetStore.getState().compare
+        if (cmp) {
+          e.preventDefault()
+          exitCompare()
+          return
+        }
         setBrush(null)
       } else if (e.key === 'Enter') {
         // Focus period when a brush exists (spec §4.6 entry).
@@ -251,11 +270,26 @@ export function ChroniclePage() {
           e.preventDefault()
           setFocus(b)
         }
+      } else if (
+        (e.key === 'c' || e.key === 'C') &&
+        e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        // Shift+C: start or exit compare mode (spec §14.2).
+        e.preventDefault()
+        const cmp = useWorkingSetStore.getState().compare
+        if (cmp) {
+          exitCompare()
+        } else {
+          enterCompare()
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [setBrush, setFocus, zoomAroundCenter])
+  }, [enterCompare, exitCompare, setBrush, setFocus, zoomAroundCenter])
 
   const unit = buckets.data?.unit ?? buckets.data?.aggregation ?? 'month'
   const densityBuckets = buckets.data?.density.buckets ?? []
@@ -263,15 +297,25 @@ export function ChroniclePage() {
 
   const showTimeline = viewport != null
   const inFocus = focus != null
+  const inCompare = compare != null
 
   return (
     <div className="space-y-4">
       <h1 className="text-base font-medium text-text-primary">Chronicle</h1>
 
-      {/* Timeline region — replaced by FocusMode while focus is active. */}
+      {/* Timeline region — replaced by FocusMode / CompareView while active. */}
       <section className="space-y-2" aria-label="Timeline">
         {inFocus ? (
           <FocusModeConnected />
+        ) : inCompare && compare ? (
+          <CompareView
+            a={compare.a}
+            b={compare.b}
+            scope={scope}
+            lanes={lanes}
+            onExit={exitCompare}
+            onUpdateSide={setCompareSide}
+          />
         ) : (
           <>
             {showTimeline ? (
@@ -295,6 +339,7 @@ export function ChroniclePage() {
                 onFocusPeriod={() => {
                   if (brush) setFocus(brush)
                 }}
+                onCompare={enterCompare}
               />
             ) : null}
 

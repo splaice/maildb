@@ -431,6 +431,41 @@ export interface ChronicleBuckets {
   generated_at: string
 }
 
+/** POST /api/chronicle/compare */
+
+export interface ChronicleCompareRequest {
+  scope?: QueryScope
+  a: ChronicleTimeRange
+  b: ChronicleTimeRange
+  pixel_width?: number
+  lanes?: string[]
+}
+
+export interface ChronicleCompareSide {
+  viewport: ChronicleTimeRange
+  lanes: Record<string, LaneData>
+}
+
+export interface ChronicleCompareTotalsSide {
+  messages: number
+  attachments: number
+}
+
+export interface ChronicleCompareTotals {
+  a: ChronicleCompareTotalsSide
+  b: ChronicleCompareTotalsSide
+}
+
+/** Response body for POST /api/chronicle/compare */
+export interface ChronicleCompare {
+  unit: string
+  aligned: boolean
+  a: ChronicleCompareSide
+  b: ChronicleCompareSide
+  totals: ChronicleCompareTotals
+  scope_fingerprint: string
+}
+
 /** POST /api/sources/list */
 
 export interface SourceListRequest {

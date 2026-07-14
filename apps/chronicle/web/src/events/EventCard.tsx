@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router'
 
 import { ApiError } from '../api/client'
 import type { EventType } from '../api/types'
+import { compareRangesAroundEvent } from '../compare/ranges'
 import { useWorkingSetStore } from '../workingset/store'
 import { getEvent, patchEvent } from './api'
 import { formatEventTime, originLabel } from './format'
@@ -33,6 +34,7 @@ export interface EventCardProps {
  */
 export function EventCard({ eventId, onClose }: EventCardProps) {
   const setSelection = useWorkingSetStore((s) => s.setSelection)
+  const setCompare = useWorkingSetStore((s) => s.setCompare)
   const navigate = useNavigate()
   const location = useLocation()
   const qc = useQueryClient()
@@ -374,6 +376,19 @@ export function EventCard({ eventId, onClose }: EventCardProps) {
           }}
         >
           Open reconstruction
+        </button>
+        <button
+          type="button"
+          className="rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary"
+          data-testid="event-compare-before-after"
+          title="Compare 90 days before and after this event"
+          onClick={() => {
+            const startMs = Date.parse(evt.time_start)
+            if (!Number.isFinite(startMs)) return
+            setCompare(compareRangesAroundEvent(startMs))
+          }}
+        >
+          Compare before/after
         </button>
         {onClose ? (
           <button

@@ -94,7 +94,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 3, Task 3.4 (compare mode). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 3, Task 3.5 (workflow A acceptance) — last task of Phase 3. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -121,3 +121,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 3.1 events foundation: versioned schema, analyst CRUD, events lane, EventCard | chronicle-phase-3 | Approved; 199 server / 185 web tests |
 | 2026-07-13 | 3.2 event generation: burst detection, gateway extraction, no-clobber matrix | chronicle-phase-3 | Approved; 219 server / 189 web tests |
 | 2026-07-13 | 3.3 reconstruction: claim-evidence matrix, adopt/suggestions, stale checks, dismissed list | chronicle-phase-3 | Approved; 222 server / 203 web tests |
+| 2026-07-13 | 3.4 compare mode: aligned/small-multiples, normalize, event anchor | chronicle-phase-3 | Approved; 228 server / 238 web tests |

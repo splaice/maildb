@@ -118,6 +118,29 @@ describe('EventCard', () => {
     })
   })
 
+  it('Compare before/after sets ±90d ranges around event start', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => eventPayload,
+      }),
+    )
+    renderCard()
+    await waitFor(() => expect(screen.getByTestId('event-card')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('event-compare-before-after'))
+    const cmp = useWorkingSetStore.getState().compare
+    expect(cmp).not.toBeNull()
+    const start = Date.parse(eventPayload.time_start)
+    const delta = 90 * 24 * 60 * 60 * 1000
+    expect(cmp!.a.fromMs).toBe(start - delta)
+    expect(cmp!.a.toMs).toBe(start)
+    expect(cmp!.b.fromMs).toBe(start)
+    expect(cmp!.b.toMs).toBe(start + delta)
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+  })
+
   it('confirm and dismiss patch with optimistic version; 409 shows banner', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
       const u = String(url)

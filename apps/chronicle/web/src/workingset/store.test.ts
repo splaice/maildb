@@ -227,4 +227,62 @@ describe('working set store', () => {
       sid: 'att_1',
     })
   })
+
+  it('setCompare is analytical and clears brush', () => {
+    useWorkingSetStore.getState().setBrush({ fromMs: 1, toMs: 2 })
+    useWorkingSetStore.getState().setCompare({
+      a: { fromMs: 10, toMs: 20 },
+      b: { fromMs: 0, toMs: 10 },
+    })
+    const s = useWorkingSetStore.getState()
+    expect(s.compare).toEqual({
+      a: { fromMs: 10, toMs: 20 },
+      b: { fromMs: 0, toMs: 10 },
+    })
+    expect(s.brush).toBeNull()
+    expect(s.historyIntent).toBe('analytical')
+  })
+
+  it('setCompareSide updates one side analytically', () => {
+    useWorkingSetStore.getState().setCompare({
+      a: { fromMs: 10, toMs: 20 },
+      b: { fromMs: 0, toMs: 10 },
+    })
+    useWorkingSetStore.getState().setCompareSide('b', { fromMs: 30, toMs: 40 })
+    expect(useWorkingSetStore.getState().compare).toEqual({
+      a: { fromMs: 10, toMs: 20 },
+      b: { fromMs: 30, toMs: 40 },
+    })
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+  })
+
+  it('exitCompare clears compare analytically', () => {
+    useWorkingSetStore.getState().setCompare({
+      a: { fromMs: 10, toMs: 20 },
+      b: { fromMs: 0, toMs: 10 },
+    })
+    useWorkingSetStore.getState().exitCompare()
+    expect(useWorkingSetStore.getState().compare).toBeNull()
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+  })
+
+  it('hydrate restores compare silently', () => {
+    useWorkingSetStore.getState().hydrate({
+      scope: {},
+      viewport: null,
+      aggregation: 'auto',
+      view: 'canvas',
+      selection: null,
+      lanes: null,
+      compare: {
+        a: { fromMs: 1, toMs: 2 },
+        b: { fromMs: 3, toMs: 4 },
+      },
+    })
+    expect(useWorkingSetStore.getState().compare).toEqual({
+      a: { fromMs: 1, toMs: 2 },
+      b: { fromMs: 3, toMs: 4 },
+    })
+    expect(useWorkingSetStore.getState().historyIntent).toBe('silent')
+  })
 })
