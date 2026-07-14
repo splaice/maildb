@@ -426,4 +426,222 @@ describe('InspectorPanel flow', () => {
     expect(body.content.title).toMatch(/Hello world/)
     expect(await screen.findByTestId('pin-status')).toHaveTextContent('Pinned')
   })
+
+  const TOPIC_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
+  function topicDetail(overrides: Record<string, unknown> = {}) {
+    return {
+      id: TOPIC_ID,
+      label: 'Kitchen remodel',
+      description: 'home projects',
+      origin: 'automatic',
+      parent_id: null,
+      hidden: false,
+      top_terms: ['kitchen', 'remodel'],
+      generation: 1,
+      member_count: 12,
+      created_at: null,
+      updated_at: null,
+      activity: [
+        { bucket: '2020-01-01T00:00:00Z', count: 4 },
+        { bucket: '2020-02-01T00:00:00Z', count: 8 },
+      ],
+      members: [
+        {
+          id: 'msg_topic_rep',
+          subject: 'Quote for cabinets',
+          sender_name: 'Bob',
+          sender_address: 'bob@example.com',
+          date: '2020-01-15T00:00:00Z',
+          mailbox: 'me@example.com',
+          thread_id: null,
+          distance: 0.1,
+        },
+      ],
+      ...overrides,
+    }
+  }
+
+  it('topic selection kind t: shows topic card with origin and rename tooltip', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes(`/api/topics/${TOPIC_ID}`)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => topicDetail(),
+          } as Response
+        }
+        throw new Error(`unexpected: ${url}`)
+      }),
+    )
+    useWorkingSetStore.getState().setSelection({
+      kind: 'topic',
+      topicId: TOPIC_ID,
+    })
+    renderPanel()
+    expect(await screen.findByTestId('topic-card')).toBeInTheDocument()
+    expect(screen.getByTestId('topic-origin-badge')).toHaveTextContent(/Automatic/i)
+    expect(screen.getByTestId('topic-rename-tooltip')).toHaveTextContent(
+      /flips origin to curated/i,
+    )
+    expect(screen.getByTestId('topic-activity-sparkline')).toBeInTheDocument()
+  })
+
+  it('rename → curated flow with tooltip', async () => {
+    let origin = 'automatic'
+    let label = 'Kitchen remodel'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const u = String(url)
+        const method = (init?.method || 'GET').toUpperCase()
+        if (u.includes(`/api/topics/${TOPIC_ID}`) && method === 'PATCH') {
+          const body = JSON.parse(String(init?.body || '{}')) as { label?: string }
+          label = body.label ?? label
+          origin = 'curated'
+          return {
+            ok: true,
+            status: 200,
+            json: async () => topicDetail({ label, origin }),
+          } as Response
+        }
+        if (u.includes(`/api/topics/${TOPIC_ID}`)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => topicDetail({ label, origin }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${method} ${u}`)
+      }),
+    )
+    useWorkingSetStore.getState().setSelection({
+      kind: 'topic',
+      topicId: TOPIC_ID,
+    })
+    renderPanel()
+    await screen.findByTestId('topic-card')
+    fireEvent.click(screen.getByTestId('topic-label'))
+    fireEvent.change(screen.getByTestId('topic-rename-input'), {
+      target: { value: 'Home kitchen' },
+    })
+    fireEvent.submit(screen.getByTestId('topic-rename-form'))
+    await waitFor(() => {
+      expect(screen.getByTestId('topic-origin-badge')).toHaveTextContent(/Curated/i)
+    })
+    expect(screen.getByTestId('topic-rename-tooltip')).toHaveTextContent(/Curated/i)
+  })
+
+  it('representative member click → source (message) selection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        const u = String(url)
+        if (u.includes(`/api/topics/${TOPIC_ID}`) && !u.includes('/members')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => topicDetail(),
+          } as Response
+        }
+        if (u.includes('/api/sources/msg_topic_rep')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ...msgSource,
+              envelope: { ...msgSource.envelope, id: 'msg_topic_rep', subject: 'Quote for cabinets' },
+            }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${u}`)
+      }),
+    )
+    useWorkingSetStore.getState().setSelection({
+      kind: 'topic',
+      topicId: TOPIC_ID,
+    })
+    renderPanel()
+    await screen.findByTestId('topic-card')
+    fireEvent.click(screen.getByTestId('topic-member-msg_topic_rep'))
+    await waitFor(() => {
+      expect(useWorkingSetStore.getState().selection).toEqual({
+        kind: 'message',
+        sid: 'msg_topic_rep',
+      })
+    })
+    expect(await screen.findByTestId('message-card')).toBeInTheDocument()
+  })
+
+  it('member list pagination (TA-004 definitive list)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        const u = String(url)
+        if (u.includes(`/api/topics/${TOPIC_ID}/members`)) {
+          if (u.includes('cursor=')) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                items: [
+                  {
+                    id: 'msg_page2',
+                    subject: 'Second page',
+                    sender_name: null,
+                    sender_address: null,
+                    date: null,
+                    mailbox: null,
+                    thread_id: null,
+                    distance: null,
+                  },
+                ],
+                next_cursor: null,
+              }),
+            } as Response
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  id: 'msg_page1',
+                  subject: 'First page',
+                  sender_name: null,
+                  sender_address: null,
+                  date: null,
+                  mailbox: null,
+                  thread_id: null,
+                  distance: null,
+                },
+              ],
+              next_cursor: 'cursor_abc',
+            }),
+          } as Response
+        }
+        if (u.includes(`/api/topics/${TOPIC_ID}`)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => topicDetail(),
+          } as Response
+        }
+        throw new Error(`unexpected: ${u}`)
+      }),
+    )
+    useWorkingSetStore.getState().setSelection({
+      kind: 'topic',
+      topicId: TOPIC_ID,
+    })
+    renderPanel()
+    await screen.findByTestId('topic-card')
+    fireEvent.click(screen.getByTestId('topic-open-sources'))
+    expect(await screen.findByTestId('topic-member-list')).toBeInTheDocument()
+    expect(screen.getByText('First page')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('topic-members-more'))
+    expect(await screen.findByText('Second page')).toBeInTheDocument()
+  })
 })

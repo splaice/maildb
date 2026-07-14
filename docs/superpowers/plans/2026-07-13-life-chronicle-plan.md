@@ -102,7 +102,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 4, Task 4.2 (Topic Atlas UI). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 4, Task 4.3 (People & Organizations UI). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -133,3 +133,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 3.5 workflow A acceptance + criterion 4; keyboard glue | chronicle-phase-3 | Approved; Phase 3 complete (244 web tests, 0 todos) |
 | 2026-07-13 | Phase 3 PR #109 merged (36b7e97) | #109 | CI green |
 | 2026-07-13 | 4.1 topics subsystem: seeded k-means, one-statement assignment, manual precedence, topics lane | chronicle-phase-4 | Approved; 238 server / 246 web tests |
+| 2026-07-13 | 4.2 Topic Atlas: hierarchy/river/matrix/projection + members list | chronicle-phase-4 | Approved; 243 server / 263 web tests |

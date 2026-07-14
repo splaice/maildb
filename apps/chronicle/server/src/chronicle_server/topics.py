@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
@@ -25,9 +25,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from chronicle_server.auth import require_user
+from chronicle_server.chronicle import VALID_UNITS, choose_aggregation
+from chronicle_server.cursor import decode_cursor, encode_cursor
 from chronicle_server.db import audit
 from chronicle_server.gateway import ModelGateway
 from chronicle_server.ids import decode_source_id, encode_source_id, msg_key_to_uuid
+from chronicle_server.scope import QueryScope, scope_filters
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -48,6 +51,11 @@ _TOP_TERMS = 5
 _LABEL_TERMS = 3
 _MAX_LABEL_WORDS = 4
 _MIN_TERM_LEN = 3
+_MEMBERS_DEFAULT_LIMIT = 50
+_MEMBERS_MAX_LIMIT = 200
+_RIVER_DEFAULT_TOP = 8
+_RIVER_MAX_TOP = 48
+_RIVER_DEFAULT_PIXEL_WIDTH = 920
 
 # Common English stopwords for subject TF labeling (lowercase).
 STOPWORDS: frozenset[str] = frozenset(
@@ -234,6 +242,85 @@ class MemberAddRequest(BaseModel):
 
 
 # --- pure helpers (testable without DB) ---
+
+
+def pca_project_2d(centroids: np.ndarray) -> np.ndarray:
+    """Deterministic PCA of centroid matrix to 2D via SVD.
+
+    Returns an ``(n, 2)`` array with coordinates normalized into ``[-1, 1]``.
+    Topics without centroids must be filtered out before calling.
+    """
+    arr = np.asarray(centroids, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    n, d = arr.shape
+    if n == 1:
+        return np.zeros((1, 2), dtype=np.float64)
+
+    centered = arr - arr.mean(axis=0, keepdims=True)
+    # Economy SVD is deterministic for a fixed matrix (numpy).
+    _u, s, vt = np.linalg.svd(centered, full_matrices=False)
+    k = min(2, s.shape[0], d, n)
+    # Project: X_c @ V_k  (equivalent to U[:, :k] * S[:k])
+    coords = centered @ vt[:k].T
+    if k < 2:
+        coords = np.pad(coords, ((0, 0), (0, 2 - k)))
+    max_abs = float(np.max(np.abs(coords))) if coords.size else 0.0
+    if max_abs > 0.0 and np.isfinite(max_abs):
+        coords = coords / max_abs
+    return np.asarray(coords, dtype=np.float64)
+
+
+def _parse_viewport_dt(value: str) -> datetime:
+    """Parse ISO datetime/date for viewport bounds; raise 422 on failure."""
+    raw = value.strip()
+    if not raw:
+        raise HTTPException(status_code=422, detail="empty datetime")
+    # Accept trailing Z.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid datetime: {value}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _scope_from_query(
+    *,
+    mailboxes: list[str] | None,
+    senders: list[str] | None,
+    scope_from: str | None,
+    scope_to: str | None,
+) -> QueryScope:
+    payload: dict[str, Any] = {
+        "mailboxes": list(mailboxes or []),
+        "senders": list(senders or []),
+    }
+    if scope_from or scope_to:
+        date: dict[str, str] = {}
+        if scope_from:
+            date["from"] = scope_from
+        if scope_to:
+            date["to"] = scope_to
+        payload["date"] = date
+    return QueryScope.model_validate(payload)
+
+
+def _resolve_river_unit(unit: str, viewport_from: datetime, viewport_to: datetime) -> str:
+    if unit == "auto":
+        duration = viewport_to - viewport_from
+        if duration.total_seconds() <= 0:
+            duration = timedelta(days=1)
+        return choose_aggregation(duration, _RIVER_DEFAULT_PIXEL_WIDTH)
+    if unit not in VALID_UNITS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unit must be auto or one of {', '.join(VALID_UNITS)}",
+        )
+    return unit
 
 
 def parse_embedding(raw: Any) -> list[float] | None:
@@ -1138,6 +1225,362 @@ def remove_member(
     return {"status": "ok", "topic_id": str(topic_id), "email_sid": email_sid}
 
 
+# --- Atlas analytics (river / matrix / projection / members) ---
+
+
+def topics_river(
+    pool: ConnectionPool,
+    *,
+    viewport_from: str,
+    viewport_to: str,
+    unit: str = "auto",
+    top: int = _RIVER_DEFAULT_TOP,
+    scope: QueryScope | None = None,
+) -> dict[str, Any]:
+    """Per-topic bucket series for the top-N visible topics in range.
+
+    Reuses the Chronicle topics-lane ranked CTE shape with parameterized ``top``.
+    ``mode_hint`` is always ``absolute`` — normalization is client-side.
+    """
+    top_n = max(1, min(int(top), _RIVER_MAX_TOP))
+    vf = _parse_viewport_dt(viewport_from)
+    vt = _parse_viewport_dt(viewport_to)
+    if not (vt > vf):
+        raise HTTPException(status_code=422, detail="to must be after from")
+    resolved_unit = _resolve_river_unit(unit, vf, vt)
+    scope = scope or QueryScope()
+    scope_conds, scope_params = scope_filters(scope)
+
+    # Bare emails columns are unambiguous (members/topics lack those names).
+    email_where = [
+        "date IS NOT NULL",
+        "date >= %(viewport_from)s",
+        "date < %(viewport_to)s",
+        *scope_conds,
+    ]
+
+    sql = f"""
+        WITH filtered AS (
+            SELECT m.topic_id, e.date
+              FROM app_topic_members m
+              JOIN emails e ON e.id = m.email_id
+              JOIN app_topics t ON t.id = m.topic_id
+             WHERE t.hidden = FALSE
+               AND {" AND ".join(email_where)}
+        ),
+        ranked AS (
+            SELECT topic_id, count(*)::int AS total
+              FROM filtered
+             GROUP BY topic_id
+             ORDER BY total DESC, topic_id
+             LIMIT %(top_limit)s
+        ),
+        bucketed AS (
+            SELECT
+                f.topic_id,
+                date_trunc(%(unit)s, f.date) AS bucket,
+                count(*)::int AS count
+              FROM filtered f
+              JOIN ranked r ON r.topic_id = f.topic_id
+             GROUP BY f.topic_id, 2
+        )
+        SELECT
+            r.topic_id::text,
+            t.label,
+            t.origin,
+            b.bucket,
+            coalesce(b.count, 0)::int AS count,
+            r.total
+          FROM ranked r
+          JOIN app_topics t ON t.id = r.topic_id
+          LEFT JOIN bucketed b ON b.topic_id = r.topic_id
+         ORDER BY r.total DESC, r.topic_id, b.bucket
+    """
+    params = {
+        **scope_params,
+        "unit": resolved_unit,
+        "viewport_from": vf.isoformat(),
+        "viewport_to": vt.isoformat(),
+        "top_limit": top_n,
+    }
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    by_topic: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        topic_id = str(row[0])
+        label = str(row[1]) if row[1] is not None else topic_id
+        origin = str(row[2])
+        if topic_id not in by_topic:
+            by_topic[topic_id] = {
+                "topic_id": topic_id,
+                "label": label,
+                "origin": origin,
+                "buckets": [],
+            }
+            order.append(topic_id)
+        bucket = _iso(row[3])
+        if bucket is None:
+            continue
+        by_topic[topic_id]["buckets"].append({"bucket": bucket, "count": int(row[4])})
+
+    return {
+        "unit": resolved_unit,
+        "mode_hint": "absolute",
+        "from": _iso(vf),
+        "to": _iso(vt),
+        "topics": [by_topic[tid] for tid in order],
+    }
+
+
+def topics_matrix(
+    pool: ConnectionPool,
+    *,
+    by: str = "year",
+    scope: QueryScope | None = None,
+) -> dict[str, Any]:
+    """Visible topics × year member counts (one grouped statement) + totals."""
+    if by != "year":
+        raise HTTPException(status_code=422, detail="only by=year is supported")
+    scope = scope or QueryScope()
+    scope_conds, scope_params = scope_filters(scope)
+    extra_sql = (" AND " + " AND ".join(scope_conds)) if scope_conds else ""
+
+    sql = f"""
+        SELECT
+            t.id::text AS topic_id,
+            t.label,
+            t.origin,
+            extract(year FROM e.date)::int AS year,
+            count(*)::int AS count
+          FROM app_topics t
+          JOIN app_topic_members m ON m.topic_id = t.id
+          JOIN emails e ON e.id = m.email_id
+         WHERE t.hidden = FALSE
+           AND e.date IS NOT NULL
+           {extra_sql}
+         GROUP BY t.id, t.label, t.origin, extract(year FROM e.date)
+         ORDER BY t.member_count DESC, t.label ASC, year ASC
+    """
+    with pool.connection() as conn:
+        rows = conn.execute(sql, scope_params).fetchall()
+
+    # topic_id → {label, origin, cells: {year: count}}
+    topics_map: dict[str, dict[str, Any]] = {}
+    years_set: set[int] = set()
+    for row in rows:
+        tid = str(row[0])
+        year = int(row[3])
+        count = int(row[4])
+        years_set.add(year)
+        if tid not in topics_map:
+            topics_map[tid] = {
+                "topic_id": tid,
+                "label": str(row[1]),
+                "origin": str(row[2]),
+                "cells": {},
+            }
+        topics_map[tid]["cells"][str(year)] = count
+
+    years = sorted(years_set)
+    rows_out: list[dict[str, Any]] = []
+    col_totals: dict[str, int] = {str(y): 0 for y in years}
+    grand_total = 0
+    for tid, info in topics_map.items():
+        row_total = 0
+        cells: dict[str, int] = {}
+        for y in years:
+            c = int(info["cells"].get(str(y), 0))
+            cells[str(y)] = c
+            row_total += c
+            col_totals[str(y)] = col_totals[str(y)] + c
+        grand_total += row_total
+        rows_out.append(
+            {
+                "topic_id": tid,
+                "label": info["label"],
+                "origin": info["origin"],
+                "cells": cells,
+                "row_total": row_total,
+            }
+        )
+
+    return {
+        "by": "year",
+        "columns": [str(y) for y in years],
+        "rows": rows_out,
+        "column_totals": col_totals,
+        "grand_total": grand_total,
+    }
+
+
+def topics_projection(pool: ConnectionPool) -> dict[str, Any]:
+    """Centroid PCA (numpy SVD) of automatic+curated topics to 2D.
+
+    Manual topics (no centroid) are excluded; response notes the count.
+    NEVER returns per-source points (TA-003 — LOD stops at topics).
+    """
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, label, origin, member_count, centroid
+              FROM app_topics
+             WHERE hidden = FALSE
+               AND centroid IS NOT NULL
+               AND origin IN ('automatic', 'curated')
+             ORDER BY member_count DESC, label ASC, id ASC
+            """
+        ).fetchall()
+        excluded_row = conn.execute(
+            """
+            SELECT count(*)::int
+              FROM app_topics
+             WHERE hidden = FALSE
+               AND (centroid IS NULL OR origin = 'manual')
+            """
+        ).fetchone()
+    excluded_manual = int(excluded_row[0]) if excluded_row else 0
+
+    topic_meta: list[tuple[str, str, str, int]] = []
+    vectors: list[list[float]] = []
+    for row in rows:
+        emb = parse_embedding(row[4])
+        if emb is None or len(emb) != _EMBED_DIM:
+            excluded_manual += 1
+            continue
+        topic_meta.append((str(row[0]), str(row[1]), str(row[2]), int(row[3])))
+        vectors.append(emb)
+
+    points: list[dict[str, Any]] = []
+    if vectors:
+        coords = pca_project_2d(np.asarray(vectors, dtype=np.float64))
+        for i, (tid, label, origin, mcount) in enumerate(topic_meta):
+            points.append(
+                {
+                    "topic_id": tid,
+                    "label": label,
+                    "origin": origin,
+                    "member_count": mcount,
+                    "x": float(coords[i, 0]),
+                    "y": float(coords[i, 1]),
+                }
+            )
+
+    note = None
+    if excluded_manual > 0:
+        note = (
+            f"{excluded_manual} topic(s) excluded (manual or missing centroid); "
+            "projection is topic-level only — no per-source points (TA-003)."
+        )
+    else:
+        note = "Projection is topic-level only — no per-source points (TA-003)."
+
+    return {
+        "points": points,
+        "excluded_without_centroid": excluded_manual,
+        "note": note,
+    }
+
+
+def _parse_members_cursor(token: str, secret_key: str) -> tuple[str | None, UUID]:
+    try:
+        payload = decode_cursor(token, secret_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    if "id" not in payload:
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    try:
+        last_id = UUID(str(payload["id"]))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    d = payload.get("d")
+    if d is not None and not isinstance(d, str):
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    return d if isinstance(d, str) else None, last_id
+
+
+def list_topic_members(
+    pool: ConnectionPool,
+    topic_id: UUID,
+    *,
+    secret_key: str,
+    cursor: str | None = None,
+    limit: int = _MEMBERS_DEFAULT_LIMIT,
+) -> dict[str, Any]:
+    """Paginated definitive member list for a topic (keyset on date DESC, id DESC).
+
+    Atlas "Open sources" uses this instead of Research Desk topic scoping
+    (Phase 5 polish). TA-004 — every aggregated view can open this list.
+    """
+    lim = max(1, min(int(limit), _MEMBERS_MAX_LIMIT))
+    with pool.connection() as conn:
+        trow = conn.execute(
+            "SELECT 1 FROM app_topics WHERE id = %(id)s",
+            {"id": topic_id},
+        ).fetchone()
+        if trow is None:
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+        conditions = ["m.topic_id = %(topic_id)s"]
+        params: dict[str, Any] = {"topic_id": topic_id, "lim": lim + 1}
+
+        if cursor:
+            cursor_d, cursor_id = _parse_members_cursor(cursor, secret_key)
+            params["cursor_id"] = cursor_id
+            if cursor_d is not None:
+                params["cursor_d"] = cursor_d
+                # DESC NULLS LAST: after (d, id) come earlier dates, same-date lower ids,
+                # then all NULL dates.
+                conditions.append(
+                    "("
+                    " (e.date IS NOT NULL AND (e.date < %(cursor_d)s"
+                    "  OR (e.date = %(cursor_d)s AND e.id < %(cursor_id)s)))"
+                    " OR e.date IS NULL"
+                    ")"
+                )
+            else:
+                conditions.append("e.date IS NULL AND e.id < %(cursor_id)s")
+
+        where_sql = " AND ".join(conditions)
+        rows = conn.execute(
+            f"""
+            SELECT e.id, e.subject, e.sender_name, e.sender_address,
+                   e.date, e.source_account, e.thread_id, m.distance
+              FROM app_topic_members m
+              JOIN emails e ON e.id = m.email_id
+             WHERE {where_sql}
+             ORDER BY e.date DESC NULLS LAST, e.id DESC
+             LIMIT %(lim)s
+            """,
+            params,
+        ).fetchall()
+
+    page = rows[:lim]
+    has_more = len(rows) > lim
+    items = [
+        {
+            "id": encode_source_id("msg", r[0]),
+            "subject": r[1],
+            "sender_name": r[2],
+            "sender_address": r[3],
+            "date": _iso(r[4]),
+            "mailbox": r[5],
+            "thread_id": r[6],
+            "distance": float(r[7]) if r[7] is not None else None,
+        }
+        for r in page
+    ]
+    next_cursor: str | None = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            {"d": _iso(last[4]), "id": str(last[0])},
+            secret_key,
+        )
+    return {"items": items, "next_cursor": next_cursor}
+
+
 # --- routes ---
 
 
@@ -1172,6 +1615,72 @@ def topics_list(
     return {"topics": list_topics(pool, include_hidden=include_hidden)}
 
 
+@router.get("/topics/river")
+def topics_river_endpoint(
+    request: Request,
+    from_: str = Query(..., alias="from"),
+    to: str = Query(...),
+    unit: str = Query(default="auto"),
+    top: int = Query(default=_RIVER_DEFAULT_TOP, ge=1, le=_RIVER_MAX_TOP),
+    mb: str | None = Query(default=None, description="CSV mailboxes"),
+    sd: str | None = Query(default=None, description="CSV senders"),
+    df: str | None = Query(default=None, description="Scope date from"),
+    dt: str | None = Query(default=None, description="Scope date to"),
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Topic river: top-N visible topics × time buckets (mode_hint=absolute)."""
+    pool: ConnectionPool = request.app.state.pool
+    mailboxes = [s.strip() for s in (mb or "").split(",") if s.strip()]
+    senders = [s.strip() for s in (sd or "").split(",") if s.strip()]
+    scope = _scope_from_query(
+        mailboxes=mailboxes,
+        senders=senders,
+        scope_from=df,
+        scope_to=dt,
+    )
+    return topics_river(
+        pool,
+        viewport_from=from_,
+        viewport_to=to,
+        unit=unit,
+        top=top,
+        scope=scope,
+    )
+
+
+@router.get("/topics/matrix")
+def topics_matrix_endpoint(
+    request: Request,
+    by: str = Query(default="year"),
+    mb: str | None = Query(default=None, description="CSV mailboxes"),
+    sd: str | None = Query(default=None, description="CSV senders"),
+    df: str | None = Query(default=None, description="Scope date from"),
+    dt: str | None = Query(default=None, description="Scope date to"),
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Topic × year matrix with row/column totals."""
+    pool: ConnectionPool = request.app.state.pool
+    mailboxes = [s.strip() for s in (mb or "").split(",") if s.strip()]
+    senders = [s.strip() for s in (sd or "").split(",") if s.strip()]
+    scope = _scope_from_query(
+        mailboxes=mailboxes,
+        senders=senders,
+        scope_from=df,
+        scope_to=dt,
+    )
+    return topics_matrix(pool, by=by, scope=scope)
+
+
+@router.get("/topics/projection")
+def topics_projection_endpoint(
+    request: Request,
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Centroid PCA to 2D; topics only — never per-source points (TA-003)."""
+    pool: ConnectionPool = request.app.state.pool
+    return topics_projection(pool)
+
+
 @router.post("/topics")
 def topics_create(
     body: TopicCreate,
@@ -1181,6 +1690,26 @@ def topics_create(
     """Create a manual topic."""
     pool: ConnectionPool = request.app.state.pool
     return create_manual_topic(pool, body, username=user)
+
+
+@router.get("/topics/{topic_id}/members")
+def topics_members_list(
+    topic_id: UUID,
+    request: Request,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=_MEMBERS_DEFAULT_LIMIT, ge=1, le=_MEMBERS_MAX_LIMIT),
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Paginated definitive member list (keyset). Atlas TA-004 source list."""
+    pool: ConnectionPool = request.app.state.pool
+    secret_key: str = request.app.state.settings.secret_key
+    return list_topic_members(
+        pool,
+        topic_id,
+        secret_key=secret_key,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 @router.get("/topics/{topic_id}")

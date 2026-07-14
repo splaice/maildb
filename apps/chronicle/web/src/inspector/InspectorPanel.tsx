@@ -9,6 +9,7 @@ import { downloadUrl } from '../files/format'
 import { PreviewPanel } from '../files/PreviewPanel'
 import { useWorkingSetStore } from '../workingset/store'
 import { formatPeriodLabel, UNIT_MS, type Unit } from '../chronicle/timeScale'
+import { TopicCard } from '../topics/TopicCard'
 import { PinToWorkspace } from '../workspaces/PinToWorkspace'
 import { MessageCard } from './MessageCard'
 import { SourceList } from './SourceList'
@@ -200,6 +201,15 @@ export function InspectorPanel({ bucketCount }: InspectorPanelProps) {
     return (
       <EventCard
         eventId={selection.eventId}
+        onClose={() => setSelection(null)}
+      />
+    )
+  }
+
+  if (selection.kind === 'topic') {
+    return (
+      <TopicCard
+        topicId={selection.topicId}
         onClose={() => setSelection(null)}
       />
     )

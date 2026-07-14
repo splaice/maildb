@@ -162,6 +162,38 @@ describe('encodeState / decodeState', () => {
     expect(decoded.filesView).toBe('table')
     expect(decoded.filesQuery).toBe('x')
   })
+
+  it('roundtrips topic atlas tv and tsel params', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      topicView: 'projection',
+      topicSelected: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    }
+    const encoded = encodeState(state)
+    expect(encoded.get('tv')).toBe('projection')
+    expect(encoded.get('tsel')).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    const decoded = decodeState(encoded)
+    expect(decoded.topicView).toBe('projection')
+    expect(decoded.topicSelected).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  })
+
+  it('omits default hierarchy tv and empty tsel', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      topicView: 'hierarchy',
+      topicSelected: null,
+    })
+    expect(params.has('tv')).toBe(false)
+    expect(params.has('tsel')).toBe(false)
+  })
+
+  it('decodes unknown tv as hierarchy', () => {
+    const decoded = decodeState(
+      new URLSearchParams({ tv: 'map', tsel: 'topic-1' }),
+    )
+    expect(decoded.topicView).toBe('hierarchy')
+    expect(decoded.topicSelected).toBe('topic-1')
+  })
 })
 
 describe('isScopePristine', () => {
@@ -177,7 +209,7 @@ describe('isScopePristine', () => {
 })
 
 describe('selection codec (sel)', () => {
-  it('roundtrips bucket, message, attachment, and event selections', () => {
+  it('roundtrips bucket, message, attachment, event, and topic selections', () => {
     const bucket = {
       kind: 'bucket' as const,
       lane: 'messages',
@@ -189,10 +221,16 @@ describe('selection codec (sel)', () => {
       kind: 'event' as const,
       eventId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
     }
+    const topic = {
+      kind: 'topic' as const,
+      topicId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    }
     expect(decodeSelection(encodeSelection(bucket))).toEqual(bucket)
     expect(decodeSelection(encodeSelection(msg))).toEqual(msg)
     expect(decodeSelection(encodeSelection(att))).toEqual(att)
     expect(decodeSelection(encodeSelection(evt))).toEqual(evt)
+    expect(decodeSelection(encodeSelection(topic))).toEqual(topic)
+    expect(encodeSelection(topic)).toBe('t:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
     expect(encodeSelection(null)).toBeNull()
     expect(decodeSelection(null)).toBeNull()
   })

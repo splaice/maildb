@@ -204,6 +204,119 @@ export interface TopicsLane {
   topics: TopicSeries[]
 }
 
+/** Topic origin (Table 21). */
+export type TopicOrigin = 'automatic' | 'curated' | 'manual'
+
+/** GET /api/topics tree node. */
+export interface TopicTreeNode {
+  id: string
+  label: string
+  origin: TopicOrigin | string
+  member_count: number
+  hidden: boolean
+  top_terms: string[]
+  children: TopicTreeNode[]
+}
+
+export interface TopicListResponse {
+  topics: TopicTreeNode[]
+}
+
+export interface TopicActivityBucket {
+  bucket: string
+  count: number
+}
+
+export interface TopicMemberEnvelope {
+  id: string
+  subject: string | null
+  sender_name: string | null
+  sender_address: string | null
+  date: string | null
+  mailbox: string | null
+  thread_id: string | null
+  distance: number | null
+}
+
+/** GET /api/topics/{id} */
+export interface TopicDetail {
+  id: string
+  label: string
+  description: string | null
+  origin: TopicOrigin | string
+  parent_id: string | null
+  hidden: boolean
+  top_terms: string[]
+  generation: number
+  member_count: number
+  created_at: string | null
+  updated_at: string | null
+  activity: TopicActivityBucket[]
+  members: TopicMemberEnvelope[]
+}
+
+export interface TopicPatchRequest {
+  label?: string
+  description?: string | null
+  hidden?: boolean
+  parent_id?: string | null
+}
+
+/** GET /api/topics/river */
+export interface TopicRiverSeries {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  buckets: BucketPoint[]
+}
+
+export interface TopicRiverResponse {
+  unit: string
+  mode_hint: 'absolute' | string
+  from: string | null
+  to: string | null
+  topics: TopicRiverSeries[]
+}
+
+/** GET /api/topics/matrix */
+export interface TopicMatrixRow {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  cells: Record<string, number>
+  row_total: number
+}
+
+export interface TopicMatrixResponse {
+  by: string
+  columns: string[]
+  rows: TopicMatrixRow[]
+  column_totals: Record<string, number>
+  grand_total: number
+}
+
+/** GET /api/topics/projection — topic-level only (TA-003). */
+export interface TopicProjectionPoint {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  member_count: number
+  x: number
+  y: number
+}
+
+export interface TopicProjectionResponse {
+  points: TopicProjectionPoint[]
+  excluded_without_centroid: number
+  note: string
+}
+
+/** GET /api/topics/{id}/members */
+export interface TopicMembersResponse {
+  items: TopicMemberEnvelope[]
+  next_cursor: string | null
+}
+
 /** Sparse event diamond mark on the events lane. */
 export interface EventLaneMark {
   event_id: string

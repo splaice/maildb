@@ -11,6 +11,7 @@ import { ChroniclePage } from './routes/ChroniclePage'
 import { DataHealthPage } from './routes/DataHealthPage'
 import { StubPage } from './routes/StubPage'
 import { Workstation } from './shell/Workstation'
+import { TopicsPage } from './topics/TopicsPage'
 import { WorkspacePage } from './workspaces/WorkspacePage'
 import { WorkspacesListPage } from './workspaces/WorkspacesListPage'
 
@@ -35,7 +36,7 @@ export function App() {
           />
           <Route path="source/:sid" element={<SourcePage />} />
           <Route path="research" element={<ResearchDeskPage />} />
-          <Route path="topics" element={<StubPage title="Topics" />} />
+          <Route path="topics" element={<TopicsPage />} />
           <Route path="people" element={<StubPage title="People" />} />
           <Route path="files" element={<FilesPage />} />
           <Route path="workspaces" element={<WorkspacesListPage />} />

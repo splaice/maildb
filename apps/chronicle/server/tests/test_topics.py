@@ -14,6 +14,7 @@ from chronicle_server.topics import (
     extract_top_terms,
     label_from_terms,
     parse_label_polish_response,
+    pca_project_2d,
     run_kmeans,
     validate_label_array,
     vector_literal,
@@ -498,5 +499,247 @@ def test_crud_rename_delete_members_auth(
         assert "activity" in body
         assert "members" in body
         assert body["origin"] in ("curated", "automatic", "manual")
+    finally:
+        _cleanup_topics_fixtures(db_pool, seeds)
+
+
+# --- Atlas analytics (4.2) ---
+
+
+def test_pca_project_2d_deterministic() -> None:
+    rng = np.random.default_rng(42)
+    data = rng.normal(size=(12, 16)).astype(np.float64)
+    a = pca_project_2d(data)
+    b = pca_project_2d(data)
+    np.testing.assert_allclose(a, b)
+    assert a.shape == (12, 2)
+    assert float(np.max(np.abs(a))) <= 1.0 + 1e-9
+
+
+def test_river_top_n_and_unit(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    seeds: list[dict[str, Any]] = []
+    try:
+        for i in range(5):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"River alpha topic word {i}",
+                    embedding=_unit_vec(0),
+                    date=datetime(2020, 3, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        for i in range(3):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"River beta topic word {i}",
+                    embedding=_unit_vec(20),
+                    date=datetime(2020, 6, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        _login(db_client)
+        gen = db_client.post(
+            "/api/topics/generate",
+            json={"k": 4, "sample": 50, "seed": 11},
+        )
+        assert gen.status_code == 200, gen.text
+
+        r = db_client.get(
+            "/api/topics/river",
+            params={
+                "from": "2020-01-01T00:00:00Z",
+                "to": "2021-01-01T00:00:00Z",
+                "unit": "month",
+                "top": 2,
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["mode_hint"] == "absolute"
+        assert body["unit"] == "month"
+        assert isinstance(body["topics"], list)
+        assert len(body["topics"]) <= 2
+        for series in body["topics"]:
+            assert "topic_id" in series
+            assert "label" in series
+            assert "origin" in series
+            assert isinstance(series["buckets"], list)
+            for b in series["buckets"]:
+                assert "bucket" in b and "count" in b
+
+        # unit=auto resolves to a valid unit.
+        r_auto = db_client.get(
+            "/api/topics/river",
+            params={
+                "from": "2020-01-01T00:00:00Z",
+                "to": "2021-01-01T00:00:00Z",
+                "unit": "auto",
+                "top": 8,
+            },
+        )
+        assert r_auto.status_code == 200, r_auto.text
+        assert r_auto.json()["unit"] in (
+            "hour",
+            "day",
+            "week",
+            "month",
+            "quarter",
+            "year",
+        )
+    finally:
+        _cleanup_topics_fixtures(db_pool, seeds)
+
+
+def test_matrix_totals(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    seeds: list[dict[str, Any]] = []
+    try:
+        for i in range(4):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"Matrix year twenty {i}",
+                    embedding=_unit_vec(1),
+                    date=datetime(2020, 5, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        for i in range(2):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"Matrix year twentyone {i}",
+                    embedding=_unit_vec(1),
+                    date=datetime(2021, 5, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        _login(db_client)
+        gen = db_client.post(
+            "/api/topics/generate",
+            json={"k": 4, "sample": 50, "seed": 5},
+        )
+        assert gen.status_code == 200, gen.text
+
+        r = db_client.get("/api/topics/matrix", params={"by": "year"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["by"] == "year"
+        assert "2020" in body["columns"] or "2021" in body["columns"]
+        assert isinstance(body["rows"], list)
+        assert "column_totals" in body
+        assert "grand_total" in body
+        # Totals reconcile: sum of row_totals == grand_total == sum of col totals.
+        row_sum = sum(int(row["row_total"]) for row in body["rows"])
+        col_sum = sum(int(v) for v in body["column_totals"].values())
+        assert row_sum == body["grand_total"]
+        assert col_sum == body["grand_total"]
+        assert body["grand_total"] >= 6
+    finally:
+        _cleanup_topics_fixtures(db_pool, seeds)
+
+
+def test_projection_determinism_shape_and_manual_exclusion(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    seeds: list[dict[str, Any]] = []
+    try:
+        for i in range(6):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"Projection cluster subject {i}",
+                    embedding=_unit_vec(i % 2),
+                    date=datetime(2019, 1, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        _login(db_client)
+        gen = db_client.post(
+            "/api/topics/generate",
+            json={"k": 4, "sample": 50, "seed": 9},
+        )
+        assert gen.status_code == 200, gen.text
+
+        # Manual topic without centroid must be excluded.
+        created = db_client.post(
+            "/api/topics",
+            json={"label": "Manual No Centroid"},
+        )
+        assert created.status_code == 200
+        manual_id = created.json()["id"]
+
+        p1 = db_client.get("/api/topics/projection")
+        assert p1.status_code == 200, p1.text
+        body1 = p1.json()
+        p2 = db_client.get("/api/topics/projection")
+        assert p2.status_code == 200
+        body2 = p2.json()
+        # Determinism: same centroids → same coords.
+        assert body1["points"] == body2["points"]
+
+        # Shape: topic-level only (no source_id / email_id fields).
+        assert "points" in body1
+        for pt in body1["points"]:
+            assert set(pt.keys()) >= {
+                "topic_id",
+                "label",
+                "origin",
+                "member_count",
+                "x",
+                "y",
+            }
+            assert "source_id" not in pt
+            assert "email_id" not in pt
+            assert "sources" not in pt
+            assert -1.0 - 1e-9 <= float(pt["x"]) <= 1.0 + 1e-9
+            assert -1.0 - 1e-9 <= float(pt["y"]) <= 1.0 + 1e-9
+            assert pt["topic_id"] != manual_id
+
+        assert body1["excluded_without_centroid"] >= 1
+        assert "note" in body1
+        assert "TA-003" in body1["note"] or "topic-level" in body1["note"].lower()
+    finally:
+        _cleanup_topics_fixtures(db_pool, seeds)
+
+
+def test_members_keyset_endpoint(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    seeds: list[dict[str, Any]] = []
+    try:
+        for i in range(6):
+            seeds.append(
+                _insert_email_with_embedding(
+                    db_pool,
+                    subject=f"Member list item {i}",
+                    embedding=_unit_vec(3),
+                    date=datetime(2022, 1, 1 + i, 12, 0, tzinfo=UTC),
+                )
+            )
+        _login(db_client)
+        gen = db_client.post(
+            "/api/topics/generate",
+            json={"k": 4, "sample": 50, "seed": 2},
+        )
+        assert gen.status_code == 200, gen.text
+        topics = db_client.get("/api/topics").json()["topics"]
+        assert topics
+        tid = topics[0]["id"]
+
+        page1 = db_client.get(
+            f"/api/topics/{tid}/members",
+            params={"limit": 2},
+        )
+        assert page1.status_code == 200, page1.text
+        b1 = page1.json()
+        assert len(b1["items"]) <= 2
+        assert "next_cursor" in b1
+        ids1 = [it["id"] for it in b1["items"]]
+        assert all(sid.startswith("msg_") for sid in ids1)
+
+        if b1["next_cursor"]:
+            page2 = db_client.get(
+                f"/api/topics/{tid}/members",
+                params={"limit": 2, "cursor": b1["next_cursor"]},
+            )
+            assert page2.status_code == 200, page2.text
+            ids2 = [it["id"] for it in page2.json()["items"]]
+            # Keyset pages must not overlap.
+            assert set(ids1).isdisjoint(set(ids2))
     finally:
         _cleanup_topics_fixtures(db_pool, seeds)
