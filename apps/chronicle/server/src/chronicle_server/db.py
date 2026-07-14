@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS app_topic_members (
     PRIMARY KEY (topic_id, email_id)
 );
 CREATE INDEX IF NOT EXISTS app_topic_members_email_idx ON app_topic_members (email_id);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

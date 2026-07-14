@@ -26,6 +26,8 @@ from chronicle_server.gateway import (
 from chronicle_server.ids import decode_source_id, msg_key_to_uuid
 from chronicle_server.scope import QueryScope, scope_fingerprint
 from chronicle_server.search import SearchRequest, run_search
+from chronicle_server.settings_api import effective_ai_flags
+from chronicle_server.settings_api import router as settings_router
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 router = APIRouter(tags=["ask"])
+# Settings surface is mounted here (app.py is outside the 5.3 allowlist).
+router.include_router(settings_router)
 
 _TAG_STRIP = re.compile(r"<[^>]+>")
 
@@ -357,8 +361,10 @@ def post_ask(
     ``{"available": false, "reason": ...}`` (not SSE) so search stays usable.
     """
     settings: ChronicleSettings = request.app.state.settings
+    pool: ConnectionPool = request.app.state.pool
+    flags = effective_ai_flags(pool, settings)
 
-    if not settings.ask_enabled:
+    if not flags["ask_enabled"]:
         return JSONResponse(
             status_code=200,
             content={

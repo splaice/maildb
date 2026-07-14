@@ -31,6 +31,7 @@ from chronicle_server.gateway import (
 from chronicle_server.ids import decode_source_id, msg_key_to_uuid
 from chronicle_server.scope import DateRange, QueryScope, scope_filters, scope_fingerprint
 from chronicle_server.search import SearchRequest, run_search
+from chronicle_server.settings_api import effective_ai_flags
 
 if TYPE_CHECKING:
     from psycopg_pool import ConnectionPool
@@ -1008,6 +1009,10 @@ def post_generate(
     settings: ChronicleSettings = request.app.state.settings
     pool: ConnectionPool = request.app.state.pool
     gateway = _gateway_from_request(request, settings)
+    flags = effective_ai_flags(pool, settings)
+
+    if not flags["generate_enabled"]:
+        return {"available": False}
 
     if not _model_available(request, gateway):
         return {"available": False}

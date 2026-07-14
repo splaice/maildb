@@ -22,7 +22,7 @@ import { PeoplePage } from './people/PeoplePage'
 import { PersonProfilePage } from './people/PersonProfilePage'
 import { ChroniclePage } from './routes/ChroniclePage'
 import { DataHealthPage } from './routes/DataHealthPage'
-import { StubPage } from './routes/StubPage'
+import { SettingsPage } from './settings'
 import { Workstation } from './shell/Workstation'
 import { TopicsPage } from './topics/TopicsPage'
 import { WorkspacePage } from './workspaces/WorkspacePage'
@@ -106,7 +106,7 @@ export function App() {
           <Route path="workspaces" element={<WorkspacesListPage />} />
           <Route path="workspaces/:id" element={<WorkspacePage />} />
           <Route path="data-health" element={<DataHealthPage />} />
-          <Route path="settings" element={<StubPage title="Settings" />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

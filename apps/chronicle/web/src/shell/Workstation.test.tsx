@@ -103,4 +103,18 @@ describe('Workstation shell', () => {
     const search = within(shell).getByLabelText(/universal search/i)
     expect(search).not.toBeDisabled()
   })
+
+  it('skip link is the first focusable control and targets #main', async () => {
+    stubAuthenticatedApi()
+    renderApp(['/'])
+    const shell = await screen.findByTestId('workstation-shell')
+    const skip = within(shell).getByRole('link', { name: /skip to main content/i })
+    expect(skip).toHaveAttribute('href', '#main')
+    expect(within(shell).getByRole('main')).toHaveAttribute('id', 'main')
+    // First focusable in shell DOM order
+    const focusable = shell.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )
+    expect(focusable[0]).toBe(skip)
+  })
 })
