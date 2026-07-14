@@ -11,6 +11,7 @@ import type {
 } from '../api/types'
 import { useWorkingSetStore } from '../workingset/store'
 import type { FilesViewMode } from '../workingset/urlState'
+import { FamilyPanel } from './FamilyPanel'
 import {
   contentTypeFamily,
   formatBytes,
@@ -18,6 +19,10 @@ import {
   previewUrl,
   truncateFilename,
 } from './format'
+import { VersionCompareView } from './VersionCompareView'
+
+/** List items may include server family_count (task 4.5). */
+type FileRowItem = AttachmentListItem & { family_count?: number }
 
 const btnClass =
   'rounded-md border border-steel bg-graphite-800 px-2 py-1 text-text-primary enabled:hover:bg-graphite-900 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-action'
@@ -69,12 +74,14 @@ function FilesTable({
   expanded,
   onToggleExpand,
   onSelect,
+  onOpenFamily,
 }: {
-  items: AttachmentListItem[]
+  items: FileRowItem[]
   groupDuplicates: boolean
   expanded: Set<string>
   onToggleExpand: (id: string) => void
-  onSelect: (item: AttachmentListItem) => void
+  onSelect: (item: FileRowItem) => void
+  onOpenFamily: (id: string) => void
 }) {
   return (
     <div className="overflow-auto" data-testid="files-table">
@@ -89,6 +96,7 @@ function FilesTable({
             <th className="px-2 py-1.5 font-medium">Source</th>
             <th className="px-2 py-1.5 font-medium">Extraction</th>
             <th className="px-2 py-1.5 font-medium">Dup</th>
+            <th className="px-2 py-1.5 font-medium">Versions</th>
           </tr>
         </thead>
         <tbody className="tabular-nums font-mono text-text-primary">
@@ -104,6 +112,7 @@ function FilesTable({
                 failed={failed}
                 onToggleExpand={onToggleExpand}
                 onSelect={onSelect}
+                onOpenFamily={onOpenFamily}
               />
             )
           })}
@@ -120,15 +129,18 @@ function FragmentRow({
   failed,
   onToggleExpand,
   onSelect,
+  onOpenFamily,
 }: {
-  item: AttachmentListItem
+  item: FileRowItem
   groupDuplicates: boolean
   isExpanded: boolean
   failed: boolean
   onToggleExpand: (id: string) => void
-  onSelect: (item: AttachmentListItem) => void
+  onSelect: (item: FileRowItem) => void
+  onOpenFamily: (id: string) => void
 }) {
   const sender = item.sender_name || item.sender_address || '—'
+  const familyCount = item.family_count ?? 1
   return (
     <>
       <tr
@@ -195,10 +207,27 @@ function FragmentRow({
             <span className="text-text-muted">—</span>
           )}
         </td>
+        <td className="px-2 py-1">
+          {familyCount > 1 ? (
+            <button
+              type="button"
+              className={btnClass}
+              data-testid={`family-badge-${item.id}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpenFamily(item.id)
+              }}
+            >
+              {familyCount} versions
+            </button>
+          ) : (
+            <span className="text-text-muted">—</span>
+          )}
+        </td>
       </tr>
       {groupDuplicates && isExpanded && item.occurrences ? (
         <tr data-testid={`dup-expand-${item.id}`}>
-          <td colSpan={8} className="bg-graphite-900 px-4 py-2 font-sans">
+          <td colSpan={9} className="bg-graphite-900 px-4 py-2 font-sans">
             <p className="mb-1 text-[11px] font-medium text-text-muted">
               Occurrences (exact duplicates)
             </p>
@@ -322,6 +351,10 @@ export function FilesPage() {
   const [status, setStatus] = useState('')
   const [groupDuplicates, setGroupDuplicates] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [familyAttSid, setFamilyAttSid] = useState<string | null>(null)
+  const [comparePair, setComparePair] = useState<{ a: string; b: string } | null>(
+    null,
+  )
   // Keep draft in sync when URL fq changes (back/forward).
   useEffect(() => {
     setFilenameDraft(filesQuery)
@@ -383,12 +416,12 @@ export function FilesPage() {
   })
 
   const items = useMemo(
-    () => query.data?.pages.flatMap((p) => p.items) ?? [],
+    () => (query.data?.pages.flatMap((p) => p.items) ?? []) as FileRowItem[],
     [query.data],
   )
 
   const onSelect = useCallback(
-    (item: AttachmentListItem) => {
+    (item: FileRowItem) => {
       setSelection({ kind: 'attachment', sid: item.id })
     },
     [setSelection],
@@ -402,6 +435,27 @@ export function FilesPage() {
       return next
     })
   }, [])
+
+  const onOpenFamily = useCallback((id: string) => {
+    setComparePair(null)
+    setFamilyAttSid(id)
+  }, [])
+
+  const onCompare = useCallback((a: string, b: string) => {
+    setComparePair({ a, b })
+  }, [])
+
+  if (comparePair) {
+    return (
+      <div className="relative flex h-full min-h-0 flex-col gap-3" data-testid="files-page">
+        <VersionCompareView
+          a={comparePair.a}
+          b={comparePair.b}
+          onClose={() => setComparePair(null)}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="relative flex h-full min-h-0 flex-col gap-3" data-testid="files-page">
@@ -510,8 +564,20 @@ export function FilesPage() {
           expanded={expanded}
           onToggleExpand={onToggleExpand}
           onSelect={onSelect}
+          onOpenFamily={onOpenFamily}
         />
       )}
+
+      {familyAttSid ? (
+        <FamilyPanel
+          attSid={familyAttSid}
+          onClose={() => setFamilyAttSid(null)}
+          onCompare={onCompare}
+          onSelect={(sid) => {
+            setSelection({ kind: 'attachment', sid })
+          }}
+        />
+      ) : null}
 
       {query.hasNextPage ? (
         <div>

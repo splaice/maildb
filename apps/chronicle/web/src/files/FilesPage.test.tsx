@@ -259,6 +259,152 @@ describe('FilesPage', () => {
       expect(screen.getByTestId('files-table')).toBeInTheDocument()
     })
   })
+
+  it('family badge opens panel; compare shows text-prefixed diff kinds', async () => {
+    const v1 = item({
+      id: 'att_v1',
+      filename: 'final_roof_estimate.pdf',
+      family_count: 2,
+      sha256: 'sha1',
+    } as AttachmentListItem & { family_count: number })
+    const v2 = item({
+      id: 'att_v2',
+      filename: 'Final_Roof_Estimate_v3.pdf',
+      family_count: 2,
+      sha256: 'sha2',
+    } as AttachmentListItem & { family_count: number })
+
+    const familyBody = {
+      id: 'att_v1',
+      stem: 'final_roof_estimate',
+      candidates: [
+        {
+          id: 'att_v1',
+          filename: 'final_roof_estimate.pdf',
+          date: '2015-05-01T00:00:00Z',
+          sender: 'Alice',
+          size: 100,
+          sha256: 'sha1',
+          confidence: 'exact-duplicate',
+          signals: ['stem', 'sha256'],
+        },
+        {
+          id: 'att_v2',
+          filename: 'Final_Roof_Estimate_v3.pdf',
+          date: '2015-06-01T00:00:00Z',
+          sender: 'Alice',
+          size: 120,
+          sha256: 'sha2',
+          confidence: 'probable-version',
+          signals: ['stem', 'sender'],
+        },
+      ],
+    }
+
+    const compareBody = {
+      a: {
+        id: 'att_v1',
+        filename: 'final_roof_estimate.pdf',
+        content_type: 'application/pdf',
+        size: 100,
+        date: '2015-05-01T00:00:00Z',
+        sender: 'Alice',
+        sha256: 'sha1',
+        source_message_id: 'msg_1',
+      },
+      b: {
+        id: 'att_v2',
+        filename: 'Final_Roof_Estimate_v3.pdf',
+        content_type: 'application/pdf',
+        size: 120,
+        date: '2015-06-01T00:00:00Z',
+        sender: 'Alice',
+        sha256: 'sha2',
+        source_message_id: 'msg_2',
+      },
+      hunks: [
+        {
+          a_start: 0,
+          b_start: 0,
+          lines: [
+            { kind: 'same', text: 'Roof quote' },
+            { kind: 'del', text: 'Total: $8,000' },
+            { kind: 'add', text: 'Total: $9,500.00' },
+          ],
+        },
+      ],
+      truncated: false,
+      amount_changes: [
+        { kind: 'del', text: 'Total: $8,000', amounts: ['$8,000'] },
+        { kind: 'add', text: 'Total: $9,500.00', amounts: ['$9,500.00'] },
+      ],
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        const u = String(url)
+        if (u.includes('/api/attachments/list')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => listResponse([v1, v2]),
+          } as Response
+        }
+        if (u.includes('/family')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => familyBody,
+          } as Response
+        }
+        if (u.includes('/compare')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => compareBody,
+          } as Response
+        }
+        throw new Error(`unexpected ${u}`)
+      }),
+    )
+
+    renderFiles()
+    await screen.findByTestId('file-row-att_v1')
+    expect(screen.getByTestId('family-badge-att_v1')).toHaveTextContent('2 versions')
+    fireEvent.click(screen.getByTestId('family-badge-att_v1'))
+
+    expect(await screen.findByTestId('family-panel')).toBeInTheDocument()
+    expect(await screen.findByTestId('family-stem')).toHaveTextContent(
+      'final_roof_estimate',
+    )
+    expect(await screen.findByTestId('family-confidence-att_v2')).toHaveTextContent(
+      /probable version/i,
+    )
+    expect(screen.getByTestId('family-confidence-att_v2')).toHaveTextContent(
+      /signals:.*stem/i,
+    )
+
+    fireEvent.click(screen.getByTestId('family-compare-att_v1-att_v2'))
+    expect(await screen.findByTestId('version-compare-view')).toBeInTheDocument()
+    expect(await screen.findByTestId('compare-metadata')).toBeInTheDocument()
+    expect(screen.getByTestId('compare-amount-changes')).toHaveTextContent('$8,000')
+    expect(screen.getByTestId('compare-amount-changes')).toHaveTextContent('$9,500')
+
+    // Text prefixes on diff kinds (not color-only)
+    const delLines = screen.getAllByTestId('diff-line-del')
+    expect(delLines[0]?.textContent?.startsWith('−')).toBe(true)
+    const addLines = screen.getAllByTestId('diff-line-add')
+    expect(addLines[0]?.textContent?.startsWith('+')).toBe(true)
+    const sameLines = screen.getAllByTestId('diff-line-same')
+    expect(sameLines[0]?.textContent).toMatch(/Roof quote/)
+
+    // Preview links intact
+    expect(screen.getByTestId('compare-preview-a')).toHaveAttribute(
+      'href',
+      expect.stringContaining('/api/attachments/att_v1/preview'),
+    )
+  })
 })
 
 describe('PreviewPanel', () => {
