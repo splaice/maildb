@@ -25,6 +25,16 @@ def test_sources_require_auth(client: TestClient) -> None:
     assert client.get("/api/sources/msg_1").status_code == 401
     assert client.get("/api/sources/msg_1/context?start=0&end=1").status_code == 401
     assert client.get("/api/threads/thr_YQ").status_code == 401
+    assert (
+        client.post(
+            "/api/sources/list",
+            json={
+                "date_from": "2010-01-01T00:00:00Z",
+                "date_to": "2020-01-01T00:00:00Z",
+            },
+        ).status_code
+        == 401
+    )
 
 
 def test_malformed_id_404_authenticated(client: TestClient) -> None:
@@ -50,42 +60,63 @@ def _seed_message(
     thread_id: str = "thread-test-sources",
     sender_name: str = "Alice",
     sender_address: str = "alice@example.com",
+    source_account: str = "test@example.com",
+    date: str | None = "now",
     with_attachment: bool = False,
     markdown: str | None = None,
+    attachments_json: str | None = None,
 ) -> dict[str, Any]:
-    """Insert minimal email (+ optional attachment) rows; caller cleans up."""
+    """Insert minimal email (+ optional attachment) rows; caller cleans up.
+
+    ``date``: ``\"now\"`` uses now(); ISO string uses that timestamp; ``None`` inserts NULL.
+    """
     email_id = uuid4()
     message_id = f"<src-test-{email_id}@example.com>"
     att_id: int | None = None
 
+    if date == "now":
+        date_sql = "now()"
+        date_param: str | None = None
+    elif date is None:
+        date_sql = "NULL"
+        date_param = None
+    else:
+        date_sql = "%(date)s::timestamptz"
+        date_param = date
+
     with pool.connection() as conn:
+        params: dict[str, Any] = {
+            "id": email_id,
+            "mid": message_id,
+            "tid": thread_id,
+            "subject": subject,
+            "sname": sender_name,
+            "saddr": sender_address,
+            "recip": '{"to": ["bob@example.com"], "cc": ["carol@example.com"], "bcc": []}',
+            "btext": body_text,
+            "bhtml": body_html,
+            "has_att": with_attachment,
+            "labels": ["INBOX"],
+            "acct": source_account,
+            "att_json": attachments_json,
+        }
+        if date_param is not None:
+            params["date"] = date_param
         conn.execute(
-            """
+            f"""
             INSERT INTO emails (
                 id, message_id, thread_id, subject,
                 sender_name, sender_address, sender_domain,
                 recipients, date, body_text, body_html,
-                has_attachment, labels, source_account, created_at
+                has_attachment, attachments, labels, source_account, created_at
             ) VALUES (
                 %(id)s, %(mid)s, %(tid)s, %(subject)s,
                 %(sname)s, %(saddr)s, 'example.com',
-                %(recip)s::jsonb, now(), %(btext)s, %(bhtml)s,
-                %(has_att)s, %(labels)s, 'test@example.com', now()
+                %(recip)s::jsonb, {date_sql}, %(btext)s, %(bhtml)s,
+                %(has_att)s, %(att_json)s::jsonb, %(labels)s, %(acct)s, now()
             )
             """,
-            {
-                "id": email_id,
-                "mid": message_id,
-                "tid": thread_id,
-                "subject": subject,
-                "sname": sender_name,
-                "saddr": sender_address,
-                "recip": '{"to": ["bob@example.com"], "cc": [], "bcc": []}',
-                "btext": body_text,
-                "bhtml": body_html,
-                "has_att": with_attachment,
-                "labels": ["INBOX"],
-            },
+            params,
         )
         if with_attachment:
             row = conn.execute(
@@ -307,3 +338,258 @@ def test_unknown_thread_404(db_client: TestClient) -> None:
     sid = encode_source_id("thr", f"missing-thread-{uuid4()}")
     r = db_client.get(f"/api/threads/{sid}")
     assert r.status_code == 404
+
+
+# --- POST /api/sources/list ---
+
+
+_LIST_FROM = "2014-01-01T00:00:00+00:00"
+_LIST_TO = "2015-01-01T00:00:00+00:00"
+
+
+def test_sources_list_invalid_cursor_400(db_client: TestClient) -> None:
+    _login(db_client)
+    r = db_client.post(
+        "/api/sources/list",
+        json={
+            "date_from": _LIST_FROM,
+            "date_to": _LIST_TO,
+            "cursor": "not-a-valid-cursor",
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_sources_list_keyset_walks_full_set(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    """Page N+1 first item > page N last; union of pages is the full ordered set."""
+    seeds: list[dict[str, Any]] = []
+    # Deterministic chronological order via fixed timestamps.
+    dates = [
+        "2014-03-01T10:00:00+00:00",
+        "2014-03-01T11:00:00+00:00",  # same day, later
+        "2014-06-15T08:00:00+00:00",
+        "2014-09-01T12:00:00+00:00",
+        "2014-12-31T23:00:00+00:00",
+    ]
+    try:
+        for i, d in enumerate(dates):
+            seeds.append(
+                _seed_message(
+                    db_pool,
+                    subject=f"List-{i}",
+                    date=d,
+                    body_html=None,
+                    sender_address=f"u{i}@example.com",
+                )
+            )
+        _login(db_client)
+
+        all_ids: list[str] = []
+        cursor: str | None = None
+        prev_last: dict[str, Any] | None = None
+        pages = 0
+        while True:
+            body: dict[str, Any] = {
+                "date_from": _LIST_FROM,
+                "date_to": _LIST_TO,
+                "limit": 2,
+            }
+            if cursor is not None:
+                body["cursor"] = cursor
+            r = db_client.post("/api/sources/list", json=body)
+            assert r.status_code == 200, r.text
+            data = r.json()
+            pages += 1
+            items = data["items"]
+            assert "scope_fingerprint" in data
+            assert data["scope_fingerprint"].startswith("qs_")
+            if not items:
+                assert data["next_cursor"] is None
+                break
+            # Envelope-only: no body fields
+            for it in items:
+                assert "body" not in it
+                assert it["id"].startswith("msg_")
+                assert "subject" in it
+            if prev_last is not None:
+                first = items[0]
+                # Chronological keyset: page N+1 first > page N last
+                assert (first["date"], first["id"]) > (
+                    prev_last["date"],
+                    prev_last["id"],
+                )
+            all_ids.extend(it["id"] for it in items)
+            prev_last = items[-1]
+            cursor = data["next_cursor"]
+            if cursor is None:
+                break
+            assert pages < 20  # safety
+
+        expected = [s["msg_sid"] for s in seeds]
+        assert all_ids == expected
+        assert len(set(all_ids)) == len(all_ids)
+        assert pages >= 3  # limit=2 over 5 rows
+    finally:
+        for s in seeds:
+            _cleanup(db_pool, s)
+
+
+def test_sources_list_null_date_ordering(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    """Null dates sort last; keyset continues correctly into the null-date region.
+
+    Uses a wide date window plus a direct SQL check of ORDER BY … NULLS LAST,
+    and walks keyset pages that include only dated rows in-range (nulls are
+    outside the bucket range filter). Verifies cursor with d=null is accepted
+    after the last dated row when more null-only rows would follow.
+    """
+    from chronicle_server.cursor import encode_cursor
+
+    seeds: list[dict[str, Any]] = []
+    try:
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="Dated-early",
+                date="2014-02-01T00:00:00+00:00",
+                body_html=None,
+            )
+        )
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="Dated-late",
+                date="2014-08-01T00:00:00+00:00",
+                body_html=None,
+            )
+        )
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="Null-date-A",
+                date=None,
+                body_html=None,
+            )
+        )
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="Null-date-B",
+                date=None,
+                body_html=None,
+            )
+        )
+
+        # Direct SQL: ASC NULLS LAST places nulls after all dated rows.
+        with db_pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT subject, date IS NULL AS is_null
+                  FROM emails
+                 WHERE id = ANY(%(ids)s)
+                 ORDER BY date ASC NULLS LAST, id ASC
+                """,
+                {"ids": [s["email_id"] for s in seeds]},
+            ).fetchall()
+        subjects = [r[0] for r in rows]
+        assert subjects[:2] == ["Dated-early", "Dated-late"]
+        assert set(subjects[2:]) == {"Null-date-A", "Null-date-B"}
+        assert all(r[1] for r in rows[2:])
+
+        _login(db_client)
+        # Bucket range excludes nulls (timeline drill-in).
+        r = db_client.post(
+            "/api/sources/list",
+            json={"date_from": _LIST_FROM, "date_to": _LIST_TO, "limit": 50},
+        )
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert [it["subject"] for it in items] == ["Dated-early", "Dated-late"]
+        assert all(it["date"] is not None for it in items)
+
+        # Cursor with d=null is valid (null-date keyset branch); no in-range nulls.
+        secret = "db-test-secret"
+        null_cursor = encode_cursor(
+            {"d": None, "id": str(seeds[2]["email_id"])},
+            secret,
+        )
+        r2 = db_client.post(
+            "/api/sources/list",
+            json={
+                "date_from": _LIST_FROM,
+                "date_to": _LIST_TO,
+                "cursor": null_cursor,
+                "limit": 50,
+            },
+        )
+        assert r2.status_code == 200
+        assert r2.json()["items"] == []
+        assert r2.json()["next_cursor"] is None
+    finally:
+        for s in seeds:
+            _cleanup(db_pool, s)
+
+
+def test_sources_list_scope_filter(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    seeds: list[dict[str, Any]] = []
+    try:
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="In-mailbox",
+                date="2014-05-01T00:00:00+00:00",
+                source_account="keep@example.com",
+                sender_address="alice@example.com",
+                body_html=None,
+            )
+        )
+        seeds.append(
+            _seed_message(
+                db_pool,
+                subject="Other-mailbox",
+                date="2014-05-02T00:00:00+00:00",
+                source_account="drop@example.com",
+                sender_address="bob@example.com",
+                body_html=None,
+            )
+        )
+        _login(db_client)
+        r = db_client.post(
+            "/api/sources/list",
+            json={
+                "date_from": _LIST_FROM,
+                "date_to": _LIST_TO,
+                "scope": {"mailboxes": ["keep@example.com"]},
+                "limit": 50,
+            },
+        )
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert len(items) == 1
+        assert items[0]["subject"] == "In-mailbox"
+        assert items[0]["mailbox"] == "keep@example.com"
+    finally:
+        for s in seeds:
+            _cleanup(db_pool, s)
+
+
+def test_sources_list_attachment_count(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    seed = _seed_message(
+        db_pool,
+        date="2014-04-01T00:00:00+00:00",
+        body_html=None,
+        with_attachment=True,
+        attachments_json='[{"filename": "a.pdf"}, {"filename": "b.txt"}]',
+    )
+    try:
+        _login(db_client)
+        r = db_client.post(
+            "/api/sources/list",
+            json={"date_from": _LIST_FROM, "date_to": _LIST_TO, "limit": 10},
+        )
+        assert r.status_code == 200
+        match = next(it for it in r.json()["items"] if it["id"] == seed["msg_sid"])
+        assert match["has_attachment"] is True
+        assert match["attachment_count"] == 2
+        assert match["thread_id"] == seed["thr_sid"]
+    finally:
+        _cleanup(db_pool, seed)

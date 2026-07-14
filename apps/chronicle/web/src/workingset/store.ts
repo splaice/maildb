@@ -5,13 +5,14 @@ import type { Viewport } from '../chronicle/timeScale'
 import {
   type Aggregation,
   DEFAULT_URL_STATE,
+  type Selection,
   type UrlWorkingState,
   type ViewMode,
 } from './urlState'
 
 /**
  * History intent set by actions so useUrlSync can apply the URL contract:
- * - transient → debounced replaceState (pan/zoom)
+ * - transient → debounced replaceState (pan/zoom, selection)
  * - analytical → immediate pushState (scope, brush-apply, view, …)
  * - silent → no URL write (hydrate, brush drag, result count)
  */
@@ -23,8 +24,17 @@ export interface WorkingSetState {
   aggregation: Aggregation
   view: ViewMode
   brush: Viewport | null
+  /** Timeline / inspector selection; URL param `sel`; transient intent. */
+  selection: Selection
+  /**
+   * Last bucket selection — used by MessageCard Close to restore bucket view.
+   * Not URL-serialised.
+   */
+  priorBucket: Extract<Selection, { kind: 'bucket' }> | null
   /** Live framing for the scope bar; not URL-serialised. */
   resultCount: number | null
+  /** Current timeline aggregation unit (for bucket date_to); not URL-serialised. */
+  timelineUnit: string | null
   historyIntent: HistoryIntent
 
   setViewport: (viewport: Viewport) => void
@@ -38,7 +48,10 @@ export interface WorkingSetState {
   clearScope: () => void
   setView: (view: ViewMode) => void
   setAggregation: (aggregation: Aggregation) => void
+  setSelection: (selection: Selection) => void
+  clearMessageToBucket: () => void
   setResultCount: (count: number | null) => void
+  setTimelineUnit: (unit: string | null) => void
   hydrate: (decoded: UrlWorkingState) => void
 }
 
@@ -50,7 +63,10 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   aggregation: DEFAULT_URL_STATE.aggregation,
   view: DEFAULT_URL_STATE.view,
   brush: null,
+  selection: DEFAULT_URL_STATE.selection,
+  priorBucket: null,
   resultCount: null,
+  timelineUnit: null,
   historyIntent: 'silent',
 
   setViewport: (viewport) =>
@@ -129,7 +145,30 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   setAggregation: (aggregation) =>
     set({ aggregation, historyIntent: 'analytical' }),
 
+  setSelection: (selection) => {
+    const prev = get().selection
+    let priorBucket = get().priorBucket
+    if (selection?.kind === 'bucket') {
+      priorBucket = selection
+    } else if (selection?.kind === 'message' && prev?.kind === 'bucket') {
+      priorBucket = prev
+    } else if (selection == null) {
+      priorBucket = null
+    }
+    set({ selection, priorBucket, historyIntent: 'transient' })
+  },
+
+  clearMessageToBucket: () => {
+    const prior = get().priorBucket
+    set({
+      selection: prior,
+      historyIntent: 'transient',
+    })
+  },
+
   setResultCount: (count) => set({ resultCount: count, historyIntent: 'silent' }),
+
+  setTimelineUnit: (unit) => set({ timelineUnit: unit, historyIntent: 'silent' }),
 
   hydrate: (decoded) =>
     set({
@@ -137,6 +176,9 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
       viewport: decoded.viewport,
       aggregation: decoded.aggregation,
       view: decoded.view,
+      selection: decoded.selection ?? null,
+      priorBucket:
+        decoded.selection?.kind === 'bucket' ? decoded.selection : get().priorBucket,
       brush: null,
       historyIntent: 'silent',
     }),
@@ -150,7 +192,10 @@ export function resetWorkingSetStore(): void {
     aggregation: 'auto',
     view: 'canvas',
     brush: null,
+    selection: null,
+    priorBucket: null,
     resultCount: null,
+    timelineUnit: null,
     historyIntent: 'silent',
   })
 }

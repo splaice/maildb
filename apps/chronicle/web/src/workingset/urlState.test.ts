@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import type { Unit } from '../chronicle/timeScale'
 import {
+  decodeSelection,
   decodeState,
   DEFAULT_URL_STATE,
+  encodeSelection,
   encodeState,
   isScopePristine,
   toIsoSeconds,
@@ -29,6 +31,11 @@ describe('encodeState / decodeState', () => {
       },
       aggregation: 'month',
       view: 'table',
+      selection: {
+        kind: 'bucket',
+        lane: 'messages',
+        bucketIso: '2014-06-01T00:00:00.000Z',
+      },
     }
 
     const encoded = encodeState(state)
@@ -41,6 +48,7 @@ describe('encodeState / decodeState', () => {
     expect(decoded.viewport?.toMs).toBe(state.viewport!.toMs)
     expect(decoded.aggregation).toBe('month')
     expect(decoded.view).toBe('table')
+    expect(decoded.selection).toEqual(state.selection)
 
     // Second roundtrip is stable
     expect(decodeState(encodeState(decoded))).toEqual(decoded)
@@ -125,5 +133,38 @@ describe('isScopePristine', () => {
     expect(isScopePristine({ date: { from: '2014-01-01' } })).toBe(false)
     expect(isScopePristine({ mailboxes: ['a@b.com'] })).toBe(false)
     expect(isScopePristine({ senders: ['x@y.com'] })).toBe(false)
+  })
+})
+
+describe('selection codec (sel)', () => {
+  it('roundtrips bucket and message selections', () => {
+    const bucket = {
+      kind: 'bucket' as const,
+      lane: 'messages',
+      bucketIso: '2014-01-01T00:00:00.000Z',
+    }
+    const msg = { kind: 'message' as const, sid: 'msg_12345' }
+    expect(decodeSelection(encodeSelection(bucket))).toEqual(bucket)
+    expect(decodeSelection(encodeSelection(msg))).toEqual(msg)
+    expect(encodeSelection(null)).toBeNull()
+    expect(decodeSelection(null)).toBeNull()
+  })
+
+  it('falls back to null on malformed values', () => {
+    expect(decodeSelection('')).toBeNull()
+    expect(decodeSelection('x:foo')).toBeNull()
+    expect(decodeSelection('b:')).toBeNull()
+    expect(decodeSelection('b:messages')).toBeNull()
+    expect(decodeSelection('b:messages:not-a-date')).toBeNull()
+    expect(decodeSelection('m:')).toBeNull()
+    expect(decodeSelection('m:bad')).toBeNull()
+  })
+
+  it('encodes into URL params via encodeState', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      selection: { kind: 'message', sid: 'msg_99' },
+    })
+    expect(params.get('sel')).toBe('m:msg_99')
   })
 })

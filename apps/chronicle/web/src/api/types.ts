@@ -158,3 +158,118 @@ export interface ChronicleBuckets {
   extent: ChronicleExtent
   generated_at: string
 }
+
+/** POST /api/sources/list */
+
+export interface SourceListRequest {
+  scope?: QueryScope
+  date_from: string
+  date_to: string
+  cursor?: string | null
+  limit?: number
+}
+
+export interface SourceListItem {
+  id: string
+  subject: string | null
+  sender_name: string | null
+  sender_address: string | null
+  date: string | null
+  mailbox: string | null
+  has_attachment: boolean
+  attachment_count: number
+  thread_id: string | null
+}
+
+export interface SourceListResponse {
+  items: SourceListItem[]
+  next_cursor: string | null
+  scope_fingerprint: string
+}
+
+/** GET /api/sources/:sid (message) */
+
+export interface AttachmentMeta {
+  id: string
+  filename: string
+  content_type: string | null
+  size: number | null
+}
+
+export interface MessageEnvelope {
+  id: string
+  thread_id: string | null
+  subject: string | null
+  sender_name: string | null
+  sender_address: string | null
+  recipients: unknown
+  date: string | null
+  mailbox: string | null
+  labels: string[]
+  has_attachment: boolean
+  attachments: AttachmentMeta[]
+}
+
+export interface BodyDescriptor {
+  text: string | null
+  html: string | null
+  remote_resources_blocked: number
+  had_active_content: boolean
+}
+
+export interface MessageSource {
+  kind: 'msg'
+  envelope: MessageEnvelope
+  body: BodyDescriptor
+}
+
+export interface AttachmentSource {
+  kind: 'att'
+  id: string
+  filename: string
+  content_type: string | null
+  size: number | null
+  source_message_id: string | null
+  source_envelope: MessageEnvelope | null
+  extraction_status: string | null
+  extraction_reason: string | null
+  markdown: string | null
+  truncated: boolean
+  text_offset: number
+}
+
+export type SourceResponse = MessageSource | AttachmentSource
+
+/** GET /api/threads/:thr */
+
+export interface ThreadParticipant {
+  name: string | null
+  address: string | null
+}
+
+export interface ThreadDateRange {
+  from: string | null
+  to: string | null
+}
+
+export interface ThreadMessage {
+  id: string
+  subject: string | null
+  sender_name: string | null
+  sender_address: string | null
+  recipients: unknown
+  date: string | null
+  mailbox: string | null
+  labels: string[]
+  has_attachment: boolean
+}
+
+export interface ThreadResponse {
+  thread_id: string
+  subject: string | null
+  date_range: ThreadDateRange
+  participants: ThreadParticipant[]
+  message_count: number
+  messages: ThreadMessage[]
+  truncated: boolean
+}

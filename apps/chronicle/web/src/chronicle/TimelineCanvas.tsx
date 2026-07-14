@@ -15,6 +15,7 @@ import {
   parseUnit,
   timeForX,
   ticksFor,
+  UNIT_MS,
   type Unit,
   type Viewport,
   wheelZoomFactor,
@@ -45,9 +46,71 @@ export interface TimelineCanvasProps {
   attachments: BucketPoint[]
   isFetching: boolean
   brush: Viewport | null
+  /** Currently selected bucket (for highlight outline). */
+  selectedBucket?: { bucketIso: string; lane: string } | null
   onViewportChange: (vp: Viewport) => void
   onBrushChange: (brush: Viewport | null) => void
   onWidthChange: (width: number) => void
+  /** Fired when a bar is clicked (lane + bucket ISO). */
+  onSelectBucket?: (bucketIso: string, laneName: string) => void
+}
+
+/**
+ * Pure hit-test: which bucket bar contains plot-local x?
+ * Bars are positioned at xForTime(bucketStart) with width bucketWidthPx−1.
+ * Exported for unit tests.
+ */
+export function bucketAtX(
+  plotX: number,
+  viewport: Viewport,
+  plotW: number,
+  unit: Unit,
+  points: BucketPoint[],
+): string | null {
+  if (plotW <= 0 || points.length === 0) return null
+  const bw = Math.max(1, bucketWidthPx(unit, viewport, plotW) - 1)
+  // Prefer the bucket whose start is nearest and whose bar covers plotX.
+  let hit: string | null = null
+  let bestDist = Infinity
+  for (const pt of points) {
+    const t = Date.parse(pt.bucket)
+    if (!Number.isFinite(t)) continue
+    const x = xForTime(t, viewport, plotW)
+    if (plotX >= x && plotX < x + bw) {
+      const mid = x + bw / 2
+      const dist = Math.abs(plotX - mid)
+      if (dist < bestDist) {
+        bestDist = dist
+        hit = pt.bucket
+      }
+    }
+  }
+  // Fallback: snap to nearest bucket start by time if inside its span (unit width).
+  if (!hit) {
+    const t = timeForX(plotX, viewport, plotW)
+    const unitMs = UNIT_MS[unit]
+    for (const pt of points) {
+      const start = Date.parse(pt.bucket)
+      if (!Number.isFinite(start)) continue
+      if (t >= start && t < start + unitMs) {
+        hit = pt.bucket
+        break
+      }
+    }
+  }
+  return hit
+}
+
+/** Which lane (0 = messages, 1 = attachments) contains localY, or null. */
+export function laneAtY(localY: number): 'messages' | 'attachments' | null {
+  if (localY <= AXIS_H) return null
+  const messagesTop = AXIS_H + LANE_GAP
+  const attachmentsTop = messagesTop + LANE_H + LANE_GAP
+  if (localY >= messagesTop && localY < messagesTop + LANE_H) return 'messages'
+  if (localY >= attachmentsTop && localY < attachmentsTop + LANE_H) {
+    return 'attachments'
+  }
+  return null
 }
 
 function sumCounts(points: BucketPoint[]): number {
@@ -83,9 +146,11 @@ export function TimelineCanvas({
   attachments,
   isFetching,
   brush,
+  selectedBucket = null,
   onViewportChange,
   onBrushChange,
   onWidthChange,
+  onSelectBucket,
 }: TimelineCanvasProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const wheelHandlerRef = useRef<(e: globalThis.WheelEvent) => void>(() => {})
@@ -193,10 +258,21 @@ export function TimelineCanvas({
         if (!Number.isFinite(t)) continue
         const x = LANE_LABEL_W + xForTime(t, viewport, plotW)
         const barH = (pt.count / max) * barMaxH
+        const barY = top + LANE_H - 4 - barH
         ctx.fillStyle = lane.color
         ctx.globalAlpha = 0.85
-        ctx.fillRect(x, top + LANE_H - 4 - barH, bw, barH)
+        ctx.fillRect(x, barY, bw, barH)
         ctx.globalAlpha = 1
+        // Selected bucket: 1px action-blue outline
+        if (
+          selectedBucket &&
+          selectedBucket.lane === lane.name &&
+          selectedBucket.bucketIso === pt.bucket
+        ) {
+          ctx.strokeStyle = COLORS.action
+          ctx.lineWidth = 1
+          ctx.strokeRect(x + 0.5, barY + 0.5, Math.max(0, bw - 1), Math.max(0, barH - 1))
+        }
       }
     })
 
@@ -280,6 +356,7 @@ export function TimelineCanvas({
     extent,
     isFetching,
     messages,
+    selectedBucket,
     unit,
     viewport,
   ])
@@ -330,6 +407,8 @@ export function TimelineCanvas({
 
   wheelHandlerRef.current = onWheel
 
+  const clickRef = useRef<{ x: number; y: number; t: number } | null>(null)
+
   const onPointerDown = (e: PointerEvent) => {
     const rect = wrapRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -339,7 +418,11 @@ export function TimelineCanvas({
     if (localY <= AXIS_H) {
       ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
       brushDrag.current = { startX: localX, curX: localX }
+      clickRef.current = null
+      return
     }
+    // Record potential bar click (lane region)
+    clickRef.current = { x: localX, y: localY, t: performance.now() }
   }
 
   const onPointerMove = (e: PointerEvent) => {
@@ -356,26 +439,48 @@ export function TimelineCanvas({
   }
 
   const onPointerUp = (e: PointerEvent) => {
-    if (!brushDrag.current) return
-    const rect = wrapRef.current?.getBoundingClientRect()
-    if (!rect) {
+    if (brushDrag.current) {
+      const rect = wrapRef.current?.getBoundingClientRect()
+      if (!rect) {
+        brushDrag.current = null
+        return
+      }
+      const { startX, curX } = brushDrag.current
       brushDrag.current = null
+      const pw = plotWidth()
+      const x0 = Math.min(startX, curX) - LANE_LABEL_W
+      const x1 = Math.max(startX, curX) - LANE_LABEL_W
+      if (Math.abs(x1 - x0) < 4) {
+        onBrushChange(null)
+        return
+      }
+      onBrushChange({
+        fromMs: timeForX(Math.max(0, x0), viewport, pw),
+        toMs: timeForX(Math.min(pw, x1), viewport, pw),
+      })
+      void e
       return
     }
-    const { startX, curX } = brushDrag.current
-    brushDrag.current = null
+
+    // Bar click hit-test
+    const pending = clickRef.current
+    clickRef.current = null
+    if (!pending || !onSelectBucket) return
+    const rect = wrapRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const localX = e.clientX - rect.left
+    const localY = e.clientY - rect.top
+    // Ignore if pointer moved more than a few px (drag-like)
+    if (Math.hypot(localX - pending.x, localY - pending.y) > 6) return
+    const lane = laneAtY(localY)
+    if (!lane) return
     const pw = plotWidth()
-    const x0 = Math.min(startX, curX) - LANE_LABEL_W
-    const x1 = Math.max(startX, curX) - LANE_LABEL_W
-    if (Math.abs(x1 - x0) < 4) {
-      onBrushChange(null)
-      return
-    }
-    onBrushChange({
-      fromMs: timeForX(Math.max(0, x0), viewport, pw),
-      toMs: timeForX(Math.min(pw, x1), viewport, pw),
-    })
-    void e
+    const plotX = localX - LANE_LABEL_W
+    if (plotX < 0) return
+    const unitTyped = parseUnit(unit)
+    const points = lane === 'messages' ? messages : attachments
+    const bucketIso = bucketAtX(plotX, viewport, pw, unitTyped, points)
+    if (bucketIso) onSelectBucket(bucketIso, lane)
   }
 
   const onDoubleClick = (e: MouseEvent) => {

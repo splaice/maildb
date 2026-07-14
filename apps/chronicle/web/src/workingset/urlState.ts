@@ -16,12 +16,19 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 export type Aggregation = 'auto' | Unit
 export type ViewMode = 'canvas' | 'table'
 
+/** Inspector / timeline selection (URL param `sel`). */
+export type Selection =
+  | { kind: 'bucket'; bucketIso: string; lane: string }
+  | { kind: 'message'; sid: string }
+  | null
+
 /** Serializable working-set slice for the URL codec. */
 export interface UrlWorkingState {
   scope: QueryScope
   viewport: Viewport | null
   aggregation: Aggregation
   view: ViewMode
+  selection: Selection
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -29,6 +36,50 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   viewport: null,
   aggregation: 'auto',
   view: 'canvas',
+  selection: null,
+}
+
+/**
+ * Encode selection for the `sel` URL param.
+ * - bucket: `b:<lane>:<bucketIso>`
+ * - message: `m:<sid>`
+ */
+export function encodeSelection(selection: Selection): string | null {
+  if (!selection) return null
+  if (selection.kind === 'bucket') {
+    if (!selection.lane || !selection.bucketIso) return null
+    return `b:${selection.lane}:${selection.bucketIso}`
+  }
+  if (selection.kind === 'message') {
+    if (!selection.sid) return null
+    return `m:${selection.sid}`
+  }
+  return null
+}
+
+/**
+ * Decode `sel` param. Total: bad values → null, never throws.
+ */
+export function decodeSelection(raw: string | null): Selection {
+  if (!raw) return null
+  if (raw.startsWith('b:')) {
+    // b:<lane>:<bucketIso> — lane has no colons; bucketIso may contain colons (ISO).
+    const rest = raw.slice(2)
+    const colon = rest.indexOf(':')
+    if (colon <= 0) return null
+    const lane = rest.slice(0, colon)
+    const bucketIso = rest.slice(colon + 1)
+    if (!lane || !bucketIso) return null
+    const ms = Date.parse(bucketIso)
+    if (!Number.isFinite(ms)) return null
+    return { kind: 'bucket', lane, bucketIso }
+  }
+  if (raw.startsWith('m:')) {
+    const sid = raw.slice(2)
+    if (!sid || !/^(msg|att)_[A-Za-z0-9_-]+$/.test(sid)) return null
+    return { kind: 'message', sid }
+  }
+  return null
 }
 
 /** Format epoch ms as UTC ISO datetime with second precision (`…Z`, no ms). */
@@ -76,7 +127,7 @@ function parseView(value: string | null): ViewMode {
  */
 export function encodeState(state: UrlWorkingState): URLSearchParams {
   const params = new URLSearchParams()
-  const { scope, viewport, aggregation, view } = state
+  const { scope, viewport, aggregation, view, selection } = state
 
   const dateFrom = scope.date?.from ?? null
   const dateTo = scope.date?.to ?? null
@@ -96,6 +147,9 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
 
   if (aggregation !== 'auto') params.set('agg', aggregation)
   if (view !== 'canvas') params.set('view', view)
+
+  const sel = encodeSelection(selection ?? null)
+  if (sel) params.set('sel', sel)
 
   return params
 }
@@ -132,6 +186,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     viewport,
     aggregation: parseAggregation(params.get('agg')),
     view: parseView(params.get('view')),
+    selection: decodeSelection(params.get('sel')),
   }
 }
 

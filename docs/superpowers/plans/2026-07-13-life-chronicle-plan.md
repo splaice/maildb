@@ -86,7 +86,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 1, Task 1.4 (evidence inspector + reader). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 1, Task 1.5 (people lane + lane configuration). Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -99,3 +99,4 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 1.1 buckets endpoint: QueryScope v1, auto-aggregation, lanes, density, fingerprint | chronicle-phase-1 | Approved; 93 server tests |
 | 2026-07-13 | 1.2 timeline canvas: timeScale core, pan/zoom/brush, navigator, table alt | chronicle-phase-1 | Approved after reviewer fix (passive React onWheel → native non-passive listener); 32 web tests |
 | 2026-07-13 | 1.3 working set: zustand store w/ historyIntent, URL codec, scope chips | chronicle-phase-1 | Approved; 62 web tests |
+| 2026-07-13 | 1.4 inspector + source list + reader: keyset /api/sources/list, selection URL param, return contract | chronicle-phase-1 | Approved; 98 server / 79 web tests |

@@ -36,6 +36,7 @@ describe('useUrlSync', () => {
       },
       aggregation: 'auto',
       view: 'table',
+      selection: null,
     })
     window.history.replaceState(null, '', `/?${params.toString()}`)
 
@@ -59,6 +60,7 @@ describe('useUrlSync', () => {
       viewport: null,
       aggregation: 'auto',
       view: 'table',
+      selection: null,
     })
     window.history.replaceState(null, '', `/?${params.toString()}`)
     resetWorkingSetStore()

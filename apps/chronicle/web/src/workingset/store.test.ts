@@ -78,13 +78,29 @@ describe('working set store', () => {
       viewport: { fromMs: 10, toMs: 20 },
       aggregation: 'year',
       view: 'table',
+      selection: { kind: 'message', sid: 'msg_1' },
     })
     const s = useWorkingSetStore.getState()
     expect(s.scope).toEqual({ mailboxes: ['m@x.com'] })
     expect(s.viewport).toEqual({ fromMs: 10, toMs: 20 })
     expect(s.aggregation).toBe('year')
     expect(s.view).toBe('table')
+    expect(s.selection).toEqual({ kind: 'message', sid: 'msg_1' })
     expect(s.brush).toBeNull()
     expect(s.historyIntent).toBe('silent')
+  })
+
+  it('setSelection is transient', () => {
+    useWorkingSetStore.getState().setSelection({
+      kind: 'bucket',
+      lane: 'messages',
+      bucketIso: '2014-01-01T00:00:00.000Z',
+    })
+    const s = useWorkingSetStore.getState()
+    expect(s.selection?.kind).toBe('bucket')
+    expect(s.historyIntent).toBe('transient')
+
+    useWorkingSetStore.getState().setSelection(null)
+    expect(useWorkingSetStore.getState().selection).toBeNull()
   })
 })

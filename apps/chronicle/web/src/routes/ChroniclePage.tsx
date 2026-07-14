@@ -136,6 +136,9 @@ export function ChroniclePage() {
   const applyBrushAsViewport = useWorkingSetStore((s) => s.applyBrushAsViewport)
   const setView = useWorkingSetStore((s) => s.setView)
   const setResultCount = useWorkingSetStore((s) => s.setResultCount)
+  const setTimelineUnit = useWorkingSetStore((s) => s.setTimelineUnit)
+  const selection = useWorkingSetStore((s) => s.selection)
+  const setSelection = useWorkingSetStore((s) => s.setSelection)
 
   const [pixelWidth, setPixelWidth] = useState(920)
   // False until URL hydrate or extent bootstrap resolves (layout hydrate may set
@@ -176,11 +179,12 @@ export function ChroniclePage() {
     setBootstrapped(true)
   }, [bootstrapped, buckets.data?.extent, setViewport, viewport])
 
-  // Live result framing for the scope bar.
+  // Live result framing for the scope bar + unit for inspector bucket ranges.
   useEffect(() => {
     if (!buckets.data) return
     setResultCount(sumLaneCounts(buckets.data.lanes.messages))
-  }, [buckets.data, setResultCount])
+    setTimelineUnit(buckets.data.unit ?? buckets.data.aggregation ?? null)
+  }, [buckets.data, setResultCount, setTimelineUnit])
 
   const applyViewport = useCallback(
     (next: Viewport) => {
@@ -305,9 +309,17 @@ export function ChroniclePage() {
               attachments={attachments}
               isFetching={buckets.isFetching}
               brush={brush}
+              selectedBucket={
+                selection?.kind === 'bucket'
+                  ? { bucketIso: selection.bucketIso, lane: selection.lane }
+                  : null
+              }
               onViewportChange={applyViewport}
               onBrushChange={setBrush}
               onWidthChange={onWidthChange}
+              onSelectBucket={(bucketIso, laneName) =>
+                setSelection({ kind: 'bucket', bucketIso, lane: laneName })
+              }
             />
           )
         ) : null}

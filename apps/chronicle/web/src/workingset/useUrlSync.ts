@@ -50,6 +50,7 @@ function onStoreChange(): void {
     viewport: state.viewport,
     aggregation: state.aggregation,
     view: state.view,
+    selection: state.selection,
   })
   const url = buildSearchUrl(params)
 
@@ -141,6 +142,7 @@ export function writeStoreToUrlNow(): void {
     viewport: s.viewport,
     aggregation: s.aggregation,
     view: s.view,
+    selection: s.selection,
   }
   const url = buildSearchUrl(encodeState(slice))
   window.history.replaceState(window.history.state, '', url)
