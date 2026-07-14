@@ -185,4 +185,46 @@ describe('working set store', () => {
     expect(useWorkingSetStore.getState().focus).toEqual({ fromMs: 10, toMs: 20 })
     expect(useWorkingSetStore.getState().historyIntent).toBe('silent')
   })
+
+  it('setQuery / setMode / setGrouping are analytical', () => {
+    useWorkingSetStore.getState().setQuery('roof material')
+    expect(useWorkingSetStore.getState().query).toBe('roof material')
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+
+    useWorkingSetStore.getState().setMode('semantic')
+    expect(useWorkingSetStore.getState().mode).toBe('semantic')
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+
+    useWorkingSetStore.getState().setGrouping('year')
+    expect(useWorkingSetStore.getState().grouping).toBe('year')
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+  })
+
+  it('hydrate restores research fields', () => {
+    useWorkingSetStore.getState().hydrate({
+      scope: {},
+      viewport: null,
+      aggregation: 'auto',
+      view: 'canvas',
+      selection: null,
+      lanes: null,
+      query: 'hello',
+      mode: 'exact',
+      grouping: 'mailbox',
+    })
+    const s = useWorkingSetStore.getState()
+    expect(s.query).toBe('hello')
+    expect(s.mode).toBe('exact')
+    expect(s.grouping).toBe('mailbox')
+  })
+
+  it('setHasAttachment and setSelection attachment kind', () => {
+    useWorkingSetStore.getState().setHasAttachment(true)
+    expect(useWorkingSetStore.getState().scope.has_attachment).toBe(true)
+    useWorkingSetStore.getState().setSelection({ kind: 'attachment', sid: 'att_1' })
+    expect(useWorkingSetStore.getState().selection).toEqual({
+      kind: 'attachment',
+      sid: 'att_1',
+    })
+  })
 })

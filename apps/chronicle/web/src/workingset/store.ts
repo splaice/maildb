@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 
-import type { QueryScope, QueryScopeDate } from '../api/types'
+import type { QueryScope, QueryScopeDate, SearchMode } from '../api/types'
 import type { Viewport } from '../chronicle/timeScale'
 import {
   type Aggregation,
   DEFAULT_LANES,
   DEFAULT_URL_STATE,
+  type ResearchGrouping,
   resolveLanes,
   type Selection,
   type UrlWorkingState,
@@ -46,6 +47,12 @@ export interface WorkingSetState {
   timelineUnit: string | null
   /** Ordered visible lane keys; URL param `ln`; analytical intent. */
   lanes: string[]
+  /** Research Desk free-text query (URL param `q`); analytical when committed. */
+  query: string
+  /** Research retrieval mode (URL param `mode`); analytical. */
+  mode: SearchMode
+  /** Research result grouping (URL param `grp`); analytical. */
+  grouping: ResearchGrouping
   historyIntent: HistoryIntent
 
   setViewport: (viewport: Viewport) => void
@@ -65,6 +72,11 @@ export interface WorkingSetState {
   removeMailbox: (mailbox: string) => void
   addSender: (sender: string) => void
   removeSender: (sender: string) => void
+  setHasAttachment: (value: boolean | null) => void
+  /** Replace scope analytically (research chip edits merge into store). */
+  setScope: (scope: QueryScope) => void
+  /** Merge a partial scope patch analytically. */
+  patchScope: (patch: Partial<QueryScope>) => void
   clearScope: () => void
   setView: (view: ViewMode) => void
   setAggregation: (aggregation: Aggregation) => void
@@ -74,6 +86,9 @@ export interface WorkingSetState {
   setTimelineUnit: (unit: string | null) => void
   toggleLane: (key: string) => void
   moveLane: (key: string, dir: MoveLaneDir) => void
+  setQuery: (query: string) => void
+  setMode: (mode: SearchMode) => void
+  setGrouping: (grouping: ResearchGrouping) => void
   hydrate: (decoded: UrlWorkingState) => void
 }
 
@@ -96,6 +111,9 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   resultCount: null,
   timelineUnit: null,
   lanes: [...DEFAULT_LANES],
+  query: DEFAULT_URL_STATE.query ?? '',
+  mode: DEFAULT_URL_STATE.mode ?? 'hybrid',
+  grouping: DEFAULT_URL_STATE.grouping ?? 'none',
   historyIntent: 'silent',
 
   setViewport: (viewport) =>
@@ -197,6 +215,39 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
     set({ scope, historyIntent: 'analytical' })
   },
 
+  setHasAttachment: (value) => {
+    const scope = { ...get().scope }
+    if (value == null) delete scope.has_attachment
+    else scope.has_attachment = value
+    set({ scope, historyIntent: 'analytical' })
+  },
+
+  setScope: (scope) => set({ scope: { ...scope }, historyIntent: 'analytical' }),
+
+  patchScope: (patch) => {
+    const next: QueryScope = { ...get().scope, ...patch }
+    // Drop nullish / empty arrays so pristine checks stay honest.
+    if (patch.date === null) delete next.date
+    if (patch.has_attachment === null) delete next.has_attachment
+    if (patch.subject_contains === null || patch.subject_contains === '') {
+      delete next.subject_contains
+    }
+    if (patch.free_text === null || patch.free_text === '') delete next.free_text
+    for (const key of [
+      'mailboxes',
+      'senders',
+      'recipients',
+      'participants',
+      'file_types',
+      'filenames',
+      'source_types',
+    ] as const) {
+      const v = next[key]
+      if (Array.isArray(v) && v.length === 0) delete next[key]
+    }
+    set({ scope: next, historyIntent: 'analytical' })
+  },
+
   clearScope: () =>
     set({ scope: emptyScope(), historyIntent: 'analytical' }),
 
@@ -255,6 +306,12 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
     set({ lanes: next, historyIntent: 'analytical' })
   },
 
+  setQuery: (query) => set({ query, historyIntent: 'analytical' }),
+
+  setMode: (mode) => set({ mode, historyIntent: 'analytical' }),
+
+  setGrouping: (grouping) => set({ grouping, historyIntent: 'analytical' }),
+
   hydrate: (decoded) =>
     set({
       scope: decoded.scope ?? emptyScope(),
@@ -266,6 +323,9 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
         decoded.selection?.kind === 'bucket' ? decoded.selection : get().priorBucket,
       lanes: resolveLanes(decoded.lanes),
       focus: decoded.focus ?? null,
+      query: decoded.query ?? '',
+      mode: decoded.mode ?? 'hybrid',
+      grouping: decoded.grouping ?? 'none',
       brush: null,
       historyIntent: 'silent',
     }),
@@ -285,6 +345,9 @@ export function resetWorkingSetStore(): void {
     resultCount: null,
     timelineUnit: null,
     lanes: [...DEFAULT_LANES],
+    query: '',
+    mode: 'hybrid',
+    grouping: 'none',
     historyIntent: 'silent',
   })
 }

@@ -116,6 +116,15 @@ export interface QueryScope {
   date?: QueryScopeDate | null
   mailboxes?: string[]
   senders?: string[]
+  /** v2 additive fields (search / query-syntax) */
+  recipients?: string[]
+  participants?: string[]
+  subject_contains?: string | null
+  has_attachment?: boolean | null
+  file_types?: string[]
+  filenames?: string[]
+  source_types?: string[]
+  free_text?: string | null
 }
 
 export interface ChronicleTimeRange {
@@ -300,4 +309,93 @@ export interface ThreadResponse {
   message_count: number
   messages: ThreadMessage[]
   truncated: boolean
+}
+
+/** POST /api/search */
+
+export type SearchMode = 'hybrid' | 'exact' | 'semantic'
+
+export interface SearchRequest {
+  query?: string
+  mode?: SearchMode
+  scope?: QueryScope
+  limit?: number
+  cursor?: string | null
+  include_facets?: boolean
+}
+
+export interface ExactMatchInfo {
+  kind: 'exact'
+  field?: string
+}
+
+export interface SemanticMatchInfo {
+  kind: 'semantic'
+  similarity?: number | null
+}
+
+export interface HybridMatchInfo {
+  kind: 'hybrid'
+  exact_rank?: number | null
+  semantic_rank?: number | null
+  similarity?: number | null
+}
+
+export type MatchInfo = ExactMatchInfo | SemanticMatchInfo | HybridMatchInfo
+
+export interface MessageSearchResult {
+  result_type: 'message'
+  id: string
+  subject: string | null
+  sender: string | null
+  sender_name?: string | null
+  date: string | null
+  mailbox: string | null
+  thread_id: string | null
+  snippet: string
+  has_attachment: boolean
+  /** Optional; badge when present and > 1 */
+  thread_size?: number
+  match: MatchInfo
+}
+
+export interface AttachmentSearchResult {
+  result_type: 'attachment'
+  id: string
+  filename: string
+  content_type: string | null
+  source_message_id: string | null
+  sender: string | null
+  date: string | null
+  snippet: string
+  extraction_status: string | null
+  match: MatchInfo
+}
+
+export type SearchResult = MessageSearchResult | AttachmentSearchResult
+
+export interface FacetBucket {
+  value: string | number | boolean
+  count: number
+}
+
+export interface SearchFacets {
+  mailbox?: FacetBucket[]
+  year?: FacetBucket[]
+  has_attachment?: FacetBucket[]
+  [key: string]: FacetBucket[] | undefined
+}
+
+export interface SearchResponse {
+  results: SearchResult[]
+  next_cursor: string | null
+  scope: QueryScope
+  unsupported: string[]
+  scope_fingerprint: string
+  mode: SearchMode
+  took_ms: number
+  duplicates_suppressed: number
+  facets: SearchFacets | null
+  facet_basis: string | null
+  degraded: Record<string, string> | null
 }

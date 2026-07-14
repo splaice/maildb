@@ -1,4 +1,4 @@
-import type { QueryScope } from '../api/types'
+import type { QueryScope, SearchMode } from '../api/types'
 import type { Unit, Viewport } from '../chronicle/timeScale'
 
 /** Aggregation values accepted in the URL `agg` param (omit = auto). */
@@ -34,10 +34,23 @@ const LANE_KEY_SET: ReadonlySet<string> = new Set(ALL_LANE_KEYS)
 export type Aggregation = 'auto' | Unit
 export type ViewMode = 'canvas' | 'table'
 
-/** Inspector / timeline selection (URL param `sel`). */
+/** Research Desk grouping (URL param `grp`). */
+export type ResearchGrouping = 'none' | 'thread' | 'year' | 'mailbox'
+
+const RESEARCH_GROUPINGS: ReadonlySet<string> = new Set([
+  'none',
+  'thread',
+  'year',
+  'mailbox',
+])
+
+const SEARCH_MODES: ReadonlySet<string> = new Set(['hybrid', 'exact', 'semantic'])
+
+/** Inspector / timeline / research selection (URL param `sel`). */
 export type Selection =
   | { kind: 'bucket'; bucketIso: string; lane: string }
   | { kind: 'message'; sid: string }
+  | { kind: 'attachment'; sid: string }
   | null
 
 /** Serializable working-set slice for the URL codec. */
@@ -54,6 +67,12 @@ export interface UrlWorkingState {
    * older call sites remain valid; decode always returns Viewport | null.
    */
   focus?: Viewport | null
+  /** Research query text (URL param `q`). */
+  query?: string
+  /** Research retrieval mode (URL param `mode`); default hybrid. */
+  mode?: SearchMode
+  /** Research result grouping (URL param `grp`); default none. */
+  grouping?: ResearchGrouping
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -64,12 +83,16 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   selection: null,
   lanes: null,
   focus: null,
+  query: '',
+  mode: 'hybrid',
+  grouping: 'none',
 }
 
 /**
  * Encode selection for the `sel` URL param.
  * - bucket: `b:<lane>:<bucketIso>`
  * - message: `m:<sid>`
+ * - attachment: `a:<sid>`
  */
 export function encodeSelection(selection: Selection): string | null {
   if (!selection) return null
@@ -80,6 +103,10 @@ export function encodeSelection(selection: Selection): string | null {
   if (selection.kind === 'message') {
     if (!selection.sid) return null
     return `m:${selection.sid}`
+  }
+  if (selection.kind === 'attachment') {
+    if (!selection.sid) return null
+    return `a:${selection.sid}`
   }
   return null
 }
@@ -103,8 +130,13 @@ export function decodeSelection(raw: string | null): Selection {
   }
   if (raw.startsWith('m:')) {
     const sid = raw.slice(2)
-    if (!sid || !/^(msg|att)_[A-Za-z0-9_-]+$/.test(sid)) return null
+    if (!sid || !/^msg_[A-Za-z0-9_-]+$/.test(sid)) return null
     return { kind: 'message', sid }
+  }
+  if (raw.startsWith('a:')) {
+    const sid = raw.slice(2)
+    if (!sid || !/^att_[A-Za-z0-9_-]+$/.test(sid)) return null
+    return { kind: 'attachment', sid }
   }
   return null
 }
@@ -208,7 +240,18 @@ function lanesEqual(a: string[], b: string[]): boolean {
  */
 export function encodeState(state: UrlWorkingState): URLSearchParams {
   const params = new URLSearchParams()
-  const { scope, viewport, aggregation, view, selection, lanes, focus } = state
+  const {
+    scope,
+    viewport,
+    aggregation,
+    view,
+    selection,
+    lanes,
+    focus,
+    query,
+    mode,
+    grouping,
+  } = state
 
   const dateFrom = scope.date?.from ?? null
   const dateTo = scope.date?.to ?? null
@@ -242,6 +285,12 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
     params.set('ff', toIsoSeconds(focus.fromMs))
     params.set('ft', toIsoSeconds(focus.toMs))
   }
+
+  // Research Desk: q / mode / grp (omit defaults)
+  const q = (query ?? '').trim()
+  if (q) params.set('q', q)
+  if (mode && mode !== 'hybrid') params.set('mode', mode)
+  if (grouping && grouping !== 'none') params.set('grp', grouping)
 
   return params
 }
@@ -281,6 +330,16 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     focus = { fromMs: ff, toMs: ft }
   }
 
+  const rawMode = params.get('mode')
+  const mode: SearchMode =
+    rawMode && SEARCH_MODES.has(rawMode) ? (rawMode as SearchMode) : 'hybrid'
+
+  const rawGrp = params.get('grp')
+  const grouping: ResearchGrouping =
+    rawGrp && RESEARCH_GROUPINGS.has(rawGrp)
+      ? (rawGrp as ResearchGrouping)
+      : 'none'
+
   return {
     scope,
     viewport,
@@ -289,6 +348,9 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     selection: decodeSelection(params.get('sel')),
     lanes: parseLanesParam(params.get('ln')),
     focus,
+    query: params.get('q') ?? '',
+    mode,
+    grouping,
   }
 }
 
@@ -297,5 +359,23 @@ export function isScopePristine(scope: QueryScope): boolean {
   const hasDate = !!(scope.date?.from || scope.date?.to)
   const hasMb = (scope.mailboxes?.length ?? 0) > 0
   const hasSd = (scope.senders?.length ?? 0) > 0
-  return !hasDate && !hasMb && !hasSd
+  const hasRcpt = (scope.recipients?.length ?? 0) > 0
+  const hasPart = (scope.participants?.length ?? 0) > 0
+  const hasSubj = !!(scope.subject_contains && scope.subject_contains.length > 0)
+  const hasAtt = scope.has_attachment != null
+  const hasFt = (scope.file_types?.length ?? 0) > 0
+  const hasFn = (scope.filenames?.length ?? 0) > 0
+  const hasSt = (scope.source_types?.length ?? 0) > 0
+  return (
+    !hasDate &&
+    !hasMb &&
+    !hasSd &&
+    !hasRcpt &&
+    !hasPart &&
+    !hasSubj &&
+    !hasAtt &&
+    !hasFt &&
+    !hasFn &&
+    !hasSt
+  )
 }

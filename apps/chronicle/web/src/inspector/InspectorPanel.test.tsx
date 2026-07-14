@@ -155,4 +155,50 @@ describe('InspectorPanel flow', () => {
       expect(useWorkingSetStore.getState().selection?.kind).toBe('bucket')
     })
   })
+
+  it('attachment selection shows attachment metadata card', async () => {
+    const attSource = {
+      kind: 'att' as const,
+      id: 'att_42',
+      filename: 'invoice.pdf',
+      content_type: 'application/pdf',
+      size: 2048,
+      source_message_id: 'msg_1',
+      source_envelope: {
+        id: 'msg_1',
+        thread_id: null,
+        subject: 'Invoice',
+        sender_name: 'Bob',
+        sender_address: 'bob@example.com',
+        recipients: {},
+        date: '2015-01-01T00:00:00Z',
+        mailbox: 'me@example.com',
+        labels: [],
+        has_attachment: true,
+        attachments: [],
+      },
+      extraction_status: 'extracted',
+      extraction_reason: null,
+      markdown: null,
+      truncated: false,
+      text_offset: 0,
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/sources/att_42')) {
+          return { ok: true, status: 200, json: async () => attSource } as Response
+        }
+        throw new Error(`unexpected: ${url}`)
+      }),
+    )
+
+    useWorkingSetStore.getState().setSelection({ kind: 'attachment', sid: 'att_42' })
+    renderPanel()
+    expect(await screen.findByTestId('attachment-card')).toBeInTheDocument()
+    expect(screen.getByText('invoice.pdf')).toBeInTheDocument()
+    expect(screen.getByText(/application\/pdf/)).toBeInTheDocument()
+    expect(screen.getByText(/extracted/i)).toBeInTheDocument()
+  })
 })
