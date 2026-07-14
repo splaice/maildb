@@ -4,7 +4,9 @@ import type { QueryScope, QueryScopeDate } from '../api/types'
 import type { Viewport } from '../chronicle/timeScale'
 import {
   type Aggregation,
+  DEFAULT_LANES,
   DEFAULT_URL_STATE,
+  resolveLanes,
   type Selection,
   type UrlWorkingState,
   type ViewMode,
@@ -13,10 +15,12 @@ import {
 /**
  * History intent set by actions so useUrlSync can apply the URL contract:
  * - transient → debounced replaceState (pan/zoom, selection)
- * - analytical → immediate pushState (scope, brush-apply, view, …)
+ * - analytical → immediate pushState (scope, brush-apply, view, lanes, …)
  * - silent → no URL write (hydrate, brush drag, result count)
  */
 export type HistoryIntent = 'transient' | 'analytical' | 'silent'
+
+export type MoveLaneDir = 'up' | 'down'
 
 export interface WorkingSetState {
   scope: QueryScope
@@ -35,6 +39,8 @@ export interface WorkingSetState {
   resultCount: number | null
   /** Current timeline aggregation unit (for bucket date_to); not URL-serialised. */
   timelineUnit: string | null
+  /** Ordered visible lane keys; URL param `ln`; analytical intent. */
+  lanes: string[]
   historyIntent: HistoryIntent
 
   setViewport: (viewport: Viewport) => void
@@ -52,6 +58,8 @@ export interface WorkingSetState {
   clearMessageToBucket: () => void
   setResultCount: (count: number | null) => void
   setTimelineUnit: (unit: string | null) => void
+  toggleLane: (key: string) => void
+  moveLane: (key: string, dir: MoveLaneDir) => void
   hydrate: (decoded: UrlWorkingState) => void
 }
 
@@ -67,6 +75,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
   priorBucket: null,
   resultCount: null,
   timelineUnit: null,
+  lanes: [...DEFAULT_LANES],
   historyIntent: 'silent',
 
   setViewport: (viewport) =>
@@ -170,6 +179,31 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
 
   setTimelineUnit: (unit) => set({ timelineUnit: unit, historyIntent: 'silent' }),
 
+  toggleLane: (key) => {
+    const current = get().lanes
+    const idx = current.indexOf(key)
+    let next: string[]
+    if (idx >= 0) {
+      // Keep at least one lane visible.
+      if (current.length <= 1) return
+      next = current.filter((k) => k !== key)
+    } else {
+      next = [...current, key]
+    }
+    set({ lanes: next, historyIntent: 'analytical' })
+  },
+
+  moveLane: (key, dir) => {
+    const current = get().lanes
+    const idx = current.indexOf(key)
+    if (idx < 0) return
+    const swapWith = dir === 'up' ? idx - 1 : idx + 1
+    if (swapWith < 0 || swapWith >= current.length) return
+    const next = [...current]
+    ;[next[idx], next[swapWith]] = [next[swapWith]!, next[idx]!]
+    set({ lanes: next, historyIntent: 'analytical' })
+  },
+
   hydrate: (decoded) =>
     set({
       scope: decoded.scope ?? emptyScope(),
@@ -179,6 +213,7 @@ export const useWorkingSetStore = create<WorkingSetState>((set, get) => ({
       selection: decoded.selection ?? null,
       priorBucket:
         decoded.selection?.kind === 'bucket' ? decoded.selection : get().priorBucket,
+      lanes: resolveLanes(decoded.lanes),
       brush: null,
       historyIntent: 'silent',
     }),
@@ -196,6 +231,7 @@ export function resetWorkingSetStore(): void {
     priorBucket: null,
     resultCount: null,
     timelineUnit: null,
+    lanes: [...DEFAULT_LANES],
     historyIntent: 'silent',
   })
 }

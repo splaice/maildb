@@ -25,11 +25,12 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["chronicle"])
 
 VALID_UNITS: tuple[str, ...] = ("hour", "day", "week", "month", "quarter", "year")
-VALID_LANES = frozenset({"messages", "attachments", "people"})
+VALID_LANES = frozenset({"messages", "attachments", "people", "top_people"})
 MAX_BUCKETS = 2000
 MIN_PIXEL_WIDTH = 320
 MAX_PIXEL_WIDTH = 8192
 DENSITY_PIXEL_WIDTH = 1600
+TOP_PEOPLE_LIMIT = 8
 
 # Approximate unit widths for bucket-count estimation (pixel-width rule).
 _UNIT_SECONDS: dict[str, float] = {
@@ -76,6 +77,20 @@ class BucketPoint(BaseModel):
     count: int
 
 
+class TopPeopleContactSeries(BaseModel):
+    """Activity bucket series for one contact (activity spans only)."""
+
+    contact_id: str
+    display_name: str
+    buckets: list[BucketPoint]
+
+
+class TopPeopleLaneData(BaseModel):
+    """top_people lane payload: top contacts by volume within viewport+scope."""
+
+    contacts: list[TopPeopleContactSeries]
+
+
 class DensitySeries(BaseModel):
     unit: str
     buckets: list[BucketPoint]
@@ -110,7 +125,7 @@ class BucketsResponse(BaseModel):
     aggregation: str
     unit: str
     viewport: TimeRange
-    lanes: dict[str, list[BucketPoint]]
+    lanes: dict[str, list[BucketPoint] | TopPeopleLaneData]
     density: DensitySeries
     extent: ExtentRange
     generated_at: str
@@ -321,6 +336,121 @@ def _people_buckets(
     return _fetch_bucket_rows(pool, sql, params)
 
 
+def _top_people_buckets(
+    pool: ConnectionPool,
+    *,
+    unit: str,
+    viewport_from: str,
+    viewport_to: str,
+    scope_conds: list[str],
+    scope_params: dict[str, Any],
+) -> TopPeopleLaneData:
+    """Top contacts by sent-message volume within viewport+scope (activity spans).
+
+    One set-based statement: emails ⨝ contact_addresses, ranked by volume,
+    limited to top 8, excluding contacts whose every address is the user.
+    Display name falls back to the address with the highest volume.
+    """
+    # Scope filters target emails columns (date/source_account/sender_address).
+    # contact_addresses has none of those, so bare names stay unambiguous with
+    # the emails alias — same pattern as the attachments lane.
+    email_where = [
+        "date IS NOT NULL",
+        "date >= %(viewport_from)s",
+        "date < %(viewport_to)s",
+        *scope_conds,
+    ]
+    sql = f"""
+        WITH filtered AS (
+            SELECT ca.contact_id, e.date, e.sender_address
+            FROM emails e
+            JOIN contact_addresses ca ON ca.address = e.sender_address
+            WHERE {" AND ".join(email_where)}
+        ),
+        eligible AS (
+            SELECT ca.contact_id
+            FROM contact_addresses ca
+            GROUP BY ca.contact_id
+            HAVING NOT bool_and(ca.is_user)
+        ),
+        ranked AS (
+            SELECT f.contact_id, count(*)::int AS total
+            FROM filtered f
+            JOIN eligible el ON el.contact_id = f.contact_id
+            GROUP BY f.contact_id
+            ORDER BY total DESC, f.contact_id
+            LIMIT %(top_limit)s
+        ),
+        bucketed AS (
+            SELECT
+                f.contact_id,
+                date_trunc(%(unit)s, f.date) AS bucket,
+                count(*)::int AS count
+            FROM filtered f
+            JOIN ranked r ON r.contact_id = f.contact_id
+            GROUP BY f.contact_id, 2
+        ),
+        top_addr AS (
+            SELECT contact_id, sender_address
+            FROM (
+                SELECT
+                    f.contact_id,
+                    f.sender_address,
+                    count(*) AS vol,
+                    row_number() OVER (
+                        PARTITION BY f.contact_id
+                        ORDER BY count(*) DESC, f.sender_address
+                    ) AS rn
+                FROM filtered f
+                JOIN ranked r ON r.contact_id = f.contact_id
+                GROUP BY f.contact_id, f.sender_address
+            ) x
+            WHERE rn = 1
+        )
+        SELECT
+            r.contact_id::text,
+            coalesce(nullif(c.display_name, ''), ta.sender_address) AS display_name,
+            b.bucket,
+            coalesce(b.count, 0)::int AS count,
+            r.total
+        FROM ranked r
+        JOIN contacts c ON c.id = r.contact_id
+        JOIN top_addr ta ON ta.contact_id = r.contact_id
+        LEFT JOIN bucketed b ON b.contact_id = r.contact_id
+        ORDER BY r.total DESC, r.contact_id, b.bucket
+    """
+    params = {
+        **scope_params,
+        "unit": unit,
+        "viewport_from": viewport_from,
+        "viewport_to": viewport_to,
+        "top_limit": TOP_PEOPLE_LIMIT,
+    }
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    # Group rows into contact series preserving rank order.
+    by_contact: dict[str, TopPeopleContactSeries] = {}
+    order: list[str] = []
+    for row in rows:
+        contact_id = str(row[0])
+        display_name = str(row[1]) if row[1] is not None else contact_id
+        if contact_id not in by_contact:
+            by_contact[contact_id] = TopPeopleContactSeries(
+                contact_id=contact_id,
+                display_name=display_name,
+                buckets=[],
+            )
+            order.append(contact_id)
+        bucket = _iso_utc(row[2])
+        if bucket is None:
+            continue
+        by_contact[contact_id].buckets.append(
+            BucketPoint(bucket=bucket, count=int(row[3])),
+        )
+    return TopPeopleLaneData(contacts=[by_contact[cid] for cid in order])
+
+
 def _extent(
     pool: ConnectionPool,
     scope_conds: list[str],
@@ -396,17 +526,27 @@ def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
     viewport_from_s = body.viewport.from_
     viewport_to_s = body.viewport.to
 
-    lane_data: dict[str, list[BucketPoint]] = {}
+    lane_data: dict[str, list[BucketPoint] | TopPeopleLaneData] = {}
     for lane in body.lanes:
-        handler = _LANE_HANDLERS[lane]
-        lane_data[lane] = handler(
-            pool,
-            unit=unit,
-            viewport_from=viewport_from_s,
-            viewport_to=viewport_to_s,
-            scope_conds=scope_conds,
-            scope_params=scope_params,
-        )
+        if lane == "top_people":
+            lane_data[lane] = _top_people_buckets(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
+        else:
+            handler = _LANE_HANDLERS[lane]
+            lane_data[lane] = handler(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
 
     extent_min, extent_max = _extent(pool, scope_conds, scope_params)
     if extent_min is not None and extent_max is not None:

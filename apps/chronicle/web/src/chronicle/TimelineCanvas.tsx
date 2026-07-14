@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -8,7 +9,23 @@ import {
   type PointerEvent,
 } from 'react'
 
-import type { BucketPoint } from '../api/types'
+import type { BucketPoint, LaneData } from '../api/types'
+import { isTopPeopleLane } from '../api/types'
+import {
+  AXIS_H,
+  BAR_LANE_COLORS,
+  LANE_GAP,
+  LANE_H,
+  LANE_LABEL_W,
+  MULTIROW_HEADER_H,
+  MULTIROW_ROW_H,
+  PEOPLE_CYAN,
+  barsPoints,
+  canvasHeightForLanes,
+  laneAtY as laneAtYFromLayout,
+  layoutLanes,
+  type LaneSpec,
+} from './laneModel'
 import {
   bucketWidthPx,
   formatPeriodRange,
@@ -33,17 +50,14 @@ const COLORS = {
   graphite900: '#151b23',
 } as const
 
-const AXIS_H = 28
-const LANE_H = 72
-const LANE_LABEL_W = 52
-const LANE_GAP = 4
-
 export interface TimelineCanvasProps {
   viewport: Viewport
   extent: Viewport | null
   unit: string
-  messages: BucketPoint[]
-  attachments: BucketPoint[]
+  /** Ordered lane specs (store order). */
+  lanes: LaneSpec[]
+  /** Lane key → server payload (bars series or top_people contacts). */
+  laneData: Record<string, LaneData>
   isFetching: boolean
   brush: Viewport | null
   /** Currently selected bucket (for highlight outline). */
@@ -51,7 +65,7 @@ export interface TimelineCanvasProps {
   onViewportChange: (vp: Viewport) => void
   onBrushChange: (brush: Viewport | null) => void
   onWidthChange: (width: number) => void
-  /** Fired when a bar is clicked (lane + bucket ISO). */
+  /** Fired when a bar/mark is clicked (lane + bucket ISO). */
   onSelectBucket?: (bucketIso: string, laneName: string) => void
 }
 
@@ -101,7 +115,7 @@ export function bucketAtX(
   return hit
 }
 
-/** Which lane (0 = messages, 1 = attachments) contains localY, or null. */
+/** @deprecated Prefer layout-aware hit-test; kept for tests with default two bars. */
 export function laneAtY(localY: number): 'messages' | 'attachments' | null {
   if (localY <= AXIS_H) return null
   const messagesTop = AXIS_H + LANE_GAP
@@ -123,15 +137,27 @@ function maxCount(points: BucketPoint[]): number {
   return m
 }
 
+function truncateLabel(text: string, maxCh: number): string {
+  if (text.length <= maxCh) return text
+  return text.slice(0, Math.max(0, maxCh - 1)) + '…'
+}
+
 function buildAriaLabel(
   viewport: Viewport,
-  messages: BucketPoint[],
-  attachments: BucketPoint[],
+  lanes: LaneSpec[],
+  laneData: Record<string, LaneData>,
 ): string {
   const range = formatPeriodRange(viewport)
-  const msg = sumCounts(messages).toLocaleString()
-  const att = sumCounts(attachments).toLocaleString()
-  return `Timeline, ${range}, ${msg} messages, ${att} attachments`
+  const parts = lanes.map((spec) => {
+    if (spec.kind === 'bars') {
+      const n = sumCounts(barsPoints(laneData, spec.key)).toLocaleString()
+      return `${n} ${spec.label.toLowerCase()}`
+    }
+    const tp = laneData[spec.key]
+    const n = isTopPeopleLane(tp) ? tp.contacts.length : 0
+    return `${n} contacts`
+  })
+  return `Timeline, ${range}, ${parts.join(', ')}`
 }
 
 /**
@@ -142,8 +168,8 @@ export function TimelineCanvas({
   viewport,
   extent,
   unit,
-  messages,
-  attachments,
+  lanes,
+  laneData,
   isFetching,
   brush,
   selectedBucket = null,
@@ -163,19 +189,28 @@ export function TimelineCanvas({
     return () => el.removeEventListener('wheel', handler)
   }, [])
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [cssSize, setCssSize] = useState({ w: 0, h: AXIS_H + 2 * (LANE_H + LANE_GAP) })
+  const contentH = useMemo(
+    () => canvasHeightForLanes(lanes, laneData),
+    [lanes, laneData],
+  )
+  const layout = useMemo(() => layoutLanes(lanes, laneData), [lanes, laneData])
+  const [cssSize, setCssSize] = useState({ w: 0, h: contentH })
   const brushDrag = useRef<{ startX: number; curX: number } | null>(null)
   const rafRef = useRef<number>(0)
   const shimmerRef = useRef(0)
+
+  // Keep height in sync with lane config / top_people row count.
+  useEffect(() => {
+    setCssSize((prev) => (prev.h === contentH ? prev : { ...prev, h: contentH }))
+  }, [contentH])
 
   // ResizeObserver × devicePixelRatio (fallback for jsdom / older environments)
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
-    const h = AXIS_H + 2 * (LANE_H + LANE_GAP)
     const apply = (w: number) => {
       const width = Math.max(0, Math.floor(w))
-      setCssSize({ w: width, h })
+      setCssSize({ w: width, h: contentH })
       onWidthChange(width)
     }
     if (typeof ResizeObserver === 'undefined') {
@@ -190,7 +225,7 @@ export function TimelineCanvas({
     ro.observe(el)
     apply(el.clientWidth)
     return () => ro.disconnect()
-  }, [onWidthChange])
+  }, [onWidthChange, contentH])
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -234,47 +269,89 @@ export function TimelineCanvas({
       }
     }
 
-    const lanes: { name: string; points: BucketPoint[]; color: string }[] = [
-      { name: 'messages', points: messages, color: COLORS.action },
-      { name: 'attachments', points: attachments, color: COLORS.attachment },
-    ]
-
-    lanes.forEach((lane, i) => {
-      const top = AXIS_H + LANE_GAP + i * (LANE_H + LANE_GAP)
-      const max = maxCount(lane.points) || 1
+    for (const block of layout) {
+      const { spec, top, height } = block
       ctx.fillStyle = COLORS.graphite900
-      ctx.fillRect(0, top, w, LANE_H)
+      ctx.fillRect(0, top, w, height)
 
-      // Count scale label
-      ctx.fillStyle = COLORS.muted
-      ctx.font = '10px Inter, system-ui, sans-serif'
-      ctx.textBaseline = 'top'
-      ctx.fillText(`0–${maxCount(lane.points).toLocaleString()}`, 4, top + 4)
-      ctx.fillText(lane.name, 4, top + 18)
+      if (spec.kind === 'bars') {
+        const points = barsPoints(laneData, spec.key)
+        const max = maxCount(points) || 1
+        const color = BAR_LANE_COLORS[spec.key] ?? COLORS.action
 
-      const barMaxH = LANE_H - 12
-      for (const pt of lane.points) {
-        const t = Date.parse(pt.bucket)
-        if (!Number.isFinite(t)) continue
-        const x = LANE_LABEL_W + xForTime(t, viewport, plotW)
-        const barH = (pt.count / max) * barMaxH
-        const barY = top + LANE_H - 4 - barH
-        ctx.fillStyle = lane.color
-        ctx.globalAlpha = 0.85
-        ctx.fillRect(x, barY, bw, barH)
-        ctx.globalAlpha = 1
-        // Selected bucket: 1px action-blue outline
-        if (
-          selectedBucket &&
-          selectedBucket.lane === lane.name &&
-          selectedBucket.bucketIso === pt.bucket
-        ) {
-          ctx.strokeStyle = COLORS.action
-          ctx.lineWidth = 1
-          ctx.strokeRect(x + 0.5, barY + 0.5, Math.max(0, bw - 1), Math.max(0, barH - 1))
+        ctx.fillStyle = COLORS.muted
+        ctx.font = '10px Inter, system-ui, sans-serif'
+        ctx.textBaseline = 'top'
+        ctx.fillText(`0–${maxCount(points).toLocaleString()}`, 4, top + 4)
+        ctx.fillText(spec.label, 4, top + 18)
+
+        const barMaxH = LANE_H - 12
+        for (const pt of points) {
+          const t = Date.parse(pt.bucket)
+          if (!Number.isFinite(t)) continue
+          const x = LANE_LABEL_W + xForTime(t, viewport, plotW)
+          const barH = (pt.count / max) * barMaxH
+          const barY = top + LANE_H - 4 - barH
+          ctx.fillStyle = color
+          ctx.globalAlpha = 0.85
+          ctx.fillRect(x, barY, bw, barH)
+          ctx.globalAlpha = 1
+          if (
+            selectedBucket &&
+            selectedBucket.lane === spec.key &&
+            selectedBucket.bucketIso === pt.bucket
+          ) {
+            ctx.strokeStyle = COLORS.action
+            ctx.lineWidth = 1
+            ctx.strokeRect(x + 0.5, barY + 0.5, Math.max(0, bw - 1), Math.max(0, barH - 1))
+          }
         }
+      } else {
+        // multirow: top_people activity spans
+        const data = laneData[spec.key]
+        const contacts = isTopPeopleLane(data) ? data.contacts : []
+        ctx.fillStyle = COLORS.muted
+        ctx.font = '10px Inter, system-ui, sans-serif'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(spec.label, 4, top + MULTIROW_HEADER_H / 2)
+
+        contacts.forEach((contact, i) => {
+          const rowTop = top + MULTIROW_HEADER_H + i * MULTIROW_ROW_H
+          const rowMax = maxCount(contact.buckets) || 1
+          ctx.fillStyle = COLORS.muted
+          ctx.font = '10px Inter, system-ui, sans-serif'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(
+            truncateLabel(contact.display_name, 16),
+            4,
+            rowTop + MULTIROW_ROW_H / 2,
+          )
+
+          for (const pt of contact.buckets) {
+            if (pt.count <= 0) continue
+            const t = Date.parse(pt.bucket)
+            if (!Number.isFinite(t)) continue
+            const x = LANE_LABEL_W + xForTime(t, viewport, plotW)
+            const opacity = Math.min(1, Math.max(0.15, pt.count / rowMax))
+            ctx.fillStyle = PEOPLE_CYAN
+            ctx.globalAlpha = opacity
+            const markH = MULTIROW_ROW_H - 4
+            ctx.fillRect(x, rowTop + 2, bw, markH)
+            ctx.globalAlpha = 1
+            const hitLane = `top_people:${contact.contact_id}`
+            if (
+              selectedBucket &&
+              selectedBucket.lane === hitLane &&
+              selectedBucket.bucketIso === pt.bucket
+            ) {
+              ctx.strokeStyle = COLORS.action
+              ctx.lineWidth = 1
+              ctx.strokeRect(x + 0.5, rowTop + 2.5, Math.max(0, bw - 1), markH - 1)
+            }
+          }
+        })
       }
-    })
+    }
 
     // Brush overlay
     const activeBrush = brushDrag.current
@@ -305,7 +382,16 @@ export function TimelineCanvas({
     }
 
     // Empty viewport message
-    const total = sumCounts(messages) + sumCounts(attachments)
+    let total = 0
+    for (const spec of lanes) {
+      if (spec.kind === 'bars') total += sumCounts(barsPoints(laneData, spec.key))
+      else {
+        const tp = laneData[spec.key]
+        if (isTopPeopleLane(tp)) {
+          for (const c of tp.contacts) total += sumCounts(c.buckets)
+        }
+      }
+    }
     if (total === 0 && !isFetching) {
       ctx.fillStyle = COLORS.muted
       ctx.font = '13px Inter, system-ui, sans-serif'
@@ -349,13 +435,14 @@ export function TimelineCanvas({
       ctx.fillRect(0, 0, w, 2)
     }
   }, [
-    attachments,
     brush,
     cssSize.h,
     cssSize.w,
     extent,
     isFetching,
-    messages,
+    laneData,
+    lanes,
+    layout,
     selectedBucket,
     unit,
     viewport,
@@ -462,7 +549,7 @@ export function TimelineCanvas({
       return
     }
 
-    // Bar click hit-test
+    // Bar / multirow mark click hit-test
     const pending = clickRef.current
     clickRef.current = null
     if (!pending || !onSelectBucket) return
@@ -472,15 +559,26 @@ export function TimelineCanvas({
     const localY = e.clientY - rect.top
     // Ignore if pointer moved more than a few px (drag-like)
     if (Math.hypot(localX - pending.x, localY - pending.y) > 6) return
-    const lane = laneAtY(localY)
-    if (!lane) return
+    const hitKey = laneAtYFromLayout(localY, layout)
+    if (!hitKey) return
     const pw = plotWidth()
     const plotX = localX - LANE_LABEL_W
     if (plotX < 0) return
     const unitTyped = parseUnit(unit)
-    const points = lane === 'messages' ? messages : attachments
+
+    let points: BucketPoint[] = []
+    if (hitKey.startsWith('top_people:')) {
+      const contactId = hitKey.slice('top_people:'.length)
+      const tp = laneData.top_people
+      if (isTopPeopleLane(tp)) {
+        const contact = tp.contacts.find((c) => c.contact_id === contactId)
+        points = contact?.buckets ?? []
+      }
+    } else {
+      points = barsPoints(laneData, hitKey)
+    }
     const bucketIso = bucketAtX(plotX, viewport, pw, unitTyped, points)
-    if (bucketIso) onSelectBucket(bucketIso, lane)
+    if (bucketIso) onSelectBucket(bucketIso, hitKey)
   }
 
   const onDoubleClick = (e: MouseEvent) => {
@@ -510,11 +608,13 @@ export function TimelineCanvas({
       onKeyDown={onKeyDown}
       tabIndex={0}
       data-testid="timeline-canvas-wrap"
+      data-lane-count={lanes.length}
+      data-canvas-h={cssSize.h}
     >
       <canvas
         ref={canvasRef}
         role="img"
-        aria-label={buildAriaLabel(viewport, messages, attachments)}
+        aria-label={buildAriaLabel(viewport, lanes, laneData)}
         data-testid="timeline-canvas"
       />
     </div>

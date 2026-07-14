@@ -128,6 +128,34 @@ export interface BucketPoint {
   count: number
 }
 
+/** top_people lane: activity bucket series for one contact. */
+export interface TopPeopleContact {
+  contact_id: string
+  display_name: string
+  buckets: BucketPoint[]
+}
+
+/** top_people lane payload (activity spans only). */
+export interface TopPeopleLane {
+  contacts: TopPeopleContact[]
+}
+
+/** A bars-style lane is BucketPoint[]; top_people is nested contact series. */
+export type LaneData = BucketPoint[] | TopPeopleLane
+
+export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLane {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray((data as TopPeopleLane).contacts)
+  )
+}
+
+export function isBucketSeries(data: LaneData | undefined): data is BucketPoint[] {
+  return Array.isArray(data)
+}
+
 export interface DensitySeries {
   unit: string
   buckets: BucketPoint[]
@@ -153,7 +181,7 @@ export interface ChronicleBuckets {
   aggregation: string
   unit: string
   viewport: ChronicleTimeRange
-  lanes: Record<string, BucketPoint[]>
+  lanes: Record<string, LaneData>
   density: DensitySeries
   extent: ChronicleExtent
   generated_at: string

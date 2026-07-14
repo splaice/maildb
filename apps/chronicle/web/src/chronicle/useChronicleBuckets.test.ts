@@ -3,11 +3,21 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { ChronicleBuckets } from '../api/types'
+import type { BucketPoint, ChronicleBuckets } from '../api/types'
+import { isBucketSeries } from '../api/types'
 import {
   quantizePixelWidth,
   useChronicleBuckets,
 } from './useChronicleBuckets'
+
+function messagesCount(
+  data: ChronicleBuckets | undefined,
+  index: number,
+): number | undefined {
+  const m = data?.lanes.messages
+  if (!isBucketSeries(m)) return undefined
+  return (m as BucketPoint[])[index]?.count
+}
 
 function mockBuckets(overrides: Partial<ChronicleBuckets> = {}): ChronicleBuckets {
   return {
@@ -185,7 +195,7 @@ describe('useChronicleBuckets', () => {
       await vi.advanceTimersByTimeAsync(200)
     })
     await waitFor(() => {
-      expect(result.current.data?.lanes.messages?.[0]?.count).toBe(99)
+      expect(messagesCount(result.current.data, 0)).toBe(99)
     })
 
     rerender({ fromMs: Date.UTC(2016, 0, 1) })
@@ -199,7 +209,7 @@ describe('useChronicleBuckets', () => {
 
     // While second request is in flight, previous data remains available
     expect(result.current.isFetching).toBe(true)
-    expect(result.current.data?.lanes.messages?.[0]?.count).toBe(99)
+    expect(messagesCount(result.current.data, 0)).toBe(99)
     expect(result.current.isPlaceholderData).toBe(true)
 
     await act(async () => {

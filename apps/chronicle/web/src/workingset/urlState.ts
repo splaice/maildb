@@ -13,6 +13,24 @@ const UNITS: ReadonlySet<string> = new Set([
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
+/** All lane keys the UI understands (config panel + codec). */
+export const ALL_LANE_KEYS = [
+  'messages',
+  'attachments',
+  'people',
+  'top_people',
+] as const
+
+export type LaneKey = (typeof ALL_LANE_KEYS)[number]
+
+/** Default visible lane order (store + URL fallback). */
+export const DEFAULT_LANES: LaneKey[] = ['messages', 'attachments', 'top_people']
+
+/** localStorage key for per-device saved lens (lane config). */
+export const LANES_STORAGE_KEY = 'chronicle.lanes.v1'
+
+const LANE_KEY_SET: ReadonlySet<string> = new Set(ALL_LANE_KEYS)
+
 export type Aggregation = 'auto' | Unit
 export type ViewMode = 'canvas' | 'table'
 
@@ -29,6 +47,8 @@ export interface UrlWorkingState {
   aggregation: Aggregation
   view: ViewMode
   selection: Selection
+  /** Ordered visible lane keys; null means "not present in URL". */
+  lanes: string[] | null
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -37,6 +57,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   aggregation: 'auto',
   view: 'canvas',
   selection: null,
+  lanes: null,
 }
 
 /**
@@ -122,12 +143,66 @@ function parseView(value: string | null): ViewMode {
 }
 
 /**
+ * Parse `ln` CSV into ordered valid lane keys. Unknown tokens dropped.
+ * Empty / all-invalid → null (caller applies localStorage / default).
+ */
+export function parseLanesParam(value: string | null): string[] | null {
+  if (value == null || value === '') return null
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of parseCsv(value)) {
+    if (!LANE_KEY_SET.has(part) || seen.has(part)) continue
+    seen.add(part)
+    out.push(part)
+  }
+  return out.length > 0 ? out : null
+}
+
+/** Read saved lens from localStorage. Returns null if missing/invalid. */
+export function loadSavedLanes(): string[] | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    return parseLanesParam(localStorage.getItem(LANES_STORAGE_KEY))
+  } catch {
+    return null
+  }
+}
+
+/** Persist current lane config as per-device default (saved lens). */
+export function saveLanesAsDefault(lanes: string[]): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    const valid = parseLanesParam(lanes.join(','))
+    if (!valid) return
+    localStorage.setItem(LANES_STORAGE_KEY, valid.join(','))
+  } catch {
+    // Quota / private mode — ignore.
+  }
+}
+
+/**
+ * Resolve lanes with precedence: URL (`decoded`) > localStorage > default.
+ * When `decoded` is null (no `ln` param), localStorage is consulted.
+ */
+export function resolveLanes(urlLanes: string[] | null): string[] {
+  if (urlLanes != null && urlLanes.length > 0) return [...urlLanes]
+  const saved = loadSavedLanes()
+  if (saved != null && saved.length > 0) return [...saved]
+  return [...DEFAULT_LANES]
+}
+
+function lanesEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((v, i) => v === b[i])
+}
+
+/**
  * Encode working-set state into short, human-readable search params.
  * Omits defaults and empties entirely — pristine state → empty query string.
  */
 export function encodeState(state: UrlWorkingState): URLSearchParams {
   const params = new URLSearchParams()
-  const { scope, viewport, aggregation, view, selection } = state
+  const { scope, viewport, aggregation, view, selection, lanes } = state
 
   const dateFrom = scope.date?.from ?? null
   const dateTo = scope.date?.to ?? null
@@ -151,12 +226,18 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
   const sel = encodeSelection(selection ?? null)
   if (sel) params.set('sel', sel)
 
+  // Encode ln when present and non-default (null = omit; empty array should not occur).
+  if (lanes != null && lanes.length > 0 && !lanesEqual(lanes, DEFAULT_LANES)) {
+    params.set('ln', lanes.join(','))
+  }
+
   return params
 }
 
 /**
  * Decode search params into working-set state.
  * Total function: bad values fall back to defaults, never throws.
+ * `lanes` is null when `ln` is absent — hydrate applies localStorage / default.
  */
 export function decodeState(params: URLSearchParams): UrlWorkingState {
   const df = parseIsoDate(params.get('df'))
@@ -187,6 +268,7 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     aggregation: parseAggregation(params.get('agg')),
     view: parseView(params.get('view')),
     selection: decodeSelection(params.get('sel')),
+    lanes: parseLanesParam(params.get('ln')),
   }
 }
 

@@ -135,6 +135,7 @@ describe('SourcePage reader', () => {
         kind: 'message' as const,
         sid: 'msg_42',
       },
+      lanes: null,
     }
     const qs = encodeState(chronicleState).toString()
     window.history.replaceState(null, '', qs ? `/?${qs}` : '/')

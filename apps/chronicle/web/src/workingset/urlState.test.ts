@@ -1,13 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import type { Unit } from '../chronicle/timeScale'
 import {
   decodeSelection,
   decodeState,
+  DEFAULT_LANES,
   DEFAULT_URL_STATE,
   encodeSelection,
   encodeState,
   isScopePristine,
+  LANES_STORAGE_KEY,
+  loadSavedLanes,
+  parseLanesParam,
+  resolveLanes,
+  saveLanesAsDefault,
   toIsoSeconds,
   type UrlWorkingState,
 } from './urlState'
@@ -36,6 +42,7 @@ describe('encodeState / decodeState', () => {
         lane: 'messages',
         bucketIso: '2014-06-01T00:00:00.000Z',
       },
+      lanes: ['top_people', 'messages'],
     }
 
     const encoded = encodeState(state)
@@ -49,6 +56,7 @@ describe('encodeState / decodeState', () => {
     expect(decoded.aggregation).toBe('month')
     expect(decoded.view).toBe('table')
     expect(decoded.selection).toEqual(state.selection)
+    expect(decoded.lanes).toEqual(state.lanes)
 
     // Second roundtrip is stable
     expect(decodeState(encodeState(decoded))).toEqual(decoded)
@@ -166,5 +174,84 @@ describe('selection codec (sel)', () => {
       selection: { kind: 'message', sid: 'msg_99' },
     })
     expect(params.get('sel')).toBe('m:msg_99')
+  })
+})
+
+/** In-memory localStorage for environments where jsdom omits it. */
+function installMemoryLocalStorage(): Storage {
+  const map = new Map<string, string>()
+  const storage: Storage = {
+    get length() {
+      return map.size
+    },
+    clear() {
+      map.clear()
+    },
+    getItem(key: string) {
+      return map.has(key) ? map.get(key)! : null
+    },
+    key(index: number) {
+      return [...map.keys()][index] ?? null
+    },
+    removeItem(key: string) {
+      map.delete(key)
+    },
+    setItem(key: string, value: string) {
+      map.set(key, String(value))
+    },
+  }
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: storage,
+    configurable: true,
+    writable: true,
+  })
+  return storage
+}
+
+describe('lanes codec (ln) and saved lens', () => {
+  beforeEach(() => {
+    installMemoryLocalStorage()
+  })
+
+  it('roundtrips non-default ln CSV', () => {
+    const state: UrlWorkingState = {
+      ...DEFAULT_URL_STATE,
+      lanes: ['people', 'messages'],
+    }
+    const params = encodeState(state)
+    expect(params.get('ln')).toBe('people,messages')
+    expect(decodeState(params).lanes).toEqual(['people', 'messages'])
+  })
+
+  it('omits ln when lanes equal default', () => {
+    const params = encodeState({
+      ...DEFAULT_URL_STATE,
+      lanes: [...DEFAULT_LANES],
+    })
+    expect(params.has('ln')).toBe(false)
+  })
+
+  it('parseLanesParam drops unknown keys and empties', () => {
+    expect(parseLanesParam(null)).toBeNull()
+    expect(parseLanesParam('')).toBeNull()
+    expect(parseLanesParam('nope,messages,nope')).toEqual(['messages'])
+    expect(parseLanesParam('bogus')).toBeNull()
+  })
+
+  it('precedence URL > localStorage > default', () => {
+    saveLanesAsDefault(['attachments', 'people'])
+    expect(loadSavedLanes()).toEqual(['attachments', 'people'])
+
+    // URL present wins
+    expect(resolveLanes(['messages'])).toEqual(['messages'])
+    // No URL → localStorage
+    expect(resolveLanes(null)).toEqual(['attachments', 'people'])
+    // No URL, no storage → default
+    localStorage.removeItem(LANES_STORAGE_KEY)
+    expect(resolveLanes(null)).toEqual([...DEFAULT_LANES])
+  })
+
+  it('decode without ln yields null lanes (hydrate resolves)', () => {
+    expect(decodeState(new URLSearchParams()).lanes).toBeNull()
   })
 })

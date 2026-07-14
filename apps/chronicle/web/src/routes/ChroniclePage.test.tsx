@@ -190,4 +190,58 @@ describe('ChroniclePage working-set wiring', () => {
     expect(useWorkingSetStore.getState().view).toBe('table')
     expect(await screen.findByTestId('timeline-table')).toBeInTheDocument()
   })
+
+  it('lane config toggle/reorder update store and URL', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/'])
+    expect(await screen.findByTestId('lane-config-panel')).toBeInTheDocument()
+    expect(await screen.findByTestId('timeline-canvas-wrap')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Show People (distinct)'))
+    expect(useWorkingSetStore.getState().lanes).toContain('people')
+
+    await waitFor(() => {
+      expect(window.location.search).toMatch(/ln=/)
+    })
+    expect(window.location.search).toMatch(/people/)
+
+    fireEvent.click(screen.getByLabelText('Move Messages down'))
+    const lanes = useWorkingSetStore.getState().lanes
+    expect(lanes.indexOf('messages')).toBeGreaterThan(0)
+  })
+
+  it('canvas height responds to lane config', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/'])
+    const wrap = await screen.findByTestId('timeline-canvas-wrap')
+    const hBefore = Number(wrap.getAttribute('data-canvas-h'))
+    expect(hBefore).toBeGreaterThan(0)
+
+    // Hide attachments → fewer bars → shorter canvas
+    fireEvent.click(screen.getByLabelText('Show Attachments'))
+    await waitFor(() => {
+      const hAfter = Number(
+        screen.getByTestId('timeline-canvas-wrap').getAttribute('data-canvas-h'),
+      )
+      expect(hAfter).toBeLessThan(hBefore)
+    })
+  })
 })

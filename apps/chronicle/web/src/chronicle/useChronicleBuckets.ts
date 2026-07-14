@@ -5,7 +5,8 @@ import { apiPost } from '../api/client'
 import type { ChronicleBuckets, ChronicleRequest, QueryScope } from '../api/types'
 import { type Viewport, viewportToIso } from './timeScale'
 
-export const CHRONICLE_LANES = ['messages', 'attachments'] as const
+/** Default lanes requested when the caller does not pass `lanes`. */
+export const CHRONICLE_LANES = ['messages', 'attachments', 'top_people'] as const
 
 /** Quantize pixel width to 32px steps to avoid resize churn. */
 export function quantizePixelWidth(pixelWidth: number): number {

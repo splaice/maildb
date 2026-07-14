@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import type { ArchiveSummary } from '../api/types'
+import type { ArchiveSummary, LaneData } from '../api/types'
+import { isBucketSeries } from '../api/types'
 import { DensityNavigator } from '../chronicle/DensityNavigator'
+import { LaneConfigPanel } from '../chronicle/LaneConfigPanel'
+import { specsForKeys } from '../chronicle/laneModel'
 import { TimelineCanvas } from '../chronicle/TimelineCanvas'
 import { TimelineTable } from '../chronicle/TimelineTable'
 import { TimelineToolbar } from '../chronicle/TimelineToolbar'
@@ -139,6 +142,9 @@ export function ChroniclePage() {
   const setTimelineUnit = useWorkingSetStore((s) => s.setTimelineUnit)
   const selection = useWorkingSetStore((s) => s.selection)
   const setSelection = useWorkingSetStore((s) => s.setSelection)
+  const lanes = useWorkingSetStore((s) => s.lanes)
+  const toggleLane = useWorkingSetStore((s) => s.toggleLane)
+  const moveLane = useWorkingSetStore((s) => s.moveLane)
 
   const [pixelWidth, setPixelWidth] = useState(920)
   // False until URL hydrate or extent bootstrap resolves (layout hydrate may set
@@ -146,11 +152,13 @@ export function ChroniclePage() {
   const [bootstrapped, setBootstrapped] = useState(false)
 
   const activeViewport = viewport ?? BOOTSTRAP_VIEWPORT
+  const laneSpecs = useMemo(() => specsForKeys(lanes), [lanes])
 
   const buckets = useChronicleBuckets({
     viewport: activeViewport,
     pixelWidth,
     scope,
+    lanes,
     enabled: pixelWidth > 0,
   })
 
@@ -182,7 +190,8 @@ export function ChroniclePage() {
   // Live result framing for the scope bar + unit for inspector bucket ranges.
   useEffect(() => {
     if (!buckets.data) return
-    setResultCount(sumLaneCounts(buckets.data.lanes.messages))
+    const messages = buckets.data.lanes.messages
+    setResultCount(sumLaneCounts(isBucketSeries(messages) ? messages : undefined))
     setTimelineUnit(buckets.data.unit ?? buckets.data.aggregation ?? null)
   }, [buckets.data, setResultCount, setTimelineUnit])
 
@@ -236,10 +245,9 @@ export function ChroniclePage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [setBrush, zoomAroundCenter])
 
-  const messages = buckets.data?.lanes.messages ?? []
-  const attachments = buckets.data?.lanes.attachments ?? []
   const unit = buckets.data?.unit ?? buckets.data?.aggregation ?? 'month'
   const densityBuckets = buckets.data?.density.buckets ?? []
+  const laneData: Record<string, LaneData> = buckets.data?.lanes ?? {}
 
   const showTimeline = viewport != null
 
@@ -291,37 +299,46 @@ export function ChroniclePage() {
           </div>
         ) : null}
 
-        {/* Keep prior data visible on error when present */}
+        {/* Config rail (left) + canvas/table — shell has no config slot yet. */}
         {showTimeline && (buckets.data || !buckets.isError) ? (
-          viewMode === 'table' ? (
-            <TimelineTable
-              viewport={viewport}
-              unit={unit}
-              messages={messages}
-              attachments={attachments}
+          <div className="flex gap-2" data-testid="timeline-with-config">
+            <LaneConfigPanel
+              lanes={lanes}
+              onToggle={toggleLane}
+              onMove={moveLane}
             />
-          ) : (
-            <TimelineCanvas
-              viewport={viewport}
-              extent={extent}
-              unit={unit}
-              messages={messages}
-              attachments={attachments}
-              isFetching={buckets.isFetching}
-              brush={brush}
-              selectedBucket={
-                selection?.kind === 'bucket'
-                  ? { bucketIso: selection.bucketIso, lane: selection.lane }
-                  : null
-              }
-              onViewportChange={applyViewport}
-              onBrushChange={setBrush}
-              onWidthChange={onWidthChange}
-              onSelectBucket={(bucketIso, laneName) =>
-                setSelection({ kind: 'bucket', bucketIso, lane: laneName })
-              }
-            />
-          )
+            <div className="min-w-0 flex-1">
+              {viewMode === 'table' ? (
+                <TimelineTable
+                  viewport={viewport}
+                  unit={unit}
+                  lanes={laneSpecs}
+                  laneData={laneData}
+                />
+              ) : (
+                <TimelineCanvas
+                  viewport={viewport}
+                  extent={extent}
+                  unit={unit}
+                  lanes={laneSpecs}
+                  laneData={laneData}
+                  isFetching={buckets.isFetching}
+                  brush={brush}
+                  selectedBucket={
+                    selection?.kind === 'bucket'
+                      ? { bucketIso: selection.bucketIso, lane: selection.lane }
+                      : null
+                  }
+                  onViewportChange={applyViewport}
+                  onBrushChange={setBrush}
+                  onWidthChange={onWidthChange}
+                  onSelectBucket={(bucketIso, laneName) =>
+                    setSelection({ kind: 'bucket', bucketIso, lane: laneName })
+                  }
+                />
+              )}
+            </div>
+          </div>
         ) : null}
 
         {/* Bootstrap: measure width even before viewport is set */}

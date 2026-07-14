@@ -79,6 +79,7 @@ describe('working set store', () => {
       aggregation: 'year',
       view: 'table',
       selection: { kind: 'message', sid: 'msg_1' },
+      lanes: ['people', 'messages'],
     })
     const s = useWorkingSetStore.getState()
     expect(s.scope).toEqual({ mailboxes: ['m@x.com'] })
@@ -86,6 +87,7 @@ describe('working set store', () => {
     expect(s.aggregation).toBe('year')
     expect(s.view).toBe('table')
     expect(s.selection).toEqual({ kind: 'message', sid: 'msg_1' })
+    expect(s.lanes).toEqual(['people', 'messages'])
     expect(s.brush).toBeNull()
     expect(s.historyIntent).toBe('silent')
   })
@@ -102,5 +104,25 @@ describe('working set store', () => {
 
     useWorkingSetStore.getState().setSelection(null)
     expect(useWorkingSetStore.getState().selection).toBeNull()
+  })
+
+  it('toggleLane and moveLane are analytical', () => {
+    // default: messages, attachments, top_people
+    useWorkingSetStore.getState().toggleLane('people')
+    expect(useWorkingSetStore.getState().lanes).toContain('people')
+    expect(useWorkingSetStore.getState().historyIntent).toBe('analytical')
+
+    useWorkingSetStore.getState().moveLane('people', 'up')
+    const afterUp = useWorkingSetStore.getState().lanes
+    expect(afterUp.indexOf('people')).toBeLessThan(afterUp.length - 1)
+
+    useWorkingSetStore.getState().toggleLane('people')
+    expect(useWorkingSetStore.getState().lanes).not.toContain('people')
+  })
+
+  it('toggleLane refuses to hide the last lane', () => {
+    useWorkingSetStore.setState({ lanes: ['messages'] })
+    useWorkingSetStore.getState().toggleLane('messages')
+    expect(useWorkingSetStore.getState().lanes).toEqual(['messages'])
   })
 })

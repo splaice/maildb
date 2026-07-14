@@ -338,3 +338,161 @@ def test_buckets_request_model_defaults() -> None:
     assert req.aggregation == "auto"
     assert req.pixel_width == 920
     assert set(req.lanes) == {"messages", "attachments", "people"}
+
+
+def test_buckets_request_accepts_top_people_lane() -> None:
+    req = BucketsRequest.model_validate(
+        {
+            "viewport": {"from": "2020-01-01", "to": "2021-01-01"},
+            "lanes": ["messages", "top_people"],
+        }
+    )
+    assert "top_people" in req.lanes
+
+
+def _insert_contact(
+    pool: ConnectionPool,
+    *,
+    contact_id: Any,
+    display_name: str | None,
+    addresses: list[tuple[str, bool]],
+) -> None:
+    """Insert a contact and its addresses. addresses: (address, is_user)."""
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO contacts (id, display_name)
+            VALUES (%(id)s, %(name)s)
+            ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name
+            """,
+            {"id": contact_id, "name": display_name},
+        )
+        for address, is_user in addresses:
+            conn.execute(
+                """
+                INSERT INTO contact_addresses (address, contact_id, is_user)
+                VALUES (%(addr)s, %(cid)s, %(is_user)s)
+                ON CONFLICT (address) DO UPDATE
+                  SET contact_id = EXCLUDED.contact_id,
+                      is_user = EXCLUDED.is_user
+                """,
+                {"addr": address, "cid": contact_id, "is_user": is_user},
+            )
+        conn.commit()
+
+
+def _cleanup_top_people_fixtures(pool: ConnectionPool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM contact_addresses
+            WHERE address LIKE '%%@top-people-test.example'
+               OR address LIKE 'user-only@%%'
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM contacts
+            WHERE display_name LIKE 'TopPeople%%'
+               OR display_name = 'UserOnly'
+            """
+        )
+        conn.commit()
+    _cleanup_bucket_emails(pool)
+
+
+def test_top_people_lane_shape_and_rules(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    _cleanup_top_people_fixtures(db_pool)
+    acct = "top-people-acct@example.com"
+    # 9 external contacts + 1 user-only; top-8 should exclude user and lowest volume.
+    contact_ids = [uuid4() for _ in range(9)]
+    user_contact = uuid4()
+    try:
+        for i, cid in enumerate(contact_ids):
+            addr = f"person{i}@top-people-test.example"
+            _insert_contact(
+                db_pool,
+                contact_id=cid,
+                display_name=f"TopPeople {i}" if i % 2 == 0 else None,
+                addresses=[(addr, False)],
+            )
+            # Volume = i+1 messages so person8 has most, person0 least.
+            for n in range(i + 1):
+                _insert_email(
+                    db_pool,
+                    date=datetime(2020, 3, 1 + (n % 20), 12, 0, tzinfo=UTC),
+                    source_account=acct,
+                    sender_address=addr,
+                )
+        # User-only contact with high volume must be excluded.
+        user_addr = "user-only@top-people-test.example"
+        _insert_contact(
+            db_pool,
+            contact_id=user_contact,
+            display_name="UserOnly",
+            addresses=[(user_addr, True)],
+        )
+        for _ in range(50):
+            _insert_email(
+                db_pool,
+                date=datetime(2020, 4, 1, 12, 0, tzinfo=UTC),
+                source_account=acct,
+                sender_address=user_addr,
+            )
+
+        _login(db_client)
+        payload = {
+            "scope": {"mailboxes": [acct]},
+            "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+            "pixel_width": 920,
+            "aggregation": "month",
+            "lanes": ["top_people"],
+        }
+        r = db_client.post("/api/chronicle/buckets", json=payload)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        tp = body["lanes"]["top_people"]
+        assert isinstance(tp, dict)
+        assert "contacts" in tp
+        contacts = tp["contacts"]
+        assert isinstance(contacts, list)
+        assert len(contacts) <= 8
+        assert len(contacts) == 8  # 9 external, lowest dropped
+
+        ids = {c["contact_id"] for c in contacts}
+        assert str(user_contact) not in ids
+        assert str(contact_ids[0]) not in ids  # lowest volume excluded
+
+        # Ranked by volume desc: person8 .. person1
+        totals = []
+        for c in contacts:
+            assert "contact_id" in c
+            assert "display_name" in c
+            assert isinstance(c["buckets"], list)
+            for pt in c["buckets"]:
+                assert "bucket" in pt
+                assert isinstance(pt["count"], int)
+                assert pt["count"] >= 0
+            totals.append(sum(pt["count"] for pt in c["buckets"]))
+        assert totals == sorted(totals, reverse=True)
+
+        # Null display_name falls back to address
+        odd = next(c for c in contacts if c["contact_id"] == str(contact_ids[7]))
+        assert odd["display_name"] == "person7@top-people-test.example"
+        even = next(c for c in contacts if c["contact_id"] == str(contact_ids[8]))
+        assert even["display_name"] == "TopPeople 8"
+
+        # Scope filter is monotonic (narrower mailbox → fewer or equal totals)
+        other_acct = "top-people-other@example.com"
+        r_empty = db_client.post(
+            "/api/chronicle/buckets",
+            json={**payload, "scope": {"mailboxes": [other_acct]}},
+        )
+        assert r_empty.status_code == 200, r_empty.text
+        empty_contacts = r_empty.json()["lanes"]["top_people"]["contacts"]
+        empty_total = sum(sum(pt["count"] for pt in c["buckets"]) for c in empty_contacts)
+        full_total = sum(totals)
+        assert empty_total <= full_total
+        assert empty_total == 0
+    finally:
+        _cleanup_top_people_fixtures(db_pool)
