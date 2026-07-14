@@ -175,7 +175,7 @@ describe('isScopePristine', () => {
 })
 
 describe('selection codec (sel)', () => {
-  it('roundtrips bucket, message, and attachment selections', () => {
+  it('roundtrips bucket, message, attachment, and event selections', () => {
     const bucket = {
       kind: 'bucket' as const,
       lane: 'messages',
@@ -183,9 +183,14 @@ describe('selection codec (sel)', () => {
     }
     const msg = { kind: 'message' as const, sid: 'msg_12345' }
     const att = { kind: 'attachment' as const, sid: 'att_99' }
+    const evt = {
+      kind: 'event' as const,
+      eventId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    }
     expect(decodeSelection(encodeSelection(bucket))).toEqual(bucket)
     expect(decodeSelection(encodeSelection(msg))).toEqual(msg)
     expect(decodeSelection(encodeSelection(att))).toEqual(att)
+    expect(decodeSelection(encodeSelection(evt))).toEqual(evt)
     expect(encodeSelection(null)).toBeNull()
     expect(decodeSelection(null)).toBeNull()
   })
@@ -201,6 +206,8 @@ describe('selection codec (sel)', () => {
     expect(decodeSelection('m:att_1')).toBeNull()
     expect(decodeSelection('a:')).toBeNull()
     expect(decodeSelection('a:msg_1')).toBeNull()
+    expect(decodeSelection('e:')).toBeNull()
+    expect(decodeSelection('e:bad id')).toBeNull()
   })
 
   it('encodes into URL params via encodeState', () => {
@@ -214,6 +221,11 @@ describe('selection codec (sel)', () => {
       selection: { kind: 'attachment', sid: 'att_7' },
     })
     expect(attParams.get('sel')).toBe('a:att_7')
+    const evtParams = encodeState({
+      ...DEFAULT_URL_STATE,
+      selection: { kind: 'event', eventId: 'evt-uuid-1' },
+    })
+    expect(evtParams.get('sel')).toBe('e:evt-uuid-1')
   })
 })
 

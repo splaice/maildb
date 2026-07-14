@@ -5,10 +5,13 @@ import {
   AXIS_H,
   LANE_GAP,
   LANE_H,
+  MARKS_LANE_H,
   MULTIROW_HEADER_H,
   MULTIROW_ROW_H,
+  eventPositionMs,
   layoutLanes,
   laneAtY,
+  originGlyph,
   specsForKeys,
 } from './laneModel'
 
@@ -34,6 +37,9 @@ describe('laneModel', () => {
     expect(hMulti).toBe(
       AXIS_H + LANE_GAP + MULTIROW_HEADER_H + 3 * MULTIROW_ROW_H,
     )
+
+    const marks = specsForKeys(['events'])
+    expect(canvasHeightForLanes(marks)).toBe(AXIS_H + LANE_GAP + MARKS_LANE_H)
   })
 
   it('layout hit-test maps multirow rows to top_people:contact_id', () => {
@@ -53,4 +59,48 @@ describe('laneModel', () => {
     expect(laneAtY(multiTop, layout)).toBe('top_people:c1')
     expect(laneAtY(multiTop + MULTIROW_ROW_H, layout)).toBe('top_people:c2')
   })
+
+  it('events lane is marks kind and hit-tests as events', () => {
+    const specs = specsForKeys(['events'])
+    expect(specs[0]?.kind).toBe('marks')
+    const layout = layoutLanes(specs, {
+      events: {
+        events: [
+          {
+            event_id: 'e1',
+            title: 'T',
+            time_start: '2015-06-01T00:00:00Z',
+            time_end: null,
+            time_precision: 'day',
+            origin: 'analyst',
+            event_type: 'meeting',
+            status: 'confirmed',
+            evidence_strength: null,
+          },
+        ],
+        truncated: false,
+      },
+    })
+    expect(laneAtY(AXIS_H + LANE_GAP + 10, layout)).toBe('events')
+  })
 })
+
+describe('eventPositionMs day-floor', () => {
+  it('floors date-only precision to UTC start of day', () => {
+    const iso = '2015-06-15T14:30:00.000Z'
+    const day = eventPositionMs(iso, 'day')
+    expect(day).toBe(Date.UTC(2015, 5, 15))
+    expect(eventPositionMs(iso, 'month')).toBe(Date.UTC(2015, 5, 15))
+    expect(eventPositionMs(iso, 'year')).toBe(Date.UTC(2015, 5, 15))
+    // Hour keeps full timestamp — no fabricated floor
+    expect(eventPositionMs(iso, 'hour')).toBe(Date.parse(iso))
+  })
+
+  it('origin glyphs are text (not color-only)', () => {
+    expect(originGlyph('analyst')).toBe('A')
+    expect(originGlyph('automatic')).toBe('⚙')
+    expect(originGlyph('source')).toBe('S')
+    expect(originGlyph('imported')).toBe('I')
+  })
+})
+

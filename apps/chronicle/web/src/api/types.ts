@@ -149,8 +149,27 @@ export interface TopPeopleLane {
   contacts: TopPeopleContact[]
 }
 
-/** A bars-style lane is BucketPoint[]; top_people is nested contact series. */
-export type LaneData = BucketPoint[] | TopPeopleLane
+/** Sparse event diamond mark on the events lane. */
+export interface EventLaneMark {
+  event_id: string
+  title: string
+  time_start: string
+  time_end: string | null
+  time_precision: string
+  origin: string
+  event_type: string
+  status: string
+  evidence_strength: string | null
+}
+
+/** events lane payload (sparse diamonds, not bucket counts). */
+export interface EventsLane {
+  events: EventLaneMark[]
+  truncated: boolean
+}
+
+/** A bars-style lane is BucketPoint[]; top_people / events are nested objects. */
+export type LaneData = BucketPoint[] | TopPeopleLane | EventsLane
 
 export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLane {
   return (
@@ -161,8 +180,128 @@ export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLa
   )
 }
 
+export function isEventsLane(data: LaneData | undefined): data is EventsLane {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray((data as EventsLane).events)
+  )
+}
+
 export function isBucketSeries(data: LaneData | undefined): data is BucketPoint[] {
   return Array.isArray(data)
+}
+
+/** Event origin (Table 15). */
+export type EventOrigin = 'source' | 'imported' | 'automatic' | 'analyst'
+
+export type EventTimePrecision =
+  | 'year'
+  | 'quarter'
+  | 'month'
+  | 'week'
+  | 'day'
+  | 'hour'
+
+export type EventType =
+  | 'decision'
+  | 'meeting'
+  | 'travel'
+  | 'purchase'
+  | 'deadline'
+  | 'transition'
+  | 'document'
+  | 'communication'
+  | 'user_defined'
+
+export type EventStatus =
+  | 'unreviewed'
+  | 'confirmed'
+  | 'edited'
+  | 'dismissed'
+  | 'superseded'
+  | 'unresolved'
+
+export type ClaimStatus = 'direct' | 'supported' | 'conflicting' | 'unresolved'
+
+export interface EventCitation {
+  source_id: string
+  source_type: string
+  excerpt?: string | null
+  excerpt_hash?: string | null
+  location?: Record<string, unknown> | null
+  /** Hydrated display metadata */
+  date?: string | null
+  sender?: string | null
+  subject?: string | null
+}
+
+export interface EventClaim {
+  id: string
+  position: number
+  text: string
+  status: ClaimStatus | string
+  citations: EventCitation[]
+}
+
+export interface EventVersion {
+  version: number
+  author: string
+  title: string
+  summary: string | null
+  derivation: Record<string, unknown>
+  created_at?: string | null
+}
+
+export interface ChronicleEvent {
+  id: string
+  title: string
+  time_start: string
+  time_end: string | null
+  time_precision: EventTimePrecision | string
+  origin: EventOrigin | string
+  event_type: EventType | string
+  status: EventStatus | string
+  evidence_strength: string | null
+  scope_fingerprint?: string | null
+  current_version: number
+  created_at?: string | null
+  updated_at?: string | null
+  summary?: string | null
+  derivation?: Record<string, unknown>
+  version?: EventVersion | null
+  claims?: EventClaim[]
+}
+
+export interface EventCreateRequest {
+  title: string
+  time_start: string
+  time_end?: string | null
+  time_precision: EventTimePrecision | string
+  event_type: EventType | string
+  summary?: string | null
+  claims?: Array<{
+    text: string
+    citations?: string[]
+    status?: ClaimStatus | string
+  }>
+}
+
+export interface EventPatchRequest {
+  current_version: number
+  title?: string
+  time_start?: string
+  time_end?: string | null
+  time_precision?: EventTimePrecision | string
+  event_type?: EventType | string
+  summary?: string | null
+  claims?: Array<{
+    text: string
+    citations?: string[]
+    status?: ClaimStatus | string
+  }>
+  status?: EventStatus | string
 }
 
 export interface DensitySeries {

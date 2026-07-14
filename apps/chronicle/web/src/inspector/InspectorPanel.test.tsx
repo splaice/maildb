@@ -58,6 +58,41 @@ describe('InspectorPanel flow', () => {
     expect(screen.getByTestId('inspector-empty')).toBeInTheDocument()
   })
 
+  it('event selection shows EventCard with origin text', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 'evt-99',
+          title: 'Burst',
+          time_start: '2015-06-01T00:00:00Z',
+          time_end: null,
+          time_precision: 'day',
+          origin: 'automatic',
+          event_type: 'communication',
+          status: 'unreviewed',
+          evidence_strength: null,
+          current_version: 1,
+          summary: null,
+          claims: [],
+          version: {
+            version: 1,
+            author: 'automatic',
+            title: 'Burst',
+            summary: null,
+            derivation: {},
+          },
+        }),
+      }),
+    )
+    useWorkingSetStore.getState().setSelection({ kind: 'event', eventId: 'evt-99' })
+    renderPanel()
+    expect(await screen.findByTestId('event-card')).toBeInTheDocument()
+    expect(screen.getByTestId('event-origin-badge')).toHaveTextContent(/Automatic/)
+  })
+
   it('bucket → list → message with mocked API', async () => {
     const listPage = {
       items: [

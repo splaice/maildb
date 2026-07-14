@@ -496,3 +496,148 @@ def test_top_people_lane_shape_and_rules(db_client: TestClient, db_pool: Connect
         assert empty_total == 0
     finally:
         _cleanup_top_people_fixtures(db_pool)
+
+
+def test_buckets_request_accepts_events_lane() -> None:
+    req = BucketsRequest.model_validate(
+        {
+            "viewport": {"from": "2020-01-01", "to": "2021-01-01"},
+            "lanes": ["messages", "events"],
+        }
+    )
+    assert "events" in req.lanes
+
+
+def _cleanup_events_for_lane(pool: ConnectionPool) -> None:
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM app_events")
+        conn.commit()
+
+
+def test_events_lane_cap_and_dismissed_exclusion(
+    db_client: TestClient, db_pool: ConnectionPool
+) -> None:
+    """Events lane returns sparse marks (not bucket counts), excludes dismissed, caps 500."""
+    from chronicle_server.chronicle import EVENTS_LANE_CAP
+
+    _cleanup_events_for_lane(db_pool)
+    try:
+        with db_pool.connection() as conn:
+            # One dismissed inside viewport — must not appear
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Dismissed mark', '2020-06-15T00:00:00Z', null, 'day', 'analyst',
+                    'meeting', 'dismissed', 1
+                )
+                """
+            )
+            # Span event overlapping viewport
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Span mark', '2020-05-20T00:00:00Z', '2020-06-10T00:00:00Z', 'day',
+                    'analyst', 'travel', 'confirmed', 1
+                )
+                """
+            )
+            # Point event inside
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Inside mark', '2020-07-01T00:00:00Z', null, 'day', 'source',
+                    'document', 'unreviewed', 1
+                )
+                """
+            )
+            # Outside viewport
+            conn.execute(
+                """
+                INSERT INTO app_events (
+                    title, time_start, time_end, time_precision, origin,
+                    event_type, status, current_version
+                ) VALUES (
+                    'Outside mark', '2019-01-01T00:00:00Z', null, 'day', 'analyst',
+                    'meeting', 'confirmed', 1
+                )
+                """
+            )
+            conn.commit()
+
+        _login(db_client)
+        r = db_client.post(
+            "/api/chronicle/buckets",
+            json={
+                "scope": {},
+                "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+                "pixel_width": 920,
+                "aggregation": "month",
+                "lanes": ["events"],
+            },
+        )
+        assert r.status_code == 200, r.text
+        lane = r.json()["lanes"]["events"]
+        assert isinstance(lane, dict)
+        assert "events" in lane
+        assert "truncated" in lane
+        assert lane["truncated"] is False
+        titles = {m["title"] for m in lane["events"]}
+        assert "Inside mark" in titles
+        assert "Span mark" in titles
+        assert "Dismissed mark" not in titles
+        assert "Outside mark" not in titles
+        for m in lane["events"]:
+            assert "event_id" in m
+            assert "time_start" in m
+            assert "time_precision" in m
+            assert "origin" in m
+            assert "event_type" in m
+            assert "status" in m
+            assert "count" not in m  # not bucket counts
+
+        # Cap + truncated flag
+        _cleanup_events_for_lane(db_pool)
+        with db_pool.connection() as conn:
+            for i in range(EVENTS_LANE_CAP + 5):
+                conn.execute(
+                    """
+                    INSERT INTO app_events (
+                        title, time_start, time_end, time_precision, origin,
+                        event_type, status, current_version
+                    ) VALUES (
+                        %(title)s, %(ts)s, null, 'day', 'analyst',
+                        'communication', 'confirmed', 1
+                    )
+                    """,
+                    {
+                        "title": f"Cap {i}",
+                        "ts": datetime(2020, 1, 1, tzinfo=UTC) + timedelta(hours=i),
+                    },
+                )
+            conn.commit()
+
+        r2 = db_client.post(
+            "/api/chronicle/buckets",
+            json={
+                "scope": {},
+                "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+                "pixel_width": 920,
+                "aggregation": "month",
+                "lanes": ["events"],
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        lane2 = r2.json()["lanes"]["events"]
+        assert lane2["truncated"] is True
+        assert len(lane2["events"]) == EVENTS_LANE_CAP
+    finally:
+        _cleanup_events_for_lane(db_pool)

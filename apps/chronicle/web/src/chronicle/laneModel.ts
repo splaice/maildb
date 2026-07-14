@@ -1,8 +1,8 @@
-import type { BucketPoint, LaneData, TopPeopleLane } from '../api/types'
-import { isBucketSeries, isTopPeopleLane } from '../api/types'
+import type { BucketPoint, EventLaneMark, LaneData, TopPeopleLane } from '../api/types'
+import { isBucketSeries, isEventsLane, isTopPeopleLane } from '../api/types'
 import type { LaneKey } from '../workingset/urlState'
 
-export type LaneKind = 'bars' | 'multirow'
+export type LaneKind = 'bars' | 'multirow' | 'marks'
 
 export interface LaneSpec {
   key: LaneKey
@@ -16,6 +16,7 @@ export const LANE_CATALOG: readonly LaneSpec[] = [
   { key: 'attachments', label: 'Attachments', kind: 'bars' },
   { key: 'people', label: 'People (distinct)', kind: 'bars' },
   { key: 'top_people', label: 'Top people', kind: 'multirow' },
+  { key: 'events', label: 'Events', kind: 'marks' },
 ] as const
 
 const CATALOG_BY_KEY = new Map(LANE_CATALOG.map((s) => [s.key, s]))
@@ -26,6 +27,9 @@ export const BAR_LANE_COLORS: Record<string, string> = {
   people: '#56d4dd', // people cyan
 }
 
+/** Spec event amber (#E0A84A) for diamond marks. */
+export const EVENT_AMBER = '#E0A84A'
+
 export const PEOPLE_CYAN = '#56d4dd'
 
 export const AXIS_H = 28
@@ -34,6 +38,8 @@ export const LANE_LABEL_W = 72
 export const LANE_GAP = 4
 export const MULTIROW_HEADER_H = 16
 export const MULTIROW_ROW_H = 18
+/** Marks lane height (events diamonds). */
+export const MARKS_LANE_H = 56
 
 /** Build ordered LaneSpec[] from store lane keys (unknown keys dropped). */
 export function specsForKeys(keys: readonly string[]): LaneSpec[] {
@@ -54,6 +60,7 @@ export function laneContentHeight(
   laneData: Record<string, LaneData> | undefined,
 ): number {
   if (spec.kind === 'bars') return LANE_H
+  if (spec.kind === 'marks') return MARKS_LANE_H
   const data = laneData?.[spec.key]
   const n = isTopPeopleLane(data) ? data.contacts.length : 0
   return multirowHeight(n)
@@ -103,13 +110,13 @@ export function layoutLanes(
     y += LANE_GAP
     const height = laneContentHeight(spec, laneData)
     const rows: LaneLayoutRow[] = []
-    if (spec.kind === 'bars') {
+    if (spec.kind === 'bars' || spec.kind === 'marks') {
       rows.push({
         hitKey: spec.key,
         top: y,
         height,
         laneKey: spec.key,
-        kind: 'bars',
+        kind: spec.kind,
       })
     } else {
       const data = laneData?.[spec.key]
@@ -160,4 +167,49 @@ export function topPeopleData(
 ): TopPeopleLane | undefined {
   const data = laneData?.top_people
   return isTopPeopleLane(data) ? data : undefined
+}
+
+export function eventsMarks(
+  laneData: Record<string, LaneData> | undefined,
+): EventLaneMark[] {
+  const data = laneData?.events
+  return isEventsLane(data) ? data.events : []
+}
+
+/**
+ * Origin glyph (text, not color-only) for event marks.
+ * A=analyst, ⚙=automatic, S=source, I=imported.
+ */
+export function originGlyph(origin: string): string {
+  switch (origin) {
+    case 'analyst':
+      return 'A'
+    case 'automatic':
+      return '⚙'
+    case 'source':
+      return 'S'
+    case 'imported':
+      return 'I'
+    default:
+      return '?'
+  }
+}
+
+/**
+ * Epoch ms used for x-position of an event mark.
+ *
+ * Date-only precisions (year, quarter, month, week, day) floor to UTC start of
+ * day — never a fabricated hour within the day. Hour precision uses the
+ * full timestamp.
+ */
+export function eventPositionMs(
+  timeStartIso: string,
+  timePrecision: string,
+): number | null {
+  const ms = Date.parse(timeStartIso)
+  if (!Number.isFinite(ms)) return null
+  if (timePrecision === 'hour') return ms
+  // Floor to UTC midnight of the calendar day.
+  const d = new Date(ms)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
 }

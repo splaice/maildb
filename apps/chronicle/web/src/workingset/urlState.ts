@@ -19,6 +19,7 @@ export const ALL_LANE_KEYS = [
   'attachments',
   'people',
   'top_people',
+  'events',
 ] as const
 
 export type LaneKey = (typeof ALL_LANE_KEYS)[number]
@@ -54,6 +55,7 @@ export type Selection =
   | { kind: 'bucket'; bucketIso: string; lane: string }
   | { kind: 'message'; sid: string }
   | { kind: 'attachment'; sid: string }
+  | { kind: 'event'; eventId: string }
   | null
 
 /** Serializable working-set slice for the URL codec. */
@@ -105,6 +107,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
  * - bucket: `b:<lane>:<bucketIso>`
  * - message: `m:<sid>`
  * - attachment: `a:<sid>`
+ * - event: `e:<event_id>`
  */
 export function encodeSelection(selection: Selection): string | null {
   if (!selection) return null
@@ -119,6 +122,10 @@ export function encodeSelection(selection: Selection): string | null {
   if (selection.kind === 'attachment') {
     if (!selection.sid) return null
     return `a:${selection.sid}`
+  }
+  if (selection.kind === 'event') {
+    if (!selection.eventId) return null
+    return `e:${selection.eventId}`
   }
   return null
 }
@@ -149,6 +156,12 @@ export function decodeSelection(raw: string | null): Selection {
     const sid = raw.slice(2)
     if (!sid || !/^att_[A-Za-z0-9_-]+$/.test(sid)) return null
     return { kind: 'attachment', sid }
+  }
+  if (raw.startsWith('e:')) {
+    const eventId = raw.slice(2)
+    // UUID (with or without hyphens) or any non-empty opaque id.
+    if (!eventId || !/^[A-Za-z0-9_-]+$/.test(eventId)) return null
+    return { kind: 'event', eventId }
   }
   return null
 }

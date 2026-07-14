@@ -14,6 +14,7 @@ from chronicle_server.auth import router as auth_router
 from chronicle_server.chronicle import router as chronicle_router
 from chronicle_server.config import ChronicleSettings
 from chronicle_server.db import create_pool, ensure_user, init_app_tables
+from chronicle_server.events import router as events_router
 from chronicle_server.files import router as files_router
 from chronicle_server.health import router as health_router
 from chronicle_server.interpret import router as interpret_router
@@ -74,6 +75,7 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(files_router, prefix="/api")
     app.include_router(ask_router, prefix="/api")
     app.include_router(workspaces_router, prefix="/api")
+    app.include_router(events_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved
     return app

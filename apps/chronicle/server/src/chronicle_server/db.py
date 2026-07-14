@@ -66,6 +66,53 @@ CREATE TABLE IF NOT EXISTS app_workspace_blocks (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS app_events (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title          TEXT NOT NULL,
+    time_start     TIMESTAMPTZ NOT NULL,
+    time_end       TIMESTAMPTZ,
+    time_precision TEXT NOT NULL DEFAULT 'day'
+        CHECK (time_precision IN (
+            'year','quarter','month','week','day','hour')),
+    origin         TEXT NOT NULL
+        CHECK (origin IN ('source','imported','automatic','analyst')),
+    event_type     TEXT NOT NULL DEFAULT 'communication'
+        CHECK (event_type IN (
+            'decision','meeting','travel','purchase','deadline',
+            'transition','document','communication','user_defined')),
+    status         TEXT NOT NULL DEFAULT 'unreviewed'
+        CHECK (status IN (
+            'unreviewed','confirmed','edited','dismissed',
+            'superseded','unresolved')),
+    evidence_strength TEXT
+        CHECK (evidence_strength IN ('low','medium','high')),
+    scope_fingerprint TEXT,
+    current_version   INT NOT NULL DEFAULT 1,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_event_versions (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id     UUID NOT NULL REFERENCES app_events(id) ON DELETE CASCADE,
+    version      INT NOT NULL,
+    author       TEXT NOT NULL CHECK (author IN ('automatic','analyst')),
+    title        TEXT NOT NULL,
+    summary      TEXT,
+    derivation   JSONB NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (event_id, version)
+);
+CREATE TABLE IF NOT EXISTS app_event_claims (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id   UUID NOT NULL REFERENCES app_events(id) ON DELETE CASCADE,
+    version    INT NOT NULL,
+    position   INT NOT NULL,
+    text       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'direct'
+        CHECK (status IN (
+            'direct','supported','conflicting','unresolved')),
+    citations  JSONB NOT NULL DEFAULT '[]'
+);
 """
 
 
