@@ -10,7 +10,6 @@ import {
 } from 'react'
 
 import type { BucketPoint, EventLaneMark, LaneData } from '../api/types'
-import { isTopPeopleLane } from '../api/types'
 import { CreateEventFromBrush } from '../events/CreateEventFromBrush'
 import { useWorkingSetStore } from '../workingset/store'
 import {
@@ -23,13 +22,16 @@ import {
   MARKS_LANE_H,
   MULTIROW_HEADER_H,
   MULTIROW_ROW_H,
-  PEOPLE_CYAN,
   barsPoints,
   canvasHeightForLanes,
   eventPositionMs,
   eventsMarks,
   laneAtY as laneAtYFromLayout,
   layoutLanes,
+  multirowBucketsForHit,
+  multirowHitPrefix,
+  multirowMarkColor,
+  multirowSeriesForLane,
   originGlyph,
   type LaneSpec,
 } from './laneModel'
@@ -234,9 +236,8 @@ function buildAriaLabel(
       const n = eventsMarks(laneData).length
       return `${n} events`
     }
-    const tp = laneData[spec.key]
-    const n = isTopPeopleLane(tp) ? tp.contacts.length : 0
-    return `${n} contacts`
+    const n = multirowSeriesForLane(spec, laneData).length
+    return `${n} ${spec.key === 'topics' ? 'topics' : 'contacts'}`
   })
   return `Timeline, ${range}, ${parts.join(', ')}`
 }
@@ -456,38 +457,39 @@ export function TimelineCanvas({
           ctx.textAlign = 'start'
         }
       } else {
-        // multirow: top_people activity spans
-        const data = laneData[spec.key]
-        const contacts = isTopPeopleLane(data) ? data.contacts : []
+        // multirow: top_people / topics activity spans
+        const series = multirowSeriesForLane(spec, laneData)
+        const markColor = multirowMarkColor(spec.key)
+        const hitPrefix = multirowHitPrefix(spec.key)
         ctx.fillStyle = COLORS.muted
         ctx.font = '10px Inter, system-ui, sans-serif'
         ctx.textBaseline = 'middle'
         ctx.fillText(spec.label, 4, top + MULTIROW_HEADER_H / 2)
 
-        contacts.forEach((contact, i) => {
+        series.forEach((row, i) => {
           const rowTop = top + MULTIROW_HEADER_H + i * MULTIROW_ROW_H
-          const rowMax = maxCount(contact.buckets) || 1
+          const rowMax = maxCount(row.buckets) || 1
           ctx.fillStyle = COLORS.muted
           ctx.font = '10px Inter, system-ui, sans-serif'
           ctx.textBaseline = 'middle'
           ctx.fillText(
-            truncateLabel(contact.display_name, 16),
+            truncateLabel(row.label, 16),
             4,
             rowTop + MULTIROW_ROW_H / 2,
           )
 
-          for (const pt of contact.buckets) {
+          for (const pt of row.buckets) {
             if (pt.count <= 0) continue
             const t = Date.parse(pt.bucket)
             if (!Number.isFinite(t)) continue
             const x = LANE_LABEL_W + xForTime(t, viewport, plotW)
             const opacity = Math.min(1, Math.max(0.15, pt.count / rowMax))
-            ctx.fillStyle = PEOPLE_CYAN
+            ctx.fillStyle = markColor
             ctx.globalAlpha = opacity
             const markH = MULTIROW_ROW_H - 4
             ctx.fillRect(x, rowTop + 2, bw, markH)
             ctx.globalAlpha = 1
-            const hitLane = `top_people:${contact.contact_id}`
+            const hitLane = `${hitPrefix}:${row.id}`
             if (
               selectedBucket &&
               selectedBucket.lane === hitLane &&
@@ -536,9 +538,8 @@ export function TimelineCanvas({
       if (spec.kind === 'bars') total += sumCounts(barsPoints(laneData, spec.key))
       else if (spec.kind === 'marks') total += eventsMarks(laneData).length
       else {
-        const tp = laneData[spec.key]
-        if (isTopPeopleLane(tp)) {
-          for (const c of tp.contacts) total += sumCounts(c.buckets)
+        for (const row of multirowSeriesForLane(spec, laneData)) {
+          total += sumCounts(row.buckets)
         }
       }
     }
@@ -730,13 +731,8 @@ export function TimelineCanvas({
 
     if (!onSelectBucket) return
     let points: BucketPoint[] = []
-    if (hitKey.startsWith('top_people:')) {
-      const contactId = hitKey.slice('top_people:'.length)
-      const tp = laneData.top_people
-      if (isTopPeopleLane(tp)) {
-        const contact = tp.contacts.find((c) => c.contact_id === contactId)
-        points = contact?.buckets ?? []
-      }
+    if (hitKey.startsWith('top_people:') || hitKey.startsWith('topics:')) {
+      points = multirowBucketsForHit(hitKey, laneData)
     } else {
       points = barsPoints(laneData, hitKey)
     }
@@ -759,13 +755,8 @@ export function TimelineCanvas({
       if (hitKey) {
         const unitTyped = parseUnit(unit)
         let points: BucketPoint[] = []
-        if (hitKey.startsWith('top_people:')) {
-          const contactId = hitKey.slice('top_people:'.length)
-          const tp = laneData.top_people
-          if (isTopPeopleLane(tp)) {
-            const contact = tp.contacts.find((c) => c.contact_id === contactId)
-            points = contact?.buckets ?? []
-          }
+        if (hitKey.startsWith('top_people:') || hitKey.startsWith('topics:')) {
+          points = multirowBucketsForHit(hitKey, laneData)
         } else {
           points = barsPoints(laneData, hitKey)
         }

@@ -25,12 +25,13 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["chronicle"])
 
 VALID_UNITS: tuple[str, ...] = ("hour", "day", "week", "month", "quarter", "year")
-VALID_LANES = frozenset({"messages", "attachments", "people", "top_people", "events"})
+VALID_LANES = frozenset({"messages", "attachments", "people", "top_people", "events", "topics"})
 MAX_BUCKETS = 2000
 MIN_PIXEL_WIDTH = 320
 MAX_PIXEL_WIDTH = 8192
 DENSITY_PIXEL_WIDTH = 1600
 TOP_PEOPLE_LIMIT = 8
+TOP_TOPICS_LIMIT = 6
 EVENTS_LANE_CAP = 500
 
 # Approximate unit widths for bucket-count estimation (pixel-width rule).
@@ -92,6 +93,21 @@ class TopPeopleLaneData(BaseModel):
     contacts: list[TopPeopleContactSeries]
 
 
+class TopicSeries(BaseModel):
+    """Activity bucket series for one topic (member emails per bucket)."""
+
+    topic_id: str
+    label: str
+    origin: str
+    buckets: list[BucketPoint]
+
+
+class TopicsLaneData(BaseModel):
+    """topics lane: top visible topics by member volume within viewport+scope."""
+
+    topics: list[TopicSeries]
+
+
 class EventLaneMark(BaseModel):
     """Sparse event diamond mark for the events lane (not a bucket count)."""
 
@@ -142,7 +158,7 @@ class BucketsRequest(BaseModel):
         return value
 
 
-LanePayload = list[BucketPoint] | TopPeopleLaneData | EventsLaneData
+LanePayload = list[BucketPoint] | TopPeopleLaneData | EventsLaneData | TopicsLaneData
 
 
 class BucketsResponse(BaseModel):
@@ -526,6 +542,97 @@ def _top_people_buckets(
     return TopPeopleLaneData(contacts=[by_contact[cid] for cid in order])
 
 
+def _topics_buckets(
+    pool: ConnectionPool,
+    *,
+    unit: str,
+    viewport_from: str,
+    viewport_to: str,
+    scope_conds: list[str],
+    scope_params: dict[str, Any],
+) -> TopicsLaneData:
+    """Top 6 visible topics by member volume within viewport+scope.
+
+    One set-based statement: members ⨝ emails ⨝ topics, ranked CTE like
+    top_people. Hidden topics excluded. Bare emails columns are unambiguous
+    (app_topic_members / app_topics do not share those names).
+    """
+    email_where = [
+        "date IS NOT NULL",
+        "date >= %(viewport_from)s",
+        "date < %(viewport_to)s",
+        *scope_conds,
+    ]
+    sql = f"""
+        WITH filtered AS (
+            SELECT m.topic_id, e.date
+            FROM app_topic_members m
+            JOIN emails e ON e.id = m.email_id
+            JOIN app_topics t ON t.id = m.topic_id
+            WHERE t.hidden = FALSE
+              AND {" AND ".join(email_where)}
+        ),
+        ranked AS (
+            SELECT topic_id, count(*)::int AS total
+            FROM filtered
+            GROUP BY topic_id
+            ORDER BY total DESC, topic_id
+            LIMIT %(top_limit)s
+        ),
+        bucketed AS (
+            SELECT
+                f.topic_id,
+                date_trunc(%(unit)s, f.date) AS bucket,
+                count(*)::int AS count
+            FROM filtered f
+            JOIN ranked r ON r.topic_id = f.topic_id
+            GROUP BY f.topic_id, 2
+        )
+        SELECT
+            r.topic_id::text,
+            t.label,
+            t.origin,
+            b.bucket,
+            coalesce(b.count, 0)::int AS count,
+            r.total
+        FROM ranked r
+        JOIN app_topics t ON t.id = r.topic_id
+        LEFT JOIN bucketed b ON b.topic_id = r.topic_id
+        ORDER BY r.total DESC, r.topic_id, b.bucket
+    """
+    params = {
+        **scope_params,
+        "unit": unit,
+        "viewport_from": viewport_from,
+        "viewport_to": viewport_to,
+        "top_limit": TOP_TOPICS_LIMIT,
+    }
+    with pool.connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    by_topic: dict[str, TopicSeries] = {}
+    order: list[str] = []
+    for row in rows:
+        topic_id = str(row[0])
+        label = str(row[1]) if row[1] is not None else topic_id
+        origin = str(row[2])
+        if topic_id not in by_topic:
+            by_topic[topic_id] = TopicSeries(
+                topic_id=topic_id,
+                label=label,
+                origin=origin,
+                buckets=[],
+            )
+            order.append(topic_id)
+        bucket = _iso_utc(row[3])
+        if bucket is None:
+            continue
+        by_topic[topic_id].buckets.append(
+            BucketPoint(bucket=bucket, count=int(row[4])),
+        )
+    return TopicsLaneData(topics=[by_topic[tid] for tid in order])
+
+
 def _extent(
     pool: ConnectionPool,
     scope_conds: list[str],
@@ -673,6 +780,15 @@ def get_buckets(pool: ConnectionPool, body: BucketsRequest) -> BucketsResponse:
                 scope_conds=scope_conds,
                 scope_params=scope_params,
             )
+        elif lane == "topics":
+            lane_data[lane] = _topics_buckets(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
         elif lane == "events":
             lane_data[lane] = _events_lane(
                 pool,
@@ -776,6 +892,15 @@ def _fetch_lanes_for_viewport(
     for lane in lanes:
         if lane == "top_people":
             lane_data[lane] = _top_people_buckets(
+                pool,
+                unit=unit,
+                viewport_from=viewport_from_s,
+                viewport_to=viewport_to_s,
+                scope_conds=scope_conds,
+                scope_params=scope_params,
+            )
+        elif lane == "topics":
+            lane_data[lane] = _topics_buckets(
                 pool,
                 unit=unit,
                 viewport_from=viewport_from_s,

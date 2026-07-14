@@ -82,4 +82,43 @@ describe('TimelineTable', () => {
     expect(screen.getByText('Alice')).toBeInTheDocument()
     expect(screen.getByText('Bob')).toBeInTheDocument()
   })
+
+  it('includes per-topic columns for topics lane', () => {
+    const viewport = {
+      fromMs: Date.UTC(2014, 0, 1),
+      toMs: Date.UTC(2016, 0, 1),
+    }
+    render(
+      <TimelineTable
+        viewport={viewport}
+        unit="month"
+        lanes={specsForKeys(['messages', 'topics'])}
+        laneData={{
+          messages: [{ bucket: '2014-01-01T00:00:00.000Z', count: 5 }],
+          topics: {
+            topics: [
+              {
+                topic_id: 't1',
+                label: 'House',
+                origin: 'automatic',
+                buckets: [{ bucket: '2014-01-01T00:00:00.000Z', count: 3 }],
+              },
+              {
+                topic_id: 't2',
+                label: 'Travel',
+                origin: 'curated',
+                buckets: [{ bucket: '2014-01-01T00:00:00.000Z', count: 7 }],
+              },
+            ],
+          },
+        }}
+      />,
+    )
+
+    const table = screen.getByTestId('timeline-table')
+    expect(table.querySelector('[data-topic-col="t1"]')?.textContent).toBe('House')
+    expect(table.querySelector('[data-topic-col="t2"]')?.textContent).toBe('Travel')
+    expect(table.querySelector('[data-topic-cell="t1"]')?.textContent).toBe('3')
+    expect(table.querySelector('[data-topic-cell="t2"]')?.textContent).toBe('7')
+  })
 })

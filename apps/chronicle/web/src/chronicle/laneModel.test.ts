@@ -83,6 +83,54 @@ describe('laneModel', () => {
     })
     expect(laneAtY(AXIS_H + LANE_GAP + 10, layout)).toBe('events')
   })
+
+  it('topics lane is multirow with topic-purple hit keys', () => {
+    const multi = specsForKeys(['topics'])
+    expect(multi[0]?.kind).toBe('multirow')
+    expect(multi[0]?.key).toBe('topics')
+    const hMulti = canvasHeightForLanes(multi, {
+      topics: {
+        topics: [
+          {
+            topic_id: 't1',
+            label: 'House',
+            origin: 'automatic',
+            buckets: [],
+          },
+          {
+            topic_id: 't2',
+            label: 'Travel',
+            origin: 'curated',
+            buckets: [],
+          },
+        ],
+      },
+    })
+    expect(hMulti).toBe(
+      AXIS_H + LANE_GAP + MULTIROW_HEADER_H + 2 * MULTIROW_ROW_H,
+    )
+    const layout = layoutLanes(multi, {
+      topics: {
+        topics: [
+          {
+            topic_id: 't1',
+            label: 'House',
+            origin: 'automatic',
+            buckets: [],
+          },
+          {
+            topic_id: 't2',
+            label: 'Travel',
+            origin: 'curated',
+            buckets: [],
+          },
+        ],
+      },
+    })
+    const multiTop = layout[0]!.top + MULTIROW_HEADER_H + 1
+    expect(laneAtY(multiTop, layout)).toBe('topics:t1')
+    expect(laneAtY(multiTop + MULTIROW_ROW_H, layout)).toBe('topics:t2')
+  })
 })
 
 describe('eventPositionMs day-floor', () => {

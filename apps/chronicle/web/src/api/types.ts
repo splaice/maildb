@@ -191,6 +191,19 @@ export interface TopPeopleLane {
   contacts: TopPeopleContact[]
 }
 
+/** topics lane: activity bucket series for one topic. */
+export interface TopicSeries {
+  topic_id: string
+  label: string
+  origin: string
+  buckets: BucketPoint[]
+}
+
+/** topics lane payload (top topics by volume; multirow). */
+export interface TopicsLane {
+  topics: TopicSeries[]
+}
+
 /** Sparse event diamond mark on the events lane. */
 export interface EventLaneMark {
   event_id: string
@@ -210,8 +223,8 @@ export interface EventsLane {
   truncated: boolean
 }
 
-/** A bars-style lane is BucketPoint[]; top_people / events are nested objects. */
-export type LaneData = BucketPoint[] | TopPeopleLane | EventsLane
+/** A bars-style lane is BucketPoint[]; multirow / events are nested objects. */
+export type LaneData = BucketPoint[] | TopPeopleLane | TopicsLane | EventsLane
 
 export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLane {
   return (
@@ -219,6 +232,15 @@ export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLa
     typeof data === 'object' &&
     !Array.isArray(data) &&
     Array.isArray((data as TopPeopleLane).contacts)
+  )
+}
+
+export function isTopicsLane(data: LaneData | undefined): data is TopicsLane {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray((data as TopicsLane).topics)
   )
 }
 

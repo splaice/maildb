@@ -112,8 +112,34 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
             },
         ).fetchall()
 
+        # Topics coverage (tables may be empty pre-generation).
+        try:
+            topics_count_row = conn.execute("SELECT count(*)::int FROM app_topics").fetchone()
+            assigned_row = conn.execute(
+                "SELECT count(DISTINCT email_id)::int FROM app_topic_members"
+            ).fetchone()
+            last_gen_row = conn.execute(
+                """
+                SELECT at FROM app_audit
+                 WHERE action = 'topics_generate'
+                 ORDER BY at DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            topics_n = int(topics_count_row[0]) if topics_count_row else 0
+            assigned_n = int(assigned_row[0]) if assigned_row else 0
+            last_generated = _iso(last_gen_row[0]) if last_gen_row else None
+        except Exception:
+            # Tables not yet present (pre-migration) — report zeros.
+            topics_n = 0
+            assigned_n = 0
+            last_generated = None
+
     assert threading_row is not None
     assert chunk_emb_row is not None
+
+    embedded_n = int(summary["embedding"]["embedded"])
+    coverage_ratio = (assigned_n / embedded_n) if embedded_n > 0 else 0.0
 
     db = MailDB._from_pool(pool)
     import_records = db.import_history(limit=20)
@@ -172,6 +198,11 @@ def get_archive_health(pool: ConnectionPool) -> dict[str, Any]:
                 "embedded": chunk_emb_row[0],
                 "missing": chunk_emb_row[1],
             },
+        },
+        "topics": {
+            "topics": topics_n,
+            "coverage": coverage_ratio,
+            "last_generated": last_generated,
         },
         "imports": imports,
         "audit_tail": audit_tail,

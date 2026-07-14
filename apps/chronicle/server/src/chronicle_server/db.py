@@ -113,6 +113,29 @@ CREATE TABLE IF NOT EXISTS app_event_claims (
             'direct','supported','conflicting','unresolved')),
     citations  JSONB NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS app_topics (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    label       TEXT NOT NULL,
+    description TEXT,
+    origin      TEXT NOT NULL DEFAULT 'automatic'
+                    CHECK (origin IN ('automatic','curated','manual')),
+    parent_id   UUID REFERENCES app_topics(id),
+    hidden      BOOLEAN NOT NULL DEFAULT FALSE,
+    centroid    vector(768),
+    top_terms   TEXT[] NOT NULL DEFAULT '{}',
+    generation  INT NOT NULL DEFAULT 1,
+    member_count INT NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_topic_members (
+    topic_id   UUID NOT NULL REFERENCES app_topics(id) ON DELETE CASCADE,
+    email_id   UUID NOT NULL,
+    distance   REAL,
+    origin     TEXT NOT NULL DEFAULT 'automatic' CHECK (origin IN ('automatic','manual')),
+    PRIMARY KEY (topic_id, email_id)
+);
+CREATE INDEX IF NOT EXISTS app_topic_members_email_idx ON app_topic_members (email_id);
 """
 
 

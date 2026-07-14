@@ -1,11 +1,27 @@
-import type { BucketPoint, EventLaneMark, LaneData, TopPeopleLane } from '../api/types'
-import { isBucketSeries, isEventsLane, isTopPeopleLane } from '../api/types'
+import type {
+  BucketPoint,
+  EventLaneMark,
+  LaneData,
+  TopicSeries,
+  TopPeopleContact,
+  TopPeopleLane,
+  TopicsLane,
+} from '../api/types'
+import {
+  isBucketSeries,
+  isEventsLane,
+  isTopPeopleLane,
+  isTopicsLane,
+} from '../api/types'
 import type { LaneKey } from '../workingset/urlState'
 
 export type LaneKind = 'bars' | 'multirow' | 'marks'
 
+/** Catalog keys include `topics` even when URL codec lags (server-first lane). */
+export type ChronicleLaneKey = LaneKey | 'topics'
+
 export interface LaneSpec {
-  key: LaneKey
+  key: ChronicleLaneKey
   label: string
   kind: LaneKind
 }
@@ -16,6 +32,7 @@ export const LANE_CATALOG: readonly LaneSpec[] = [
   { key: 'attachments', label: 'Attachments', kind: 'bars' },
   { key: 'people', label: 'People (distinct)', kind: 'bars' },
   { key: 'top_people', label: 'Top people', kind: 'multirow' },
+  { key: 'topics', label: 'Topics', kind: 'multirow' },
   { key: 'events', label: 'Events', kind: 'marks' },
 ] as const
 
@@ -32,6 +49,9 @@ export const EVENT_AMBER = '#E0A84A'
 
 export const PEOPLE_CYAN = '#56d4dd'
 
+/** Spec topic purple (#A78BFA) for topics multirow marks. */
+export const TOPIC_PURPLE = '#A78BFA'
+
 export const AXIS_H = 28
 export const LANE_H = 72
 export const LANE_LABEL_W = 72
@@ -45,14 +65,51 @@ export const MARKS_LANE_H = 56
 export function specsForKeys(keys: readonly string[]): LaneSpec[] {
   const out: LaneSpec[] = []
   for (const key of keys) {
-    const spec = CATALOG_BY_KEY.get(key as LaneKey)
+    const spec = CATALOG_BY_KEY.get(key as ChronicleLaneKey)
     if (spec) out.push(spec)
   }
   return out
 }
 
-export function multirowHeight(contactCount: number): number {
-  return MULTIROW_HEADER_H + MULTIROW_ROW_H * Math.max(0, contactCount)
+export function multirowHeight(rowCount: number): number {
+  return MULTIROW_HEADER_H + MULTIROW_ROW_H * Math.max(0, rowCount)
+}
+
+/** Multirow series rows for top_people or topics (shared canvas/table shape). */
+export interface MultirowSeries {
+  id: string
+  label: string
+  buckets: BucketPoint[]
+}
+
+export function multirowSeriesForLane(
+  spec: LaneSpec,
+  laneData: Record<string, LaneData> | undefined,
+): MultirowSeries[] {
+  const data = laneData?.[spec.key]
+  if (spec.key === 'topics' && isTopicsLane(data)) {
+    return data.topics.map((t) => ({
+      id: t.topic_id,
+      label: t.label,
+      buckets: t.buckets,
+    }))
+  }
+  if (isTopPeopleLane(data)) {
+    return data.contacts.map((c) => ({
+      id: c.contact_id,
+      label: c.display_name,
+      buckets: c.buckets,
+    }))
+  }
+  return []
+}
+
+export function multirowHitPrefix(laneKey: string): string {
+  return laneKey === 'topics' ? 'topics' : 'top_people'
+}
+
+export function multirowMarkColor(laneKey: string): string {
+  return laneKey === 'topics' ? TOPIC_PURPLE : PEOPLE_CYAN
 }
 
 export function laneContentHeight(
@@ -61,9 +118,7 @@ export function laneContentHeight(
 ): number {
   if (spec.kind === 'bars') return LANE_H
   if (spec.kind === 'marks') return MARKS_LANE_H
-  const data = laneData?.[spec.key]
-  const n = isTopPeopleLane(data) ? data.contacts.length : 0
-  return multirowHeight(n)
+  return multirowHeight(multirowSeriesForLane(spec, laneData).length)
 }
 
 /** Total canvas CSS height for the given lane set and data. */
@@ -79,7 +134,7 @@ export function canvasHeightForLanes(
 }
 
 export interface LaneLayoutRow {
-  /** Hit-test id: lane key, or `top_people:<contact_id>` for multirow rows. */
+  /** Hit-test id: lane key, or `top_people:<id>` / `topics:<id>` for multirow. */
   hitKey: string
   /** Y of the top of this hit region (local canvas coords). */
   top: number
@@ -88,8 +143,10 @@ export interface LaneLayoutRow {
   /** Lane key for data lookup. */
   laneKey: string
   kind: LaneKind
-  /** Contact id when multirow row. */
+  /** Contact id when top_people multirow row. */
   contactId?: string
+  /** Topic id when topics multirow row. */
+  topicId?: string
 }
 
 export interface LaneLayoutBlock {
@@ -119,16 +176,17 @@ export function layoutLanes(
         kind: spec.kind,
       })
     } else {
-      const data = laneData?.[spec.key]
-      const contacts = isTopPeopleLane(data) ? data.contacts : []
-      contacts.forEach((c, i) => {
+      const series = multirowSeriesForLane(spec, laneData)
+      const prefix = multirowHitPrefix(spec.key)
+      series.forEach((row, i) => {
         rows.push({
-          hitKey: `top_people:${c.contact_id}`,
+          hitKey: `${prefix}:${row.id}`,
           top: y + MULTIROW_HEADER_H + i * MULTIROW_ROW_H,
           height: MULTIROW_ROW_H,
           laneKey: spec.key,
           kind: 'multirow',
-          contactId: c.contact_id,
+          contactId: prefix === 'top_people' ? row.id : undefined,
+          topicId: prefix === 'topics' ? row.id : undefined,
         })
       })
     }
@@ -169,11 +227,38 @@ export function topPeopleData(
   return isTopPeopleLane(data) ? data : undefined
 }
 
+export function topicsData(
+  laneData: Record<string, LaneData> | undefined,
+): TopicsLane | undefined {
+  const data = laneData?.topics
+  return isTopicsLane(data) ? data : undefined
+}
+
 export function eventsMarks(
   laneData: Record<string, LaneData> | undefined,
 ): EventLaneMark[] {
   const data = laneData?.events
   return isEventsLane(data) ? data.events : []
+}
+
+/** Resolve multirow series by hit key (`top_people:…` or `topics:…`). */
+export function multirowBucketsForHit(
+  hitKey: string,
+  laneData: Record<string, LaneData> | undefined,
+): BucketPoint[] {
+  if (hitKey.startsWith('topics:')) {
+    const topicId = hitKey.slice('topics:'.length)
+    const topics = topicsData(laneData)
+    const row = topics?.topics.find((t: TopicSeries) => t.topic_id === topicId)
+    return row?.buckets ?? []
+  }
+  if (hitKey.startsWith('top_people:')) {
+    const contactId = hitKey.slice('top_people:'.length)
+    const tp = topPeopleData(laneData)
+    const row = tp?.contacts.find((c: TopPeopleContact) => c.contact_id === contactId)
+    return row?.buckets ?? []
+  }
+  return []
 }
 
 /**

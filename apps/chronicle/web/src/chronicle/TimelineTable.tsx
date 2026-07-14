@@ -1,6 +1,7 @@
-import type { BucketPoint, LaneData, TopPeopleContact } from '../api/types'
-import { isBucketSeries, isTopPeopleLane } from '../api/types'
-import type { LaneSpec } from './laneModel'
+import type { BucketPoint, LaneData } from '../api/types'
+import { isBucketSeries } from '../api/types'
+import type { LaneSpec, MultirowSeries } from './laneModel'
+import { multirowSeriesForLane } from './laneModel'
 import { formatPeriodLabel, formatPeriodRange, type Viewport } from './timeScale'
 
 export interface TimelineTableProps {
@@ -15,19 +16,36 @@ type MergedRow = {
   bucket: string
   /** bars lane key → count */
   bars: Record<string, number>
-  /** contact_id → count for top_people */
-  contacts: Record<string, number>
+  /** multirow series id → count (top_people contacts / topics) */
+  multi: Record<string, number>
+}
+
+/** Collect multirow columns from all multirow lanes in catalog order. */
+export function multirowColumns(
+  lanes: LaneSpec[],
+  laneData: Record<string, LaneData>,
+): { laneKey: string; series: MultirowSeries }[] {
+  const out: { laneKey: string; series: MultirowSeries }[] = []
+  for (const spec of lanes) {
+    if (spec.kind !== 'multirow') continue
+    for (const s of multirowSeriesForLane(spec, laneData)) {
+      out.push({ laneKey: spec.key, series: s })
+    }
+  }
+  return out
 }
 
 /** Collect contact columns from top_people (stable order from server). */
 export function topPeopleContacts(
   laneData: Record<string, LaneData>,
-): TopPeopleContact[] {
-  const tp = laneData.top_people
-  return isTopPeopleLane(tp) ? tp.contacts : []
+): MultirowSeries[] {
+  return multirowSeriesForLane(
+    { key: 'top_people', label: 'Top people', kind: 'multirow' },
+    laneData,
+  )
 }
 
-/** Merge all bar lanes + top_people per-contact counts by bucket timestamp. */
+/** Merge all bar lanes + multirow per-series counts by bucket timestamp. */
 export function mergeBucketRows(
   lanes: LaneSpec[],
   laneData: Record<string, LaneData>,
@@ -37,7 +55,7 @@ export function mergeBucketRows(
   const ensure = (bucket: string): MergedRow => {
     let row = map.get(bucket)
     if (!row) {
-      row = { bucket, bars: {}, contacts: {} }
+      row = { bucket, bars: {}, multi: {} }
       map.set(bucket, row)
     }
     return row
@@ -50,11 +68,12 @@ export function mergeBucketRows(
       for (const p of points) {
         ensure(p.bucket).bars[spec.key] = p.count
       }
-    } else if (spec.key === 'top_people') {
-      const contacts = topPeopleContacts(laneData)
-      for (const c of contacts) {
-        for (const p of c.buckets) {
-          ensure(p.bucket).contacts[c.contact_id] = p.count
+    } else if (spec.kind === 'multirow') {
+      const series = multirowSeriesForLane(spec, laneData)
+      for (const s of series) {
+        for (const p of s.buckets) {
+          // Prefix id with lane key to avoid contact/topic id collisions.
+          ensure(p.bucket).multi[`${spec.key}:${s.id}`] = p.count
         }
       }
     }
@@ -73,8 +92,8 @@ function bucketLabel(iso: string): string {
 
 /**
  * Accessible table alternative for the timeline canvas (A11Y-002).
- * One row per bucket; columns follow configured lanes. For top_people,
- * one column per contact (contact × bucket counts).
+ * One row per bucket; columns follow configured lanes. For multirow lanes
+ * (top_people / topics), one column per series (series × bucket counts).
  */
 export function TimelineTable({
   viewport,
@@ -83,10 +102,9 @@ export function TimelineTable({
   laneData,
 }: TimelineTableProps) {
   const rows = mergeBucketRows(lanes, laneData)
-  const contacts =
-    lanes.some((s) => s.key === 'top_people') ? topPeopleContacts(laneData) : []
+  const multiCols = multirowColumns(lanes, laneData)
   const barLanes = lanes.filter((s) => s.kind === 'bars')
-  const colCount = 1 + barLanes.length + contacts.length
+  const colCount = 1 + barLanes.length + multiCols.length
   const caption = `Timeline buckets (${unit}), ${formatPeriodRange(viewport)}`
 
   return (
@@ -108,15 +126,16 @@ export function TimelineTable({
                 {spec.label}
               </th>
             ))}
-            {contacts.map((c) => (
+            {multiCols.map(({ laneKey, series: s }) => (
               <th
-                key={c.contact_id}
+                key={`${laneKey}:${s.id}`}
                 scope="col"
                 className="px-3 py-2 font-sans font-medium"
-                data-contact-col={c.contact_id}
-                title={c.display_name}
+                data-contact-col={laneKey === 'top_people' ? s.id : undefined}
+                data-topic-col={laneKey === 'topics' ? s.id : undefined}
+                title={s.label}
               >
-                {c.display_name}
+                {s.label}
               </th>
             ))}
           </tr>
@@ -145,13 +164,14 @@ export function TimelineTable({
                     {(row.bars[spec.key] ?? 0).toLocaleString()}
                   </td>
                 ))}
-                {contacts.map((c) => (
+                {multiCols.map(({ laneKey, series: s }) => (
                   <td
-                    key={c.contact_id}
+                    key={`${laneKey}:${s.id}`}
                     className="px-3 py-1.5"
-                    data-contact-cell={c.contact_id}
+                    data-contact-cell={laneKey === 'top_people' ? s.id : undefined}
+                    data-topic-cell={laneKey === 'topics' ? s.id : undefined}
                   >
-                    {(row.contacts[c.contact_id] ?? 0).toLocaleString()}
+                    {(row.multi[`${laneKey}:${s.id}`] ?? 0).toLocaleString()}
                   </td>
                 ))}
               </tr>
