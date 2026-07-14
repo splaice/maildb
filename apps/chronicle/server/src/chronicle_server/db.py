@@ -26,6 +26,28 @@ CREATE TABLE IF NOT EXISTS app_audit (
     action     TEXT NOT NULL,
     detail     JSONB NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS app_answers (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    question          TEXT NOT NULL,
+    scope_fingerprint TEXT NOT NULL,
+    model_route       TEXT NOT NULL,
+    policy_version    TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('complete','error','cancelled')),
+    answer_text       TEXT,
+    retrieval         JSONB NOT NULL DEFAULT '[]',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS app_citations (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    answer_id   UUID NOT NULL REFERENCES app_answers(id) ON DELETE CASCADE,
+    marker      TEXT NOT NULL,
+    source_id   TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    location    JSONB,
+    excerpt     TEXT,
+    excerpt_hash TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

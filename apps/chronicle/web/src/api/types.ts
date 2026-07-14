@@ -399,3 +399,40 @@ export interface SearchResponse {
   facet_basis: string | null
   degraded: Record<string, string> | null
 }
+
+/** POST /api/ask */
+
+export type DeskMode = 'search' | 'ask'
+
+export interface AskRequest {
+  question: string
+  scope?: QueryScope
+  mode?: 'scope'
+}
+
+export interface AskUnavailableResponse {
+  available: false
+  reason: string
+}
+
+export interface AskRetrievalPayload {
+  count: number
+  types: { message?: number; attachment?: number; [k: string]: number | undefined }
+  degraded: Record<string, string> | null
+}
+
+export interface AskCitationPayload {
+  marker: string
+  source_id: string
+  source_type: string
+  excerpt: string
+  location: { char_start?: number; char_end?: number; [k: string]: unknown } | null
+}
+
+export interface AskDonePayload {
+  answer_id: string
+  model_route: string
+  policy_version: string
+  generated_at: string
+  unmatched_markers: string[]
+}

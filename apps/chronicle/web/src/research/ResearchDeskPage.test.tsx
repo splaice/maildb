@@ -582,4 +582,70 @@ describe('ResearchDeskPage', () => {
       expect(screen.queryByTestId('unsupported-chip-topic:x')).not.toBeInTheDocument()
     })
   })
+
+  it('Ask mode mounts AnswerBlock above results and keeps search results (RD-004)', async () => {
+    const encoder = new TextEncoder()
+    const sse =
+      'event: retrieval\ndata: {"count":1,"types":{"message":1},"degraded":null}\n\n' +
+      'event: token\ndata: {"text":"Metal [S1]."}\n\n' +
+      'event: citation\ndata: {"marker":"[S1]","source_id":"msg_1","source_type":"message","excerpt":"roof","location":{"char_start":0,"char_end":4}}\n\n' +
+      'event: done\ndata: {"answer_id":"a1","model_route":"ollama:llama3.2","policy_version":"ask-v1","generated_at":"2026-07-13T00:00:00Z","unmatched_markers":[]}\n\n'
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/archive/summary')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              accounts: [],
+              date_range: { from: null, to: null },
+              counts: { messages: 0, threads: 0, attachments: 0, contacts: 0 },
+              extraction: { extracted: 0, failed: 0, skipped: 0, pending: 0 },
+              embedding: { embedded: 0, missing: 0 },
+              versions: { schema: 'x', api: '0' },
+            }),
+          } as Response
+        }
+        if (String(url).includes('/api/ask')) {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(sse))
+              controller.close()
+            },
+          })
+          return new Response(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          })
+        }
+        if (String(url).includes('/api/search')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              mockSearchResponse({
+                results: [msgResult],
+                scope: { free_text: 'roof' },
+              }),
+          } as Response
+        }
+        throw new Error(`unexpected: ${url}`)
+      }),
+    )
+
+    renderResearch()
+    fireEvent.click(screen.getByTestId('desk-mode-ask'))
+    fireEvent.change(screen.getByTestId('research-query-input'), {
+      target: { value: 'roof' },
+    })
+    fireEvent.submit(screen.getByTestId('query-row'))
+
+    expect(await screen.findByTestId('answer-block')).toBeInTheDocument()
+    expect(await screen.findByTestId('result-card-msg_1')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId('ask-answer-text')).toHaveTextContent(/Metal/)
+    })
+  })
 })

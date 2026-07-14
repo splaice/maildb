@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router'
 
 import { apiPost, ApiError } from '../api/client'
 import type {
+  DeskMode,
   QueryScope,
   SearchMode,
   SearchRequest,
   SearchResponse,
   SearchResult,
 } from '../api/types'
+import { AnswerBlock } from '../ask/AnswerBlock'
 import { isScopePristine } from '../workingset/urlState'
 import type { ResearchGrouping } from '../workingset/urlState'
 import { useWorkingSetStore } from '../workingset/store'
@@ -80,6 +82,7 @@ export function ResearchDeskPage() {
   const setHasAttachment = useWorkingSetStore((s) => s.setHasAttachment)
 
   const [inputValue, setInputValue] = useState(storeQuery)
+  const [deskMode, setDeskMode] = useState<DeskMode>('search')
   const [results, setResults] = useState<SearchResult[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState<string[]>([])
@@ -91,6 +94,9 @@ export function ResearchDeskPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasSearched, setHasSearched] = useState(false)
+  const [askQuestion, setAskQuestion] = useState('')
+  const [askRunId, setAskRunId] = useState(0)
+  const [askScope, setAskScope] = useState<QueryScope>({})
   const abortRef = useRef<AbortController | null>(null)
   const freeTextRef = useRef(storeQuery)
 
@@ -189,12 +195,32 @@ export function ResearchDeskPage() {
     const q = inputValue
     setQuery(q)
     freeTextRef.current = q
+    const sc = useWorkingSetStore.getState().scope
+    if (deskMode === 'ask') {
+      // Ask streams grounded answer; also run search so ranked sources stay visible (RD-004).
+      setAskQuestion(q)
+      setAskScope(stripFreeText(sc))
+      setAskRunId((n) => n + 1)
+      void runSearch({ query: q, mode: 'hybrid', scope: sc })
+      return
+    }
     void runSearch({
       query: q,
       mode,
-      scope: useWorkingSetStore.getState().scope,
+      scope: sc,
     })
   }
+
+  const onSelectAskSource = useCallback(
+    (sourceId: string, sourceType: string) => {
+      if (sourceType === 'attachment') {
+        setSelection({ kind: 'attachment', sid: sourceId })
+      } else {
+        setSelection({ kind: 'message', sid: sourceId })
+      }
+    },
+    [setSelection],
+  )
 
   const reRunWithScope = (nextScope: QueryScope) => {
     setScope(nextScope)
@@ -353,28 +379,57 @@ export function ResearchDeskPage() {
       >
         <div>
           <h2 className="mb-2 text-sm font-medium text-text-primary">Mode</h2>
-          <div role="radiogroup" aria-label="Retrieval mode" className="space-y-2">
-            {MODES.map((m) => (
-              <label
-                key={m.value}
-                className="flex cursor-pointer gap-2 rounded-md border border-steel bg-graphite-900 p-2"
-                data-testid={`mode-${m.value}`}
+          <div
+            role="radiogroup"
+            aria-label="Desk mode"
+            className="mb-3 flex gap-1"
+            data-testid="desk-mode-row"
+          >
+            {(['search', 'ask'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={[
+                  btnClass,
+                  deskMode === m ? 'border-action text-action' : '',
+                ].join(' ')}
+                aria-pressed={deskMode === m}
+                onClick={() => setDeskMode(m)}
+                data-testid={`desk-mode-${m}`}
               >
-                <input
-                  type="radio"
-                  name="search-mode"
-                  value={m.value}
-                  checked={mode === m.value}
-                  onChange={() => onModeChange(m.value)}
-                  className="mt-0.5"
-                />
-                <span>
-                  <span className="block text-sm text-text-primary">{m.label}</span>
-                  <span className="block text-[11px] text-text-muted">{m.description}</span>
-                </span>
-              </label>
+                {m === 'search' ? 'Search' : 'Ask'}
+              </button>
             ))}
           </div>
+          {deskMode === 'search' ? (
+            <div role="radiogroup" aria-label="Retrieval mode" className="space-y-2">
+              {MODES.map((m) => (
+                <label
+                  key={m.value}
+                  className="flex cursor-pointer gap-2 rounded-md border border-steel bg-graphite-900 p-2"
+                  data-testid={`mode-${m.value}`}
+                >
+                  <input
+                    type="radio"
+                    name="search-mode"
+                    value={m.value}
+                    checked={mode === m.value}
+                    onChange={() => onModeChange(m.value)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="block text-sm text-text-primary">{m.label}</span>
+                    <span className="block text-[11px] text-text-muted">{m.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-text-muted" data-testid="ask-mode-hint">
+              Answer from the current working set with citations. Search remains available if the
+              model is offline.
+            </p>
+          )}
         </div>
 
         <div>
@@ -495,10 +550,10 @@ export function ResearchDeskPage() {
             data-testid="research-query-input"
           />
           <span className="self-center text-[11px] text-text-muted" data-testid="mode-badge">
-            {mode}
+            {deskMode === 'ask' ? 'ask' : mode}
           </span>
           <button type="submit" className={btnClass} data-testid="research-submit">
-            Search
+            {deskMode === 'ask' ? 'Ask' : 'Search'}
           </button>
         </form>
 
@@ -509,6 +564,15 @@ export function ResearchDeskPage() {
           onRemove={onRemoveChip}
           onRemoveUnsupported={onRemoveUnsupported}
         />
+
+        {deskMode === 'ask' && askRunId > 0 ? (
+          <AnswerBlock
+            question={askQuestion}
+            scope={askScope}
+            runId={askRunId}
+            onSelectSource={onSelectAskSource}
+          />
+        ) : null}
 
         {degraded?.semantic ? (
           <div

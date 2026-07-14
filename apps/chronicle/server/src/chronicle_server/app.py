@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from chronicle_server.archive import router as archive_router
+from chronicle_server.ask import router as ask_router
 from chronicle_server.auth import router as auth_router
 from chronicle_server.chronicle import router as chronicle_router
 from chronicle_server.config import ChronicleSettings
@@ -65,6 +66,7 @@ def create_app(settings: ChronicleSettings | None = None) -> FastAPI:
     app.include_router(health_router, prefix="/api/health")
     app.include_router(search_router, prefix="/api")
     app.include_router(sources_router, prefix="/api")
+    app.include_router(ask_router, prefix="/api")
     # Stash settings early so tests can inspect before lifespan if needed.
     app.state.settings = resolved
     return app

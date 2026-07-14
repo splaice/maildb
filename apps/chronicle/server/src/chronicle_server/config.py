@@ -19,3 +19,9 @@ class ChronicleSettings(BaseSettings):
     session_max_age_s: int = 43200  # 12h
     cookie_secure: bool = True
     cookie_name: str = "chronicle_session"
+    # Ask / model gateway (Phase 2 Task 2.4)
+    answer_model: str = "llama3.2"
+    ollama_host: str | None = None  # None → ollama client default
+    ask_enabled: bool = True
+    ask_source_limit: int = 12
+    policy_version: str = "ask-v1"
