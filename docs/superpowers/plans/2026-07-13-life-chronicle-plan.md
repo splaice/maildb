@@ -75,9 +75,17 @@ Tasks are cheap-coder-sized (≈ one focused PR or less). One PR per phase, one 
 
 **Phase 3 exit criterion (spec §20.1):** generated events are reviewable, evidence-backed, and versioned.
 
-### Phase 4 — Secondary exploration (elaborate at start)
+### Phase 4 — Secondary exploration (PR: `cheap-coder/chronicle-phase-4`)
 
-Topics subsystem (clustering job over embeddings, hierarchy, curation with manual precedence), Topic Atlas (hierarchy default, projection with LOD, river, matrix), person/organization profiles + ego graph (contacts synergy), version families.
+| Task | Scope |
+| --- | --- |
+| 4.1 | Topics subsystem: `app_topics`/`app_topic_members` (pgvector centroids), deterministic k-means over an embedding sample + one set-based full-corpus assignment pass, term-based labels with optional gateway polish, curation CRUD with manual precedence (TA-005), topics lane |
+| 4.2 | Topic Atlas UI: hierarchy default (TA-001), topic detail + river (Chronicle-linked), topic×year matrix with table alternative, centroid-PCA projection with exploratory disclaimer (TA-003 LOD: topics only, never all sources) |
+| 4.3 | People & Organizations UI: person profile over the contacts subsystem (identity, span, activity → Chronicle, topics, sources), merge/split curation UI (PE-001), org view by domain/kind |
+| 4.4 | Ego graph: bounded co-participation edges endpoint (set-based), SVG graph with edge→thread-evidence drill (PE-003), no relationship-quality labels (PE-004) |
+| 4.5 | Version families (Table 25 probable-version heuristic + compare view) + workflows B and D acceptance tests |
+
+**Phase 4 exit criterion (spec §20.1):** every secondary lens preserves scope and exposes authoritative source lists.
 
 ### Phase 5 — Hardening (elaborate at start)
 
@@ -94,7 +102,7 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 
 ## 5. STATE — live progress (update after every task)
 
-**Next up:** Phase 4 (secondary exploration) — elaborate task table, then 4.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
+**Next up:** Phase 5 (hardening) — elaborate task table, then 5.1. Goal mode active (2026-07-13): user delegated review+merge of all phases to Claude via /goal.
 
 | Date | Task | PR | Outcome |
 | --- | --- | --- | --- |
@@ -123,3 +131,9 @@ WCAG 2.2 AA audit, security review (CSP, sanitizer corpus, IDOR/enumeration), pe
 | 2026-07-13 | 3.3 reconstruction: claim-evidence matrix, adopt/suggestions, stale checks, dismissed list | chronicle-phase-3 | Approved; 222 server / 203 web tests |
 | 2026-07-13 | 3.4 compare mode: aligned/small-multiples, normalize, event anchor | chronicle-phase-3 | Approved; 228 server / 238 web tests |
 | 2026-07-13 | 3.5 workflow A acceptance + criterion 4; keyboard glue | chronicle-phase-3 | Approved; Phase 3 complete (244 web tests, 0 todos) |
+| 2026-07-13 | Phase 3 PR #109 merged (36b7e97) | #109 | CI green |
+| 2026-07-13 | 4.1 topics subsystem: seeded k-means, one-statement assignment, manual precedence, topics lane | chronicle-phase-4 | Approved; 238 server / 246 web tests |
+| 2026-07-13 | 4.2 Topic Atlas: hierarchy/river/matrix/projection + members list | chronicle-phase-4 | Approved; 243 server / 263 web tests |
+| 2026-07-13 | 4.3 People & Orgs UI over contacts subsystem (merge/split, signals, owner classes) | chronicle-phase-4 | Approved; 260 server / 279 web tests |
+| 2026-07-13 | 4.4 ego graph: bounded evidence-backed edges, radial SVG, table alt | chronicle-phase-4 | Approved; 269 server / 290 web tests |
+| 2026-07-13 | 4.5 version families + workflows B/D | chronicle-phase-4 | Approved; Phase 4 complete (300 server / 293 web tests) |

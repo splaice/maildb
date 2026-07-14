@@ -191,6 +191,132 @@ export interface TopPeopleLane {
   contacts: TopPeopleContact[]
 }
 
+/** topics lane: activity bucket series for one topic. */
+export interface TopicSeries {
+  topic_id: string
+  label: string
+  origin: string
+  buckets: BucketPoint[]
+}
+
+/** topics lane payload (top topics by volume; multirow). */
+export interface TopicsLane {
+  topics: TopicSeries[]
+}
+
+/** Topic origin (Table 21). */
+export type TopicOrigin = 'automatic' | 'curated' | 'manual'
+
+/** GET /api/topics tree node. */
+export interface TopicTreeNode {
+  id: string
+  label: string
+  origin: TopicOrigin | string
+  member_count: number
+  hidden: boolean
+  top_terms: string[]
+  children: TopicTreeNode[]
+}
+
+export interface TopicListResponse {
+  topics: TopicTreeNode[]
+}
+
+export interface TopicActivityBucket {
+  bucket: string
+  count: number
+}
+
+export interface TopicMemberEnvelope {
+  id: string
+  subject: string | null
+  sender_name: string | null
+  sender_address: string | null
+  date: string | null
+  mailbox: string | null
+  thread_id: string | null
+  distance: number | null
+}
+
+/** GET /api/topics/{id} */
+export interface TopicDetail {
+  id: string
+  label: string
+  description: string | null
+  origin: TopicOrigin | string
+  parent_id: string | null
+  hidden: boolean
+  top_terms: string[]
+  generation: number
+  member_count: number
+  created_at: string | null
+  updated_at: string | null
+  activity: TopicActivityBucket[]
+  members: TopicMemberEnvelope[]
+}
+
+export interface TopicPatchRequest {
+  label?: string
+  description?: string | null
+  hidden?: boolean
+  parent_id?: string | null
+}
+
+/** GET /api/topics/river */
+export interface TopicRiverSeries {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  buckets: BucketPoint[]
+}
+
+export interface TopicRiverResponse {
+  unit: string
+  mode_hint: 'absolute' | string
+  from: string | null
+  to: string | null
+  topics: TopicRiverSeries[]
+}
+
+/** GET /api/topics/matrix */
+export interface TopicMatrixRow {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  cells: Record<string, number>
+  row_total: number
+}
+
+export interface TopicMatrixResponse {
+  by: string
+  columns: string[]
+  rows: TopicMatrixRow[]
+  column_totals: Record<string, number>
+  grand_total: number
+}
+
+/** GET /api/topics/projection — topic-level only (TA-003). */
+export interface TopicProjectionPoint {
+  topic_id: string
+  label: string
+  origin: TopicOrigin | string
+  member_count: number
+  x: number
+  y: number
+}
+
+export interface TopicProjectionResponse {
+  points: TopicProjectionPoint[]
+  excluded_without_centroid: number
+  note: string
+}
+
+/** GET /api/topics/{id}/members */
+export interface TopicMembersResponse {
+  items: TopicMemberEnvelope[]
+  next_cursor: string | null
+}
+
 /** Sparse event diamond mark on the events lane. */
 export interface EventLaneMark {
   event_id: string
@@ -210,8 +336,8 @@ export interface EventsLane {
   truncated: boolean
 }
 
-/** A bars-style lane is BucketPoint[]; top_people / events are nested objects. */
-export type LaneData = BucketPoint[] | TopPeopleLane | EventsLane
+/** A bars-style lane is BucketPoint[]; multirow / events are nested objects. */
+export type LaneData = BucketPoint[] | TopPeopleLane | TopicsLane | EventsLane
 
 export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLane {
   return (
@@ -219,6 +345,15 @@ export function isTopPeopleLane(data: LaneData | undefined): data is TopPeopleLa
     typeof data === 'object' &&
     !Array.isArray(data) &&
     Array.isArray((data as TopPeopleLane).contacts)
+  )
+}
+
+export function isTopicsLane(data: LaneData | undefined): data is TopicsLane {
+  return (
+    data != null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    Array.isArray((data as TopicsLane).topics)
   )
 }
 
@@ -921,4 +1056,150 @@ export interface WorkspaceManifestRow {
   sender?: string | null
   subject_or_filename?: string | null
   excerpt_hash?: string | null
+}
+
+/** People & Organizations (GET /api/people) */
+
+export type ContactKind =
+  | 'human'
+  | 'organization'
+  | 'automated'
+  | 'mailing_list'
+  | 'unknown'
+
+export type AddressClass = 'owner' | 'external'
+
+export interface ContactSummary {
+  id: string
+  display_name: string | null
+  kind: ContactKind | string
+  kind_source: string | null
+  tags: string[]
+  human_probability: number | null
+  addresses: string[]
+  name_variants: string[]
+  messages_from: number
+  messages_to: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface PeopleListResponse {
+  items: ContactSummary[]
+  total: number | null
+  next_cursor: string | null
+  limit: number
+  offset: number
+}
+
+export interface ContactAddressDetail {
+  address: string
+  is_user: boolean
+  messages_from: number
+  messages_to: number
+  first_seen: string | null
+  last_seen: string | null
+}
+
+export interface ContactActivityBucket {
+  bucket: string
+  count: number
+}
+
+export interface ContactTopic {
+  id: string
+  label: string
+  count: number
+}
+
+export interface ContactMergeRecord {
+  id: string
+  source_id: string
+  target_id: string
+  merged_at: string | null
+}
+
+/** GET /api/people/:id */
+export interface ContactCard extends ContactSummary {
+  notes: string | null
+  metadata: Record<string, unknown>
+  classification_signals: Record<string, number> | null
+  classified_at: string | null
+  address_classes: Record<string, AddressClass | string>
+  address_details: ContactAddressDetail[]
+  activity: ContactActivityBucket[]
+  topics: ContactTopic[]
+  thread_count: number
+  merges?: ContactMergeRecord[]
+  merge_id?: string | null
+}
+
+export interface ContactPatchRequest {
+  kind?: ContactKind
+  tags?: string[]
+  notes?: string | null
+  display_name?: string | null
+}
+
+export interface MergeCandidateSide {
+  display_name: string | null
+  primary_address: string | null
+  msg_count: number
+  contact_id: string
+}
+
+export interface MergeCandidatePair {
+  norm_name: string
+  a: MergeCandidateSide
+  b: MergeCandidateSide
+}
+
+export interface MergeCandidatesResponse {
+  items: MergeCandidatePair[]
+}
+
+export interface MergeRequest {
+  source_id: string
+  target_id: string
+}
+
+export interface UnmergeRequest {
+  merge_id: string
+}
+
+export interface UnmergeResponse {
+  source: ContactCard
+  target: ContactCard
+}
+
+/** GET /api/people/:id/graph — depth-1 co-participation ego network (PE-003). */
+
+export type EgoGraphNodeKind = ContactKind | 'address' | string
+
+export interface EgoGraphNode {
+  id: string
+  label: string
+  kind: EgoGraphNodeKind
+  is_ego: boolean
+}
+
+export interface EgoGraphEdgeEvidence {
+  thread_ids: string[]
+}
+
+export interface EgoGraphEdge {
+  source: string
+  target: string
+  kind: 'thread_co_participation' | string
+  shared_threads: number
+  first: string | null
+  last: string | null
+  evidence: EgoGraphEdgeEvidence
+}
+
+export interface EgoGraphResponse {
+  nodes: EgoGraphNode[]
+  edges: EgoGraphEdge[]
+  truncated: boolean
+  total_coparticipants: number
 }

@@ -56,6 +56,13 @@ def _assert_health_shape(body: dict[str, Any]) -> None:
         _assert_nonneg_int(emb[bucket]["embedded"])
         _assert_nonneg_int(emb[bucket]["missing"])
 
+    assert "topics" in body
+    topics = body["topics"]
+    _assert_nonneg_int(topics["topics"])
+    assert isinstance(topics["coverage"], (int, float))
+    assert topics["coverage"] >= 0
+    assert "last_generated" in topics  # may be null
+
     assert "imports" in body
     assert isinstance(body["imports"], list)
     assert len(body["imports"]) <= 20

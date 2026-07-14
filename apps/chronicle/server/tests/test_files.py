@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from chronicle_server.files import CONTENT_TYPE_FAMILY_PATTERNS, _match_magic
+import pytest
+
+from chronicle_server.files import (
+    CONTENT_TYPE_FAMILY_PATTERNS,
+    _match_magic,
+    amount_changes_from_hunks,
+    diff_lines,
+    filename_stem,
+)
 from chronicle_server.ids import encode_source_id
 from tests.conftest import PASSWORD, USERNAME
 
@@ -27,6 +35,8 @@ def test_attachments_require_auth(client: TestClient) -> None:
     assert client.post("/api/attachments/list", json={}).status_code == 401
     assert client.get("/api/attachments/att_1/preview").status_code == 401
     assert client.get("/api/attachments/att_1/download").status_code == 401
+    assert client.get("/api/attachments/att_1/family").status_code == 401
+    assert client.get("/api/attachments/compare?a=att_1&b=att_2").status_code == 401
 
 
 # --- unit: family mapping + magic ---
@@ -71,10 +81,12 @@ def _seed_attachment(
     reason: str | None = None,
     markdown: str | None = "extracted text",
     email_id: Any | None = None,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
     eid = email_id or uuid4()
     message_id = f"<files-test-{eid}@example.com>"
     sha = sha256 or hashlib.sha256(f"{eid}:{filename}:{storage_path}".encode()).hexdigest()
+    tid = thread_id if thread_id is not None else f"thread-{eid}"
 
     with pool.connection() as conn:
         # Email may already exist when linking another attachment.
@@ -97,7 +109,7 @@ def _seed_attachment(
                 {
                     "id": eid,
                     "mid": message_id,
-                    "tid": f"thread-{eid}",
+                    "tid": tid,
                     "subject": subject,
                     "sname": sender_name,
                     "saddr": sender_address,
@@ -610,3 +622,309 @@ def test_download_disposition_and_audit(
         assert detail.get("attachment_id") == seed["att_sid"]
     finally:
         _cleanup_seeds(db_pool, [seed])
+
+
+# --- filename_stem (Table 25 / FI-004) ---
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("Final_Roof_Estimate_v3.pdf", "final_roof_estimate"),
+        ("final_roof_estimate.pdf", "final_roof_estimate"),
+        ("roof_photos.zip", "roof_photos"),
+        ("invoice_final.docx", "invoice"),
+        ("invoice-draft.pdf", "invoice"),
+        ("report copy.pdf", "report"),
+        ("report (2).pdf", "report"),
+        ("report(3).xlsx", "report"),
+        ("Budget_v12_final.pdf", "budget"),
+        ("notes.txt", "notes"),
+        ("UPPER_CASE_V2.PDF", "upper_case"),
+        ("file-v1-copy-final.pdf", "file"),
+        ("noext", "noext"),
+        ("", ""),
+        ("estimate_copy_2.pdf", "estimate"),
+    ],
+)
+def test_filename_stem_table(filename: str, expected: str) -> None:
+    assert filename_stem(filename) == expected
+
+
+def test_filename_stem_equivalence_examples() -> None:
+    assert filename_stem("Final_Roof_Estimate_v3.pdf") == filename_stem("final_roof_estimate.pdf")
+    assert filename_stem("Final_Roof_Estimate_v3.pdf") != filename_stem("roof_photos.zip")
+
+
+# --- diff_lines + amount_changes (pure) ---
+
+
+def test_diff_lines_basic_hunks() -> None:
+    a = "line1\nline2\nline3\n"
+    b = "line1\nline2 changed\nline3\nline4\n"
+    result = diff_lines(a, b, context=2)
+    assert "hunks" in result
+    assert result["truncated"] is False
+    assert len(result["hunks"]) >= 1
+    kinds = {ln["kind"] for h in result["hunks"] for ln in h["lines"]}
+    assert "del" in kinds
+    assert "add" in kinds
+    # same context lines present
+    assert any(
+        ln["kind"] == "same" and ln["text"] == "line1" for h in result["hunks"] for ln in h["lines"]
+    )
+
+
+def test_diff_lines_identical() -> None:
+    result = diff_lines("a\nb\n", "a\nb\n", context=2)
+    # SequenceMatcher get_grouped_opcodes yields no groups when fully equal
+    assert result["hunks"] == []
+    assert result["truncated"] is False
+
+
+def test_diff_lines_hunk_cap() -> None:
+    # Many independent one-line changes → many hunks when context=0
+    a_lines = [f"keep-{i}" if i % 2 == 0 else f"old-{i}" for i in range(500)]
+    b_lines = [f"keep-{i}" if i % 2 == 0 else f"new-{i}" for i in range(500)]
+    result = diff_lines("\n".join(a_lines), "\n".join(b_lines), context=0)
+    assert len(result["hunks"]) <= 200
+    if len(result["hunks"]) == 200:
+        assert result["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expect_match"),
+    [
+        ("Total: $1,234.56", True),
+        ("€ 99", True),
+        ("£5000", True),
+        ("price 42", True),
+        ("no money here", False),
+        ("$ 12.00 due", True),
+        # Pattern matches the digit "3" inside "v3"
+        ("version v3 only", True),
+        ("just words", False),
+    ],
+)
+def test_amount_regex_on_changed_lines(text: str, expect_match: bool) -> None:
+    hunks = [{"a_start": 0, "b_start": 0, "lines": [{"kind": "add", "text": text}]}]
+    changes = amount_changes_from_hunks(hunks)
+    if expect_match:
+        assert len(changes) == 1
+        assert changes[0]["amounts"]
+    else:
+        assert changes == []
+
+
+def test_amount_changes_from_diff() -> None:
+    a = "Quote total: $1,000\nNotes\n"
+    b = "Quote total: $1,250.00\nNotes\nExtra €40 fee\n"
+    diff = diff_lines(a, b, context=1)
+    amounts = amount_changes_from_hunks(diff["hunks"])
+    joined = " ".join(c["text"] for c in amounts)
+    found = " ".join(x for c in amounts for x in c["amounts"])
+    assert "$1,000" in joined or "$1,000" in found
+    assert "1,250" in joined or "1,250" in found
+    assert "€40" in joined or "40" in found
+    assert all(c["kind"] in ("add", "del") for c in amounts)
+
+
+# --- version family endpoint ---
+
+
+def test_family_statement_shape_and_confidence(
+    db_pool: ConnectionPool, db_client: TestClient
+) -> None:
+    shared_thread = "thread-roof-family"
+    # v3 estimate (seed) — self is exact-duplicate (same sha256 as seed)
+    s1 = _seed_attachment(
+        db_pool,
+        filename="Final_Roof_Estimate_v3.pdf",
+        content_type="application/pdf",
+        storage_path="fam/v3.pdf",
+        sha256=hashlib.sha256(b"estimate-v3-content").hexdigest(),
+        sender_address="contractor@example.com",
+        sender_name="Contractor",
+        date="2015-06-01T12:00:00+00:00",
+        thread_id=shared_thread,
+        markdown="Estimate total: $10,000",
+    )
+    # earlier version same sender, different content (probable-version; never merged)
+    s2 = _seed_attachment(
+        db_pool,
+        filename="final_roof_estimate.pdf",
+        content_type="application/pdf",
+        storage_path="fam/v1.pdf",
+        sha256=hashlib.sha256(b"estimate-v1-content").hexdigest(),
+        sender_address="contractor@example.com",
+        sender_name="Contractor",
+        date="2015-05-01T12:00:00+00:00",
+        thread_id="thread-other-1",
+        markdown="Estimate total: $9,500",
+    )
+    # same thread, version via thread signal
+    s3 = _seed_attachment(
+        db_pool,
+        filename="Final_Roof_Estimate_v2.pdf",
+        content_type="application/pdf",
+        storage_path="fam/v2.pdf",
+        sha256=hashlib.sha256(b"estimate-v2-content").hexdigest(),
+        sender_address="other-on-thread@example.com",
+        sender_name="Other",
+        date="2015-05-15T12:00:00+00:00",
+        thread_id=shared_thread,
+        markdown="Estimate total: $9,800",
+    )
+    # same stem shape but unrelated sender/thread — must NOT join family
+    s4 = _seed_attachment(
+        db_pool,
+        filename="final_roof_estimate_draft.pdf",
+        content_type="application/pdf",
+        storage_path="fam/unrelated.pdf",
+        sha256=hashlib.sha256(b"unrelated").hexdigest(),
+        sender_address="stranger@example.com",
+        sender_name="Stranger",
+        date="2015-07-01T12:00:00+00:00",
+        thread_id="thread-stranger",
+        markdown="nope",
+    )
+    # different stem entirely
+    s5 = _seed_attachment(
+        db_pool,
+        filename="roof_photos.zip",
+        content_type="application/zip",
+        storage_path="fam/photos.zip",
+        sha256=hashlib.sha256(b"photos").hexdigest(),
+        sender_address="contractor@example.com",
+        sender_name="Contractor",
+        date="2015-06-03T12:00:00+00:00",
+        thread_id=shared_thread,
+        markdown=None,
+        status="failed",
+        reason="unsupported",
+    )
+    seeds = [s1, s2, s3, s4, s5]
+    try:
+        _login(db_client)
+        r = db_client.get(f"/api/attachments/{s1['att_sid']}/family")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == s1["att_sid"]
+        assert body["stem"] == "final_roof_estimate"
+        ids = {c["id"] for c in body["candidates"]}
+        assert s1["att_sid"] in ids
+        assert s2["att_sid"] in ids
+        assert s3["att_sid"] in ids
+        assert s4["att_sid"] not in ids
+        assert s5["att_sid"] not in ids
+        # Distinct content → separate candidates (never auto-collapsed)
+        assert len(ids) == 3
+
+        by_id = {c["id"]: c for c in body["candidates"]}
+        # seed self: exact-duplicate
+        assert by_id[s1["att_sid"]]["confidence"] == "exact-duplicate"
+        assert "sha256" in by_id[s1["att_sid"]]["signals"]
+
+        # s2: different content → probable-version via sender
+        assert by_id[s2["att_sid"]]["confidence"] == "probable-version"
+        assert "stem" in by_id[s2["att_sid"]]["signals"]
+        assert "sender" in by_id[s2["att_sid"]]["signals"]
+        assert by_id[s2["att_sid"]]["sha256"] != by_id[s1["att_sid"]]["sha256"]
+
+        # s3: probable-version via thread
+        assert by_id[s3["att_sid"]]["confidence"] == "probable-version"
+        assert "thread" in by_id[s3["att_sid"]]["signals"]
+
+        for c in body["candidates"]:
+            assert "filename" in c
+            assert "date" in c
+            assert "sender" in c
+            assert "size" in c
+            assert "sha256" in c
+            assert c["confidence"] in ("exact-duplicate", "probable-version")
+            assert isinstance(c["signals"], list)
+
+        # list surfaces family_count > 1 cheaply
+        r_list = db_client.post(
+            "/api/attachments/list",
+            json={"filters": {"filename": "Roof_Estimate"}},
+        )
+        assert r_list.status_code == 200
+        items = r_list.json()["items"]
+        target_ids = {s1["att_sid"], s2["att_sid"], s3["att_sid"]}
+        fam_items = [it for it in items if it["id"] in target_ids]
+        assert fam_items
+        assert all(it.get("family_count", 1) > 1 for it in fam_items)
+    finally:
+        _cleanup_seeds(db_pool, seeds)
+
+
+def test_compare_diff_and_amounts(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    s_a = _seed_attachment(
+        db_pool,
+        filename="quote_v1.pdf",
+        content_type="application/pdf",
+        storage_path="cmp/a.pdf",
+        sha256=hashlib.sha256(b"cmp-a").hexdigest(),
+        date="2015-01-01T12:00:00+00:00",
+        markdown="Roof quote\nTotal: $8,000\nNotes: draft\n",
+    )
+    s_b = _seed_attachment(
+        db_pool,
+        filename="quote_v2.pdf",
+        content_type="application/pdf",
+        storage_path="cmp/b.pdf",
+        sha256=hashlib.sha256(b"cmp-b").hexdigest(),
+        date="2015-02-01T12:00:00+00:00",
+        markdown="Roof quote\nTotal: $9,500.00\nNotes: final\nExtra fee: €120\n",
+    )
+    try:
+        _login(db_client)
+        r = db_client.get(f"/api/attachments/compare?a={s_a['att_sid']}&b={s_b['att_sid']}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["a"]["id"] == s_a["att_sid"]
+        assert body["b"]["id"] == s_b["att_sid"]
+        assert body["a"]["filename"] == "quote_v1.pdf"
+        assert body["b"]["filename"] == "quote_v2.pdf"
+        assert "sha256" in body["a"]
+        assert isinstance(body["hunks"], list)
+        assert body["truncated"] is False
+        # At least one del and one add across hunks
+        kinds = {ln["kind"] for h in body["hunks"] for ln in h["lines"]}
+        assert "del" in kinds
+        assert "add" in kinds
+        assert body["amount_changes"]
+        amount_texts = " ".join(c["text"] for c in body["amount_changes"])
+        assert "$8,000" in amount_texts or "8,000" in amount_texts
+        assert "$9,500" in amount_texts or "9,500" in amount_texts
+    finally:
+        _cleanup_seeds(db_pool, [s_a, s_b])
+
+
+def test_compare_404_missing_extraction(db_pool: ConnectionPool, db_client: TestClient) -> None:
+    s_ok = _seed_attachment(
+        db_pool,
+        filename="ok.pdf",
+        content_type="application/pdf",
+        storage_path="cmp/ok.pdf",
+        markdown="hello",
+        status="extracted",
+    )
+    s_fail = _seed_attachment(
+        db_pool,
+        filename="fail.pdf",
+        content_type="application/pdf",
+        storage_path="cmp/fail.pdf",
+        markdown=None,
+        status="failed",
+        reason="timeout",
+    )
+    try:
+        _login(db_client)
+        r = db_client.get(f"/api/attachments/compare?a={s_ok['att_sid']}&b={s_fail['att_sid']}")
+        assert r.status_code == 404
+        detail = r.json().get("detail", "")
+        assert "missing extraction" in detail.lower() or "timeout" in detail.lower()
+    finally:
+        _cleanup_seeds(db_pool, [s_ok, s_fail])

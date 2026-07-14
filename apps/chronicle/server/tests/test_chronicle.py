@@ -510,6 +510,16 @@ def test_buckets_request_accepts_events_lane() -> None:
     assert "events" in req.lanes
 
 
+def test_buckets_request_accepts_topics_lane() -> None:
+    req = BucketsRequest.model_validate(
+        {
+            "viewport": {"from": "2020-01-01", "to": "2021-01-01"},
+            "lanes": ["messages", "topics"],
+        }
+    )
+    assert "topics" in req.lanes
+
+
 def _cleanup_events_for_lane(pool: ConnectionPool) -> None:
     with pool.connection() as conn:
         conn.execute("DELETE FROM app_events")
@@ -643,6 +653,198 @@ def test_events_lane_cap_and_dismissed_exclusion(
         assert len(lane2["events"]) == EVENTS_LANE_CAP
     finally:
         _cleanup_events_for_lane(db_pool)
+
+
+def _cleanup_topics_lane(pool: ConnectionPool, email_ids: list[Any]) -> None:
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM app_topic_members")
+        conn.execute("DELETE FROM app_topics")
+        for eid in email_ids:
+            conn.execute("DELETE FROM emails WHERE id = %(id)s", {"id": eid})
+        conn.commit()
+
+
+def test_topics_lane_top6_and_viewport(db_client: TestClient, db_pool: ConnectionPool) -> None:
+    """Topics lane: top-6 by volume, viewport restriction, origin on each series."""
+    email_ids: list[Any] = []
+    try:
+        with db_pool.connection() as conn:
+            # 8 topics; volumes 1..8 so top-6 drops the two lowest.
+            topic_ids = []
+            for i in range(8):
+                row = conn.execute(
+                    """
+                    INSERT INTO app_topics (label, origin, hidden, member_count)
+                    VALUES (%(label)s, 'automatic', FALSE, 0)
+                    RETURNING id
+                    """,
+                    {"label": f"TopicLane {i}"},
+                ).fetchone()
+                assert row is not None
+                topic_ids.append(row[0])
+
+            # Hidden topic with high volume must not appear.
+            hidden_row = conn.execute(
+                """
+                INSERT INTO app_topics (label, origin, hidden, member_count)
+                VALUES ('Hidden High', 'automatic', TRUE, 0)
+                RETURNING id
+                """
+            ).fetchone()
+            assert hidden_row is not None
+            hidden_id = hidden_row[0]
+
+            for i, tid in enumerate(topic_ids):
+                vol = i + 1  # topic 7 has most
+                for n in range(vol):
+                    eid = uuid4()
+                    email_ids.append(eid)
+                    conn.execute(
+                        """
+                        INSERT INTO emails (
+                            id, message_id, thread_id, subject,
+                            sender_name, sender_address, sender_domain,
+                            recipients, date, body_text, body_html,
+                            has_attachment, labels, source_account, created_at
+                        ) VALUES (
+                            %(id)s, %(mid)s, %(tid)s, 'topics lane',
+                            'A', 'a@example.com', 'example.com',
+                            '{}'::jsonb, %(date)s, 'b', NULL,
+                            false, %(labels)s, 'topics-lane@example.com', now()
+                        )
+                        """,
+                        {
+                            "id": eid,
+                            "mid": f"<topics-lane-{eid}@example.com>",
+                            "tid": f"thr-{eid}",
+                            "date": datetime(2020, 3, 1 + (n % 20), 12, 0, tzinfo=UTC),
+                            "labels": ["INBOX"],
+                        },
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO app_topic_members (topic_id, email_id, distance, origin)
+                        VALUES (%(tid)s, %(eid)s, 0.1, 'automatic')
+                        """,
+                        {"tid": tid, "eid": eid},
+                    )
+
+            # Hidden: 50 members inside viewport
+            for _n in range(50):
+                eid = uuid4()
+                email_ids.append(eid)
+                conn.execute(
+                    """
+                    INSERT INTO emails (
+                        id, message_id, thread_id, subject,
+                        sender_name, sender_address, sender_domain,
+                        recipients, date, body_text, body_html,
+                        has_attachment, labels, source_account, created_at
+                    ) VALUES (
+                        %(id)s, %(mid)s, %(tid)s, 'hidden',
+                        'A', 'a@example.com', 'example.com',
+                        '{}'::jsonb, %(date)s, 'b', NULL,
+                        false, %(labels)s, 'topics-lane@example.com', now()
+                    )
+                    """,
+                    {
+                        "id": eid,
+                        "mid": f"<hidden-lane-{eid}@example.com>",
+                        "tid": f"thr-{eid}",
+                        "date": datetime(2020, 5, 1, 12, 0, tzinfo=UTC),
+                        "labels": ["INBOX"],
+                    },
+                )
+                conn.execute(
+                    """
+                    INSERT INTO app_topic_members (topic_id, email_id, distance, origin)
+                    VALUES (%(tid)s, %(eid)s, 0.1, 'automatic')
+                    """,
+                    {"tid": hidden_id, "eid": eid},
+                )
+
+            # Outside-viewport member for topic 7 only — should not count in ranking.
+            eid_out = uuid4()
+            email_ids.append(eid_out)
+            conn.execute(
+                """
+                INSERT INTO emails (
+                    id, message_id, thread_id, subject,
+                    sender_name, sender_address, sender_domain,
+                    recipients, date, body_text, body_html,
+                    has_attachment, labels, source_account, created_at
+                ) VALUES (
+                    %(id)s, %(mid)s, %(tid)s, 'outside',
+                    'A', 'a@example.com', 'example.com',
+                    '{}'::jsonb, %(date)s, 'b', NULL,
+                    false, %(labels)s, 'topics-lane@example.com', now()
+                )
+                """,
+                {
+                    "id": eid_out,
+                    "mid": f"<out-lane-{eid_out}@example.com>",
+                    "tid": f"thr-{eid_out}",
+                    "date": datetime(2018, 1, 1, 12, 0, tzinfo=UTC),
+                    "labels": ["INBOX"],
+                },
+            )
+            conn.execute(
+                """
+                INSERT INTO app_topic_members (topic_id, email_id, distance, origin)
+                VALUES (%(tid)s, %(eid)s, 0.1, 'automatic')
+                """,
+                {"tid": topic_ids[7], "eid": eid_out},
+            )
+            conn.commit()
+
+        _login(db_client)
+        payload = {
+            "scope": {"mailboxes": ["topics-lane@example.com"]},
+            "viewport": {"from": "2020-01-01T00:00:00Z", "to": "2021-01-01T00:00:00Z"},
+            "pixel_width": 920,
+            "aggregation": "month",
+            "lanes": ["topics"],
+        }
+        r = db_client.post("/api/chronicle/buckets", json=payload)
+        assert r.status_code == 200, r.text
+        lane = r.json()["lanes"]["topics"]
+        assert isinstance(lane, dict)
+        topics = lane["topics"]
+        assert isinstance(topics, list)
+        assert len(topics) <= 6
+        assert len(topics) == 6
+        # Hidden excluded
+        labels = {t["label"] for t in topics}
+        assert "Hidden High" not in labels
+        # Lowest volumes dropped (TopicLane 0 and 1)
+        assert "TopicLane 0" not in labels
+        assert "TopicLane 1" not in labels
+        assert "TopicLane 7" in labels
+        # Ranked by volume desc; origin present
+        totals = []
+        for t in topics:
+            assert "topic_id" in t
+            assert "label" in t
+            assert "origin" in t
+            assert isinstance(t["buckets"], list)
+            totals.append(sum(pt["count"] for pt in t["buckets"]))
+        assert totals == sorted(totals, reverse=True)
+
+        # Outside viewport → empty
+        r_empty = db_client.post(
+            "/api/chronicle/buckets",
+            json={
+                **payload,
+                "viewport": {
+                    "from": "2010-01-01T00:00:00Z",
+                    "to": "2011-01-01T00:00:00Z",
+                },
+            },
+        )
+        assert r_empty.status_code == 200
+        assert r_empty.json()["lanes"]["topics"]["topics"] == []
+    finally:
+        _cleanup_topics_lane(db_pool, email_ids)
 
 
 # --- compare mode ---

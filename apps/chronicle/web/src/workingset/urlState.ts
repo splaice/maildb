@@ -38,6 +38,16 @@ export type ViewMode = 'canvas' | 'table'
 /** Files lens view mode (URL param `fv`). */
 export type FilesViewMode = 'table' | 'gallery'
 
+/** Topic Atlas view mode (URL param `tv`). Default hierarchy — TA-001. */
+export type TopicViewMode = 'hierarchy' | 'river' | 'matrix' | 'projection'
+
+const TOPIC_VIEWS: ReadonlySet<string> = new Set([
+  'hierarchy',
+  'river',
+  'matrix',
+  'projection',
+])
+
 /** Research Desk grouping (URL param `grp`). */
 export type ResearchGrouping = 'none' | 'thread' | 'year' | 'mailbox'
 
@@ -56,6 +66,7 @@ export type Selection =
   | { kind: 'message'; sid: string }
   | { kind: 'attachment'; sid: string }
   | { kind: 'event'; eventId: string }
+  | { kind: 'topic'; topicId: string }
   | null
 
 /** Serializable working-set slice for the URL codec. */
@@ -91,6 +102,21 @@ export interface UrlWorkingState {
   filesView?: FilesViewMode
   /** Files lens filename query (URL param `fq`). */
   filesQuery?: string
+  /**
+   * Topic Atlas view (URL param `tv`). Optional so store-driven encodes that
+   * omit it preserve the current location value. Default hierarchy (TA-001).
+   */
+  topicView?: TopicViewMode
+  /**
+   * Topic Atlas selected topic id (URL param `tsel`). Optional preserve like
+   * filesView; keeps topic context when inspector selection becomes a message.
+   */
+  topicSelected?: string | null
+  /**
+   * People lens search query (URL param `pq`). Optional so store-driven
+   * encodes that omit it preserve the current location value.
+   */
+  peopleQuery?: string
 }
 
 export const DEFAULT_URL_STATE: UrlWorkingState = {
@@ -107,6 +133,9 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
   grouping: 'none',
   filesView: 'table',
   filesQuery: '',
+  topicView: 'hierarchy',
+  topicSelected: null,
+  peopleQuery: '',
 }
 
 /**
@@ -115,6 +144,7 @@ export const DEFAULT_URL_STATE: UrlWorkingState = {
  * - message: `m:<sid>`
  * - attachment: `a:<sid>`
  * - event: `e:<event_id>`
+ * - topic: `t:<topic_id>`
  */
 export function encodeSelection(selection: Selection): string | null {
   if (!selection) return null
@@ -133,6 +163,10 @@ export function encodeSelection(selection: Selection): string | null {
   if (selection.kind === 'event') {
     if (!selection.eventId) return null
     return `e:${selection.eventId}`
+  }
+  if (selection.kind === 'topic') {
+    if (!selection.topicId) return null
+    return `t:${selection.topicId}`
   }
   return null
 }
@@ -170,7 +204,18 @@ export function decodeSelection(raw: string | null): Selection {
     if (!eventId || !/^[A-Za-z0-9_-]+$/.test(eventId)) return null
     return { kind: 'event', eventId }
   }
+  if (raw.startsWith('t:')) {
+    const topicId = raw.slice(2)
+    // UUID (with hyphens) or opaque non-empty id.
+    if (!topicId || !/^[A-Za-z0-9_-]+$/.test(topicId)) return null
+    return { kind: 'topic', topicId }
+  }
   return null
+}
+
+export function parseTopicView(value: string | null): TopicViewMode {
+  if (value && TOPIC_VIEWS.has(value)) return value as TopicViewMode
+  return 'hierarchy'
 }
 
 /** Format epoch ms as UTC ISO datetime with second precision (`…Z`, no ms). */
@@ -393,6 +438,44 @@ export function encodeState(state: UrlWorkingState): URLSearchParams {
   const fq = (filesQuery ?? '').trim()
   if (fq) params.set('fq', fq)
 
+  // Topic Atlas: tv / tsel. When omitted from state, preserve from location
+  // so store-driven rewrites (selection etc.) do not wipe atlas params.
+  let topicView = state.topicView
+  let topicSelected = state.topicSelected
+  if (
+    typeof window !== 'undefined' &&
+    (topicView === undefined || topicSelected === undefined)
+  ) {
+    try {
+      const current = new URLSearchParams(window.location.search)
+      if (topicView === undefined) {
+        topicView = parseTopicView(current.get('tv'))
+      }
+      if (topicSelected === undefined) {
+        topicSelected = current.get('tsel')
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (topicView && topicView !== 'hierarchy') params.set('tv', topicView)
+  const tsel = (topicSelected ?? '').trim()
+  if (tsel) params.set('tsel', tsel)
+
+  // People lens: pq. When omitted from state, preserve from current location
+  // so store-driven URL rewrites do not wipe people search.
+  let peopleQuery = state.peopleQuery
+  if (typeof window !== 'undefined' && peopleQuery === undefined) {
+    try {
+      const current = new URLSearchParams(window.location.search)
+      peopleQuery = current.get('pq') ?? ''
+    } catch {
+      peopleQuery = ''
+    }
+  }
+  const pq = (peopleQuery ?? '').trim()
+  if (pq) params.set('pq', pq)
+
   return params
 }
 
@@ -449,6 +532,9 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
   const filesView: FilesViewMode =
     params.get('fv') === 'gallery' ? 'gallery' : 'table'
   const filesQuery = params.get('fq') ?? ''
+  const topicView = parseTopicView(params.get('tv'))
+  const topicSelected = params.get('tsel')
+  const peopleQuery = params.get('pq') ?? ''
 
   return {
     scope,
@@ -464,6 +550,9 @@ export function decodeState(params: URLSearchParams): UrlWorkingState {
     grouping,
     filesView,
     filesQuery,
+    topicView,
+    topicSelected,
+    peopleQuery,
   }
 }
 
