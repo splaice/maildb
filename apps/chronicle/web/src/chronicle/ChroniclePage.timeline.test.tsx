@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChronicleBuckets } from '../api/types'
 import {
@@ -7,6 +7,7 @@ import {
   mockSessionOk,
   renderApp,
 } from '../test/test-utils'
+import { resetWorkingSetStore } from '../workingset/store'
 
 function mockBuckets(overrides: Partial<ChronicleBuckets> = {}): Response {
   const body: ChronicleBuckets = {
@@ -55,8 +56,15 @@ function installFetch(
 }
 
 describe('ChroniclePage timeline', () => {
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
   })
 
   it('bootstrap sets viewport to extent', async () => {

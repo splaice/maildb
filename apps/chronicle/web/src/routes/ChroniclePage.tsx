@@ -12,6 +12,7 @@ import {
   zoomViewport,
 } from '../chronicle/timeScale'
 import { useChronicleBuckets } from '../chronicle/useChronicleBuckets'
+import { useWorkingSetStore } from '../workingset/store'
 import { useArchiveSummary } from './useArchiveSummary'
 
 function SummarySkeleton() {
@@ -115,16 +116,30 @@ function extentFromResponse(
   return { fromMs, toMs }
 }
 
+function sumLaneCounts(points: { count: number }[] | undefined): number {
+  if (!points) return 0
+  return points.reduce((acc, p) => acc + (p.count ?? 0), 0)
+}
+
 export function ChroniclePage() {
   const archive = useArchiveSummary()
 
-  // Owns viewport, brush, viewMode state.
-  // Bootstrap: fetch once with sentinel full-range viewport 1970-01-01..2100-01-01,
-  // then set viewport := extent from the first response.
-  const [viewport, setViewport] = useState<Viewport | null>(null)
-  const [brush, setBrush] = useState<Viewport | null>(null)
-  const [viewMode, setViewMode] = useState<'canvas' | 'table'>('canvas')
+  // Viewport / scope / view / brush come from the shared working-set store.
+  // Bootstrap: if URL had no viewport, fetch with sentinel full-range
+  // 1970-01-01..2100-01-01, then set viewport := extent (transient → replace-state).
+  const viewport = useWorkingSetStore((s) => s.viewport)
+  const brush = useWorkingSetStore((s) => s.brush)
+  const viewMode = useWorkingSetStore((s) => s.view)
+  const scope = useWorkingSetStore((s) => s.scope)
+  const setViewport = useWorkingSetStore((s) => s.setViewport)
+  const setBrush = useWorkingSetStore((s) => s.setBrush)
+  const applyBrushAsViewport = useWorkingSetStore((s) => s.applyBrushAsViewport)
+  const setView = useWorkingSetStore((s) => s.setView)
+  const setResultCount = useWorkingSetStore((s) => s.setResultCount)
+
   const [pixelWidth, setPixelWidth] = useState(920)
+  // False until URL hydrate or extent bootstrap resolves (layout hydrate may set
+  // viewport after this component's first render).
   const [bootstrapped, setBootstrapped] = useState(false)
 
   const activeViewport = viewport ?? BOOTSTRAP_VIEWPORT
@@ -132,6 +147,7 @@ export function ChroniclePage() {
   const buckets = useChronicleBuckets({
     viewport: activeViewport,
     pixelWidth,
+    scope,
     enabled: pixelWidth > 0,
   })
 
@@ -142,9 +158,14 @@ export function ChroniclePage() {
     return null
   }, [buckets.data?.extent])
 
-  // Apply bootstrap: first response with extent sets viewport := extent
+  // Apply bootstrap: if store/URL already has a viewport, mark done; otherwise
+  // first response with extent sets viewport := extent (transient → replace-state).
   useEffect(() => {
     if (bootstrapped) return
+    if (viewport != null) {
+      setBootstrapped(true)
+      return
+    }
     if (!buckets.data?.extent) return
     const ext = extentFromResponse(buckets.data.extent.from, buckets.data.extent.to)
     if (!ext) {
@@ -153,7 +174,13 @@ export function ChroniclePage() {
     }
     setViewport(ext)
     setBootstrapped(true)
-  }, [bootstrapped, buckets.data?.extent])
+  }, [bootstrapped, buckets.data?.extent, setViewport, viewport])
+
+  // Live result framing for the scope bar.
+  useEffect(() => {
+    if (!buckets.data) return
+    setResultCount(sumLaneCounts(buckets.data.lanes.messages))
+  }, [buckets.data, setResultCount])
 
   const applyViewport = useCallback(
     (next: Viewport) => {
@@ -163,7 +190,7 @@ export function ChroniclePage() {
         setViewport(next)
       }
     },
-    [extent],
+    [extent, setViewport],
   )
 
   const onWidthChange = useCallback((w: number) => {
@@ -203,7 +230,7 @@ export function ChroniclePage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [zoomAroundCenter])
+  }, [setBrush, zoomAroundCenter])
 
   const messages = buckets.data?.lanes.messages ?? []
   const attachments = buckets.data?.lanes.attachments ?? []
@@ -230,14 +257,11 @@ export function ChroniclePage() {
               if (extent) applyViewport(extent)
             }}
             onZoomToSelection={() => {
-              if (brush) {
-                applyViewport(brush)
-                setBrush(null)
-              }
+              applyBrushAsViewport()
             }}
             onClearSelection={() => setBrush(null)}
             onToggleViewMode={() =>
-              setViewMode((m) => (m === 'canvas' ? 'table' : 'canvas'))
+              setView(viewMode === 'canvas' ? 'table' : 'canvas')
             }
           />
         ) : null}

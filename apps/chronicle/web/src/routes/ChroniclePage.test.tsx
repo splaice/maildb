@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   mockArchiveSummary,
@@ -7,6 +7,7 @@ import {
   mockUnauthorized,
   renderApp,
 } from '../test/test-utils'
+import { resetWorkingSetStore, useWorkingSetStore } from '../workingset/store'
 
 function mockBucketsOk() {
   return {
@@ -26,8 +27,15 @@ function mockBucketsOk() {
 }
 
 describe('Archive summary panel', () => {
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
   })
 
   it('renders mocked ArchiveSummary counts', async () => {
@@ -116,5 +124,70 @@ describe('Archive summary panel', () => {
 
     expect(await screen.findByLabelText(/username/i)).toBeInTheDocument()
     expect(screen.queryByTestId('workstation-shell')).not.toBeInTheDocument()
+  })
+})
+
+describe('ChroniclePage working-set wiring', () => {
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    window.history.replaceState(null, '', '/')
+    resetWorkingSetStore()
+  })
+
+  it('sends store scope on buckets request', async () => {
+    // Deep-link scope so mount hydrate restores it before the buckets fetch.
+    window.history.replaceState(
+      null,
+      '',
+      '/?mb=me%40example.com&df=2014-01-01&dt=2018-01-01',
+    )
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/auth/session')) return mockSessionOk()
+      if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+      if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp(['/'])
+
+    await waitFor(() => {
+      const scoped = fetchMock.mock.calls.some((c) => {
+        if (!String(c[0]).includes('/api/chronicle/buckets')) return false
+        const body = JSON.parse(String((c[1] as RequestInit).body)) as {
+          scope: { mailboxes?: string[]; date?: { from?: string; to?: string } }
+        }
+        return (
+          body.scope?.mailboxes?.[0] === 'me@example.com' &&
+          body.scope?.date?.from === '2014-01-01'
+        )
+      })
+      expect(scoped).toBe(true)
+    })
+  })
+
+  it('View as table toggles store view', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/api/auth/session')) return mockSessionOk()
+        if (String(url).includes('/api/archive/summary')) return mockArchiveSummary()
+        if (String(url).includes('/api/chronicle/buckets')) return mockBucketsOk()
+        throw new Error(`unexpected fetch: ${url}`)
+      }),
+    )
+
+    renderApp(['/'])
+    expect(await screen.findByTestId('visible-period')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /view as table/i }))
+    expect(useWorkingSetStore.getState().view).toBe('table')
+    expect(await screen.findByTestId('timeline-table')).toBeInTheDocument()
   })
 })
