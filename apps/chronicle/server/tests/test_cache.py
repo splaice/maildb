@@ -338,8 +338,6 @@ def test_search_facets_cached_results_live(
         assert b3["facets"] is not None
     finally:
         with db_pool.connection() as conn:
-            conn.execute(
-                "DELETE FROM emails WHERE message_id LIKE '<facet-%%@example.com>'"
-            )
+            conn.execute("DELETE FROM emails WHERE message_id LIKE '<facet-%%@example.com>'")
             conn.commit()
         _clear_cache(db_pool)
